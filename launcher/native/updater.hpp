@@ -15,7 +15,7 @@
 
 namespace mhf::launcher::update {
 
-inline constexpr const char *kLatestRelease = "https://api.github.com/repos/Mango77x/MHForever/releases/latest";
+inline constexpr const char *kLatestRelease = "https://api.github.com/repos/Yusepp/MHForever/releases/latest";
 
 struct Release {
     std::string version;      // "0.6.3"
