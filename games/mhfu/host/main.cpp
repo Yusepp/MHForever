@@ -8,6 +8,7 @@
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
 //             [--mouse-camera [--mouse-camera-speed 25-300]]
 //             [--horn-songs [--horn-songs-place next-to-sheet|top-middle|under-names|bottom-left|custom:X,Y]]
+//             [--guild-quest-scaling]
 //             [--projected-shadows [--no-whole-map-shadows] [--shadow-quality 0-2] [--shadow-darkness 0-100]]
 //             [--music-volume 0-100] [--sfx-volume 0-100] [--font <font file>]
 //             [--language en|fr|de|es|it|jp]
@@ -27,6 +28,7 @@
 
 #include "host/keymap.hpp"
 #include "host/padmap.hpp"
+#include "guild_scaling.hpp"
 
 #if !__has_include("mhfu_region_data.hpp")
 #error "mhfu_region_data.hpp is missing from MHF_MHFU_GENERATED: re-run games/mhfu/tools/prepare.py"
@@ -223,6 +225,58 @@ constexpr std::uint8_t kFastSupplyBoxFrames = 2;          // what is left of it:
 
 // Hook on mh_supply_box_update(?, Player*), before the game counts the cooldown down.
 std::atomic<bool> g_fast_supply_box{false}; // the in-game menu turns it on and off while playing
+
+// --guild-quest-scaling. Scales large-monster HP and part-stagger thresholds in Guild Hall and Guild Event quests
+// according to the active human hunter count (1P/2P/3P/4P), anchored at vanilla's 2-player baseline.
+constexpr mhf::mhfu::GuildScalingSymbols kGuildScalingSymbols{
+    region::mh_quest_manager, region::mh_player_manager, region::mh_enemy_species_table};
+constexpr bool kGuildScalingMapped = kGuildScalingSymbols.valid();
+std::atomic<bool> g_guild_quest_scaling{false};
+mhf::mhfu::GuildQuestScaling g_guild_scaling{kGuildScalingSymbols};
+
+bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
+    const mhf::psp::Program *overlay = rt.active_overlay_at(address);
+    return overlay != nullptr && std::string_view(overlay->name).ends_with("_ovl_game_task");
+}
+
+void on_enemy_hp_begin(Runtime &, Context &ctx) {
+    if constexpr (kGuildScalingMapped) g_guild_scaling.on_enemy_hp_begin(ctx.gpr[4]);
+    else (void)ctx;
+}
+
+void on_enemy_hp_computed(Runtime &rt, Context &ctx) {
+    if constexpr (kGuildScalingMapped) {
+        ctx.fpr[0] = g_guild_scaling.on_enemy_hp_computed(rt.memory(), static_cast<std::uint8_t>(ctx.gpr[6]),
+                                                          ctx.fpr[0], g_guild_quest_scaling.load());
+    } else {
+        (void)rt;
+        (void)ctx;
+    }
+}
+
+void on_enemy_stagger_store(Runtime &rt, Context &ctx) {
+    if constexpr (kGuildScalingMapped) {
+        const std::int16_t scaled = g_guild_scaling.on_enemy_stagger_store(
+            rt.memory(), ctx.gpr[18], static_cast<std::uint8_t>(ctx.gpr[7]), ctx.gpr[17],
+            static_cast<std::int16_t>(ctx.gpr[3]), g_guild_quest_scaling.load());
+        ctx.set_gpr(3, static_cast<std::uint32_t>(static_cast<std::uint16_t>(scaled)));
+    } else {
+        (void)rt;
+        (void)ctx;
+    }
+}
+
+void update_guild_quest_scaling(Runtime &rt) {
+    if constexpr (kGuildScalingMapped) {
+        if (!quest_overlay_at(rt, *region::mh_enemy_species_table)) {
+            g_guild_scaling.clear();
+            return;
+        }
+        g_guild_scaling.sync(rt.memory(), g_guild_quest_scaling.load());
+    } else {
+        (void)rt;
+    }
+}
 
 // The game's wait for its draw-done flag (region map mh_draw_wait): it reads the flag in a loop until an interrupt (a
 // finished display list) sets it, which kept a core busy for as long as the drawing took and slowed busy scenes on
@@ -939,6 +993,7 @@ int main(int argc, char **argv) {
     bool analog_camera = false; // --analog-camera: the right stick turns and tilts the camera by how far it is pushed
     bool horn_songs = false; // --horn-songs: the hunting horn's songs over the quest HUD (enhancement)
     std::string horn_songs_place = "next-to-sheet"; // --horn-songs-place: where (overlay/song_panel.hpp, parse_song_spot)
+    bool guild_quest_scaling = false; // --guild-quest-scaling: dynamic 1P-4P scaling for Guild Hall/Event quests
     mhf::host::KeyBindings keyboard; // --keymap: the launcher's keyboard bindings
     mhf::host::PadBindings controller; // --padmap: the launcher's controller bindings
     std::string controls_file;         // --controls-file: where the in-game menu writes the bindings the player changes
@@ -986,6 +1041,7 @@ int main(int argc, char **argv) {
             g_mouse_speed = static_cast<float>(std::clamp(std::stoi(argv[++i]), 25, 300)) / 100.0f; // in percent
         else if (a == "--horn-songs") horn_songs = true; // enhancement
         else if (a == "--horn-songs-place" && i + 1 < argc) horn_songs_place = argv[++i];
+        else if (a == "--guild-quest-scaling") guild_quest_scaling = true; // enhancement, off by default
         else if (a == "--music-volume" && i + 1 < argc) options.music_volume = std::clamp(std::stoi(argv[++i]), 0, 100);
         else if (a == "--sfx-volume" && i + 1 < argc) options.sfx_volume = std::clamp(std::stoi(argv[++i]), 0, 100);
         else if (a == "--language" && i + 1 < argc) {
@@ -1061,6 +1117,14 @@ int main(int argc, char **argv) {
         // Hooks that read a switch every time, so the in-game menu can turn their enhancement on and off.
         g_fast_supply_box = fast_supply_box;
         runtime.register_hook("mh_supply_box_update", &on_supply_box_update);
+        g_guild_quest_scaling = guild_quest_scaling && kGuildScalingMapped;
+        if constexpr (kGuildScalingMapped) {
+            runtime.register_hook("mh_enemy_hp_begin", &on_enemy_hp_begin);
+            runtime.register_hook("mh_enemy_hp_computed", &on_enemy_hp_computed);
+            runtime.register_hook("mh_enemy_stagger_store", &on_enemy_stagger_store);
+        } else if (guild_quest_scaling) {
+            std::fprintf(stderr, "[mhfu] --guild-quest-scaling: not mapped for this release, ignored\n");
+        }
         runtime.register_hook("mh_draw_wait", &on_draw_wait); // sleeps through the game's wait for its drawing
         if (smithy_layout) smithy_browse = true; // the layout scrolls the list with Info open
         if (smithy_browse && kSmithyBrowseMapped) {
@@ -1165,6 +1229,15 @@ int main(int argc, char **argv) {
                 if (previous) previous();
             };
         }
+        if (kGuildScalingMapped && (guild_quest_scaling || window)) {
+            extra = [rt = &runtime, checked_at = std::uint64_t{0}, previous = std::move(extra)]() mutable {
+                if (const std::uint64_t now = rt->now_us(); now - checked_at >= 200'000) {
+                    checked_at = now;
+                    update_guild_quest_scaling(*rt);
+                }
+                if (previous) previous();
+            };
+        }
 #if defined(MHF_HAS_FRONTEND)
         mhf::psp::Frontend frontend;
         if (window && frontend.open(window_title(options.disc_image).c_str(), false, 2, !software, render_scale, fullscreen, smooth_textures, target_fps, keyboard, controller)) {
@@ -1206,6 +1279,13 @@ int main(int argc, char **argv) {
                                       "Shortens the delay between items taken from the supply box.",
                                       false, g_fast_supply_box ? 1 : 0, 0, 1, 1, "",
                                       [](int v) { g_fast_supply_box = v != 0; }});
+            if constexpr (kGuildScalingMapped) {
+                frontend.add_game_option(
+                    {"guildQuestScaling", "Dynamic Guild quest scaling",
+                     "Scales large-monster HP and part stagger in Guild quests to the active hunter count (1-4 players).",
+                     false, g_guild_quest_scaling ? 1 : 0, 0, 1, 1, "",
+                     [](int v) { g_guild_quest_scaling = v != 0; }});
+            }
             {
                 frontend.add_game_option({"analogCamera", "Analog camera",
                                           "The right stick turns and tilts the camera in proportion to how far it is pushed.",
