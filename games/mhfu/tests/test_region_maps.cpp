@@ -86,7 +86,7 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
               std::set<std::string>({"mh_camera_aspect_made", "mh_camera_aspect_reset", "mh_camera_aspect_culling"}));
     for (const char *table : {"mh_smithy_panel_layout", "mh_smithy_side_layout", "mh_smithy_question_box",
                               "mh_smithy_skill_info_hint", "mh_smithy_model_scissor", "mh_smithy_panel_draw_entry",
-                              "mh_pad_input", "mh_draw_done"}) {
+                              "mh_pad_input", "mh_draw_done", "mh_quest_manager"}) {
         MHF_CHECK(entries.contains(table) && entries.at(table).has_value());
     }
     MHF_CHECK(entries.contains("mh_smithy_create_info_setup") && entries.at("mh_smithy_create_info_setup").has_value());
