@@ -81,6 +81,11 @@ system_active_overlays  = 0x00F7A580 # u16[6] inside System, active DATA.BIN fil
 # move (and paging) while the R panel is open (a test of flag 0x20; immediate 0 never finds it set) and while
 # Info is open (a branch on the Info level, never taken).
 [patches]
+
+# Key quest marker: collect only titles drawn during this complete lobby UI pass.
+mh_quest_markers_begin = "lobby_task.ovl 0x09A6C1F8 call"
+mh_quest_markers_title = "lobby_task.ovl 0x09A8CD7C call"
+mh_quest_markers_end = "lobby_task.ovl 0x09A6C204 call"
 mh_smithy_create_requires_blocks_up_down     = "lobby_task.ovl 0x09AA2F3C immediate 0"
 mh_smithy_create_requires_blocks_paging      = "lobby_task.ovl 0x09AA3000 immediate 0"
 mh_smithy_create_info_blocks_up_down         = "lobby_task.ovl 0x09AA2F30 never"
