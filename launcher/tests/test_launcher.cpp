@@ -330,6 +330,15 @@ int main(int argc, char **argv) {
         CHECK(l.state()["settings"]["widescreen"].as_bool()); // not a bool: unchanged
         wide["widescreen"] = false;
         l.set_settings(wide);
+        // Key quest markers are opt-in, accept only booleans and survive the game's settings round trip.
+        CHECK(!l.state()["settings"]["keyQuestMarkers"].as_bool(true));
+        Json markers;
+        markers["keyQuestMarkers"] = true;
+        l.set_settings(markers);
+        CHECK(l.state()["settings"]["keyQuestMarkers"].as_bool());
+        markers["keyQuestMarkers"] = "false";
+        l.set_settings(markers);
+        CHECK(l.state()["settings"]["keyQuestMarkers"].as_bool());
         // Hunting horn songs: off by default, a bool turns them on, anything else is ignored.
         CHECK(!l.state()["settings"]["hornSongs"].as_bool(true));
         Json horn;
@@ -483,7 +492,7 @@ int main(int argc, char **argv) {
                                              << "option.packMipmaps=true\noption.anisotropy=8\n"
                                              << "option.projectedShadows=true\noption.wholeMapShadows=false\n"
                                              << "option.shadowQuality=1\noption.shadowDarkness=70\n"
-                                             << "option.widescreen=true\n";
+                                             << "option.widescreen=true\noption.keyQuestMarkers=false\n";
         }
         l.import_game_controls();
         CHECK(l.state()["settings"]["packMipmaps"].as_bool()); // the texture pack filtering from the Video tab
@@ -493,6 +502,7 @@ int main(int argc, char **argv) {
         CHECK(l.state()["settings"]["shadowQuality"].as_number() == 1);
         CHECK(l.state()["settings"]["shadowDarkness"].as_number() == 70);
         CHECK(l.state()["settings"]["widescreen"].as_bool()); // widescreen from the Video tab
+        CHECK(!l.state()["settings"]["keyQuestMarkers"].as_bool(true));
         CHECK(l.state()["settings"]["hornSongs"].as_bool());
         CHECK(l.state()["settings"]["hudSize"].as_number() == 70);
         CHECK(l.state()["settings"]["fastSupplyBox"].as_bool());
@@ -1126,6 +1136,17 @@ int main(int argc, char **argv) {
             l.set_settings(shadows);
             const auto off_but_kept = l.plan_launch("mhfu");
             CHECK(!has(off_but_kept.args, "--projected-shadows") && value_of(off_but_kept.args, "--shadow-quality") == "2");
+
+            // Key quest markers reach the game only when enabled.
+            Json markers;
+            markers["keyQuestMarkers"] = false;
+            l.set_settings(markers);
+            CHECK(!has(l.plan_launch("mhfu").args, "--key-quest-markers"));
+            markers["keyQuestMarkers"] = true;
+            l.set_settings(markers);
+            CHECK(has(l.plan_launch("mhfu").args, "--key-quest-markers"));
+            markers["keyQuestMarkers"] = false;
+            l.set_settings(markers);
 
             // Widescreen reaches the game as a switch, only when on.
             Json wide;
