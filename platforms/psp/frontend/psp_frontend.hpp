@@ -94,6 +94,10 @@ public:
     // its quest HUD and no menu, system dialog or notice is up; std::nullopt (no horn, not in a quest) hides them. Only
     // the OpenGL renderer finds the quest HUD, so the software renderer never shows them.
     void set_song_panel(std::optional<overlay::SongPanel> panel);
+    // A game's own transparent 480x272 image, in premultiplied RGBA. A null image hides it. Reuse the same shared
+    // image until its pixels change; the frontend uploads it only on a change and gives menus and dialogs priority.
+    void set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image);
+
     // Mouse look: while `wanted` says so and the game has the input (no menu, system dialog or song placing), the mouse
     // is held in the window and its motion reaches the game's hooks (ControllerState::mouse_x and mouse_y). Asked on the
     // game's thread at every poll.

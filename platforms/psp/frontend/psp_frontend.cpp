@@ -186,7 +186,8 @@ struct Frontend::Impl {
     std::chrono::steady_clock::time_point quest_hud_seen{};
     // Whose picture the overlay holds (written with overlay.mutex held): the songs give way to everything else and only
     // ever take down their own picture.
-    enum class OverlayOwner { none, menu, dialog, notice, songs };
+    std::shared_ptr<const std::vector<std::uint32_t>> game_image, game_image_shown;
+    enum class OverlayOwner { none, menu, dialog, notice, songs, game };
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
     bool dialog_stop{};
     std::filesystem::path font_directory;
@@ -403,6 +404,25 @@ void Frontend::offer_songs(bool on, overlay::SongSpot spot) {
 void Frontend::add_game_option(GameOption option) { impl_->game_options.push_back(std::move(option)); }
 
 void Frontend::set_mouse_look(std::function<bool()> wanted) { impl_->mouse_look = std::move(wanted); }
+
+void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image) {
+    if (image && image->size() != 480u * 272u) image.reset();
+    Impl &impl = *impl_;
+    impl.game_image = image;
+    if (impl.gpu_state != 1) return;
+    std::lock_guard lock(impl.overlay.mutex);
+    const auto owner = impl.overlay_owner.load();
+    if (impl.menu_open || impl.dialog_visible || (owner != Impl::OverlayOwner::none && owner != Impl::OverlayOwner::game)) return;
+    if (image == impl.game_image_shown && (image ? owner == Impl::OverlayOwner::game : owner == Impl::OverlayOwner::none)) return;
+    impl.overlay.pixels = image ? *image : std::vector<std::uint32_t>{};
+    impl.overlay.width = image ? 480 : 0;
+    impl.overlay.height = image ? 272 : 0;
+    impl.overlay.aspect = 0.0f;
+    impl.overlay.visible = image != nullptr;
+    impl.overlay_owner = image ? Impl::OverlayOwner::game : Impl::OverlayOwner::none;
+    impl.game_image_shown = std::move(image);
+    ++impl.overlay.generation;
+}
 
 void Frontend::set_song_panel(std::optional<overlay::SongPanel> panel) {
     if (panel) impl_->songs_seen = panel;
@@ -1977,6 +1997,7 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
             if (vblank != impl->last_vblank && impl->gpu_state == 2) {
                 impl->last_vblank = vblank;
                 copy_frame(*runtime, impl->frame);
+                if (!impl->menu_open && !impl->dialog_visible && impl->game_image) blend_over(impl->frame, *impl->game_image);
                 if (impl->menu_open) {
                     blend_over(impl->frame, impl->soft_menu);
                 } else if (impl->dialog_visible) {
