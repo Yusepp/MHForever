@@ -637,6 +637,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.gatheringAssistance ?? false} onToggle={() => onChange({ gatheringAssistance: !(s.gatheringAssistance ?? false) })} label="Gathering assistance" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Show key quest markers</b><span>Marks Village and Guild Hall key quests with a gold key, including completed quests.</span></div>
+          <Toggle on={s.keyQuestMarkers ?? false} onToggle={() => onChange({ keyQuestMarkers: !(s.keyQuestMarkers ?? false) })} label="Show key quest markers" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Show hunting horn songs</b><span>Displays the hunting horn's songs, the song being played and active effects during quests.</span></div>
           <Toggle on={s.hornSongs ?? false} onToggle={() => onChange({ hornSongs: !(s.hornSongs ?? false) })} label="Show hunting horn songs" />
         </div>

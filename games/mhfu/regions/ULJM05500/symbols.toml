@@ -94,6 +94,11 @@ system_active_overlays  = 0x00F7A3C0 # u16[6] inside System, active DATA.BIN fil
 [patches]
 mh_gathering_prompt_update = "executable 0x08845C94 call"
 
+
+# Key quest marker: collect only titles drawn during this complete lobby UI pass.
+mh_quest_markers_begin = "lobby_task.ovl 0x09A67480 call"
+mh_quest_markers_title = "lobby_task.ovl 0x09A87DC8 call"
+mh_quest_markers_end = "lobby_task.ovl 0x09A6748C call"
 mh_smithy_create_requires_blocks_up_down     = "lobby_task.ovl 0x09A9DED4 immediate 0"
 mh_smithy_create_requires_blocks_paging      = "lobby_task.ovl 0x09A9DF98 immediate 0"
 mh_smithy_create_info_blocks_up_down         = "lobby_task.ovl 0x09A9DEC8 never"

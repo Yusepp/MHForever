@@ -2,6 +2,7 @@
 
 #include "dialog_overlay.hpp"
 #include "gl_backend.hpp"
+#include "game_overlay_policy.hpp"
 #include "host/keymap.hpp"
 #include "host/padmap.hpp"
 #include "host/sdl_host.hpp"
@@ -189,7 +190,8 @@ struct Frontend::Impl {
     std::chrono::steady_clock::time_point quest_hud_seen{};
     // Whose picture the overlay holds (written with overlay.mutex held): the songs give way to everything else and only
     // ever take down their own picture.
-    enum class OverlayOwner { none, menu, dialog, notice, songs };
+    std::shared_ptr<const std::vector<std::uint32_t>> game_image, game_image_shown;
+    using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
     bool dialog_stop{};
     std::filesystem::path font_directory;
@@ -416,6 +418,27 @@ void Frontend::set_game_hint(std::string hint, std::vector<overlay::HintSprite> 
     impl_->game_hint_sprites = std::move(sprites);
 }
 
+void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image) {
+    if (image && image->size() != 480u * 272u) image.reset();
+    Impl &impl = *impl_;
+    impl.game_image = image;
+    if (impl.gpu_state != 1) return;
+    std::lock_guard lock(impl.overlay.mutex);
+    const auto owner = impl.overlay_owner.load();
+    const auto action = game_overlay_action(owner, image != nullptr, impl.menu_open || impl.dialog_visible || impl.song_placing);
+    if (action == GameOverlayAction::keep) return;
+    if (action == GameOverlayAction::hide) image.reset();
+    if (image == impl.game_image_shown && owner == Impl::OverlayOwner::game && image) return;
+    impl.overlay.pixels = image ? *image : std::vector<std::uint32_t>{};
+    impl.overlay.width = image ? 480 : 0;
+    impl.overlay.height = image ? 272 : 0;
+    impl.overlay.aspect = 0.0f;
+    impl.overlay.visible = image != nullptr;
+    impl.overlay_owner = image ? Impl::OverlayOwner::game : Impl::OverlayOwner::none;
+    impl.game_image_shown = std::move(image);
+    ++impl.overlay.generation;
+}
+
 void Frontend::set_song_panel(std::optional<overlay::SongPanel> panel) {
     if (panel) impl_->songs_seen = panel;
     impl_->songs = std::move(panel);
@@ -492,20 +515,6 @@ void copy_frame(Runtime &rt, std::vector<std::uint32_t> &out) {
             }
             out[y * 480 + x] = c | 0xFF000000u;
         }
-    }
-}
-
-void blend_over(std::vector<std::uint32_t> &frame, const std::vector<std::uint32_t> &overlay) {
-    for (std::size_t i = 0; i < frame.size() && i < overlay.size(); ++i) {
-        const std::uint32_t o = overlay[i], a = o >> 24u;
-        if (a == 0) continue;
-        const std::uint32_t f = frame[i], inv = 255u - a;
-        std::uint32_t out = 0xFF000000u;
-        for (unsigned shift = 0; shift < 24; shift += 8) {
-            const std::uint32_t c = ((o >> shift) & 0xFFu) + (((f >> shift) & 0xFFu) * inv + 127u) / 255u;
-            out |= std::min(c, 255u) << shift;
-        }
-        frame[i] = out;
     }
 }
 
@@ -2001,6 +2010,8 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
             if (vblank != impl->last_vblank && impl->gpu_state == 2) {
                 impl->last_vblank = vblank;
                 copy_frame(*runtime, impl->frame);
+                refresh_game_overlay(impl->frame, impl->game_image, impl->menu_open || impl->dialog_visible || impl->song_placing,
+                                     [&] { if (extra) extra(); });
                 if (impl->menu_open) {
                     blend_over(impl->frame, impl->soft_menu);
                 } else if (impl->dialog_visible) {
@@ -2008,6 +2019,8 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                     blend_over(impl->frame, impl->soft_overlay);
                 }
                 impl->host.present(impl->frame.data(), 480, 272, 480);
+            } else if (extra) {
+                extra();
             }
             // Audio: hand the device the output for the real time elapsed since the last poll.
             const std::uint64_t elapsed = now - impl->last_audio_us;
@@ -2063,7 +2076,7 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                 if (produced > 0) impl->host.queue_audio(mixed.data(), produced);
             }
         }
-        if (extra) extra();
+        if (!impl->open && extra) extra();
     });
 }
 

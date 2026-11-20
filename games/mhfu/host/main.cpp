@@ -8,6 +8,7 @@
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
 //             [--mouse-camera [--mouse-camera-speed 25-300]]
 //             [--gathering-indicators] [--auto-gathering-tools]
+//             [--key-quest-markers]
 //             [--horn-songs [--horn-songs-place next-to-sheet|top-middle|under-names|bottom-left|custom:X,Y]]
 //             [--guild-quest-scaling]
 //             [--projected-shadows [--no-whole-map-shadows] [--shadow-quality 0-2] [--shadow-darkness 0-100]]
@@ -28,6 +29,7 @@
 #include "mhf/psp/host.hpp"
 #include "mhf/psp/runtime.hpp"
 #include "iso9660.hpp"
+#include "key_quests.hpp"
 #include "param_sfo.hpp"
 
 #include "host/keymap.hpp"
@@ -89,6 +91,17 @@ mhf::mhfu::Gathering g_gathering;
 void on_gathering_update(Runtime &rt, Context &ctx) { g_gathering.update(rt, ctx); }
 
 bool g_log_overlays = true;
+std::atomic<bool> g_key_quest_markers{false};
+mhf::mhfu::KeyQuestMarkers g_quest_markers;
+
+void on_quest_markers_begin(Runtime &, Context &) { g_quest_markers.begin(); }
+void on_quest_markers_end(Runtime &, Context &) { g_quest_markers.end(); }
+
+// At the title draw, s4 is the selected quest's fixed header, s2 the panel layout, a2 the title's y. The same call
+// site and registers in all four region maps. Detection reads only; the original title draw runs unchanged.
+void on_quest_markers_title(Runtime &rt, Context &ctx) {
+    if (g_key_quest_markers) g_quest_markers.capture(rt.memory(), ctx.gpr[20], ctx.gpr[18], static_cast<std::int16_t>(ctx.gpr[6]));
+}
 
 // The "0" the element value formats print after the value, for every language a release can load; each release maps
 // its own languages. The chosen language's menu text is loaded at run time, each language at its own place, so only
@@ -217,6 +230,7 @@ std::vector<ScriptedPress> parse_input_script(const std::string &text) {
 // Hook on mh_overlay_prepare(image, size): the overlay image (header included) is already in guest memory and its
 // static initializers are about to run, so its recompiled code must become the active one for its region now.
 void on_overlay_prepare(Runtime &rt, Context &ctx) {
+    g_quest_markers.clear();
     const std::uint32_t image = ctx.gpr[4];
     const auto overlay_id = static_cast<std::int32_t>(rt.memory().load32(image + 4));
     const bool ok = rt.activate_overlay(overlay_id);
@@ -1046,6 +1060,7 @@ int main(int argc, char **argv) {
             g_mouse_speed = static_cast<float>(std::clamp(std::stoi(argv[++i]), 25, 300)) / 100.0f; // in percent
         else if (a == "--gathering-indicators") g_gathering.indicators = true;
         else if (a == "--auto-gathering-tools") g_gathering.automatic_tools = true;
+        else if (a == "--key-quest-markers") g_key_quest_markers = true; // enhancement
         else if (a == "--horn-songs") horn_songs = true; // enhancement
         else if (a == "--horn-songs-place" && i + 1 < argc) horn_songs_place = argv[++i];
         else if (a == "--guild-quest-scaling") guild_quest_scaling = true; // enhancement, off by default
@@ -1127,6 +1142,16 @@ int main(int argc, char **argv) {
             runtime.add_overlay(*programs[i]);
         }
         runtime.register_hook("mh_overlay_prepare", &on_overlay_prepare);
+        const bool key_quests_mapped = mhf::mhfu::key_quest_markers_mapped(programs);
+        if (!key_quests_mapped && g_key_quest_markers) {
+            std::fprintf(stderr, "[mhfu] --key-quest-markers: not mapped; re-run games/mhfu/tools/prepare.py\n");
+            g_key_quest_markers = false;
+        }
+        if (key_quests_mapped && (window || g_key_quest_markers)) {
+            runtime.register_hook("mh_quest_markers_begin", &on_quest_markers_begin);
+            runtime.register_hook("mh_quest_markers_title", &on_quest_markers_title);
+            runtime.register_hook("mh_quest_markers_end", &on_quest_markers_end);
+        }
         // Hooks that read a switch every time, so the in-game menu can turn their enhancement on and off.
         g_fast_supply_box = fast_supply_box;
         g_quest_autoclear = quest_autoclear;
@@ -1338,6 +1363,22 @@ int main(int argc, char **argv) {
                         if (v != 0) load_gathering_icons();
                         g_gathering.indicators = g_gathering.automatic_tools = v != 0;
                     }});
+            }
+            extra = [&frontend, previous = std::move(extra), shown = std::optional<mhf::mhfu::QuestMarker>{},
+                     image = std::shared_ptr<const std::vector<std::uint32_t>>{}]() mutable {
+                if (previous) previous();
+                const auto marker = g_key_quest_markers ? g_quest_markers.marker() : std::nullopt;
+                if (marker != shown) {
+                    shown = marker;
+                    image = marker ? std::make_shared<const std::vector<std::uint32_t>>(mhf::mhfu::key_quest_pixels(*marker)) : nullptr;
+                }
+                frontend.set_game_overlay(image);
+            };
+            if (key_quests_mapped) {
+                frontend.add_game_option({"keyQuestMarkers", "Show key quest markers",
+                                          "A gold key beside Village and Guild Hall key quests, including completed quests.",
+                                          false, g_key_quest_markers ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) { g_key_quest_markers = v != 0; }});
             }
             // The enhancements the in-game menu changes while playing; the launcher keeps what is chosen there.
             const auto percent = [](float speed) { return static_cast<int>(std::lround(speed * 100.0f)); };

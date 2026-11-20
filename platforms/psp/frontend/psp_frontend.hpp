@@ -97,6 +97,10 @@ public:
     // A short game-provided action prompt; hidden with the quest HUD and while menus are open.
     void set_game_hint(std::string hint, std::vector<overlay::HintSprite> sprites = {});
     [[nodiscard]] bool game_input_blocked() const;
+    // A game's own transparent 480x272 image, in premultiplied RGBA. A null image hides it. Reuse the same shared
+    // image until its pixels change; the frontend uploads it only on a change and gives menus and dialogs priority.
+    void set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image);
+
     // Mouse look: while `wanted` says so and the game has the input (no menu, system dialog or song placing), the mouse
     // is held in the window and its motion reaches the game's hooks (ControllerState::mouse_x and mouse_y). Asked on the
     // game's thread at every poll.
