@@ -224,6 +224,15 @@ int main(int argc, char **argv) {
         fast_box["fastSupplyBox"] = "no";
         l.set_settings(fast_box);
         CHECK(l.state()["settings"]["fastSupplyBox"].as_bool());
+        // Quest auto-clear: off by default, a bool turns it on, anything else is ignored.
+        CHECK(!l.state()["settings"]["questAutoclear"].as_bool(true));
+        Json autoclear;
+        autoclear["questAutoclear"] = true;
+        l.set_settings(autoclear);
+        CHECK(l.state()["settings"]["questAutoclear"].as_bool());
+        autoclear["questAutoclear"] = "no";
+        l.set_settings(autoclear);
+        CHECK(l.state()["settings"]["questAutoclear"].as_bool());
         // Smithy browsing: off by default, a bool turns it on, anything else is ignored.
         CHECK(!l.state()["settings"]["smithyBrowse"].as_bool(true));
         Json smithy;
@@ -497,7 +506,7 @@ int main(int argc, char **argv) {
         // The options the game's menu changes while playing come back under the launcher's names; others are ignored.
         const bool true_values_before = l.state()["settings"]["trueWeaponValues"].as_bool();
         {
-            std::ofstream(l.controls_file()) << "horn-songs=true\nhud-size=70\noption.fastSupplyBox=true\noption.guildQuestScaling=true\noption.analogCamera=true\n"
+            std::ofstream(l.controls_file()) << "horn-songs=true\nhud-size=70\noption.fastSupplyBox=true\noption.guildQuestScaling=true\noption.questAutoclear=true\noption.analogCamera=true\n"
                                              << "option.analogCameraTurnSpeed=140\noption.analogCameraTiltSpeed=999\n"
                                              << "option.trueWeaponValues=maybe\noption.copyImage=true\n"
                                              << "option.packMipmaps=true\noption.anisotropy=8\n"
@@ -517,6 +526,7 @@ int main(int argc, char **argv) {
         CHECK(l.state()["settings"]["hudSize"].as_number() == 70);
         CHECK(l.state()["settings"]["fastSupplyBox"].as_bool());
         CHECK(l.state()["settings"]["guildQuestScaling"].as_bool());
+        CHECK(l.state()["settings"]["questAutoclear"].as_bool());
         CHECK(l.state()["settings"]["analogCamera"].as_bool());
         CHECK(l.state()["settings"]["analogCameraTurnSpeed"].as_number() == 140);
         CHECK(l.state()["settings"]["analogCameraTiltSpeed"].as_number() == 200); // kept within 50..200

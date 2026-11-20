@@ -69,6 +69,11 @@ if(MHF_BUILD_TESTS)
     target_link_libraries(test_mhfu_guild_scaling PRIVATE psprecomp_core)
     mhf_target_warnings(test_mhfu_guild_scaling)
     add_test(NAME mhfu_guild_scaling COMMAND test_mhfu_guild_scaling)
+    add_executable(test_mhfu_quest_autoclear tests/test_quest_autoclear.cpp host/quest_autoclear.cpp)
+    target_include_directories(test_mhfu_quest_autoclear PRIVATE host ${PROJECT_SOURCE_DIR}/tests/support)
+    target_link_libraries(test_mhfu_quest_autoclear PRIVATE mhf_psp_runtime)
+    mhf_target_warnings(test_mhfu_quest_autoclear)
+    add_test(NAME mhfu_quest_autoclear COMMAND test_mhfu_quest_autoclear)
 endif()
 
 # The game itself, built from code recompiled on the developer's machine (never committed, CONTRIBUTING.md).
@@ -100,7 +105,7 @@ if(MHF_MHFU_GENERATED)
         target_compile_options(mhfu_generated PRIVATE -w -O1)
     endif()
     add_executable(mhfu host/main.cpp host/horn_songs.cpp host/gathering.cpp host/gathering_logic.cpp host/gathering_art.cpp
-        host/gathering_game_art.cpp host/guild_scaling.cpp)
+        host/gathering_game_art.cpp host/guild_scaling.cpp host/quest_autoclear.cpp)
     # One program per region; the launcher picks it by the disc (launcher.cpp, game_program_name).
     set(MHF_MHFU_PROGRAM_NAME "mhfu" CACHE STRING "File name of the Freedom Unite program: mhfu (EU), mhfu-us (NA), mhfu-jp (JP) or mhfu-fuc (FUComplete)")
     set_target_properties(mhfu PROPERTIES OUTPUT_NAME ${MHF_MHFU_PROGRAM_NAME})

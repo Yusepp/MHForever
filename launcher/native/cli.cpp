@@ -23,7 +23,7 @@ namespace {
 
 // The settings `--set` changes (the others, such as the controls, are changed in the game's own menu).
 constexpr const char *kBoolSettings[] = {"fullscreen", "smoothTextures", "packMipmaps", "trueWeaponValues", "fastSupplyBox",
-                                         "guildQuestScaling", "smithyBrowse", "smithyLayout", "analogCamera", "mouseCamera",
+                                         "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout", "analogCamera", "mouseCamera",
                                          "hornSongs", "gatheringAssistance", "projectedShadows", "wholeMapShadows", "widescreen"};
 constexpr const char *kNumberSettings[] = {"scale", "fps", "hudSize", "musicVolume", "sfxVolume",
                                            "analogCameraTurnSpeed", "analogCameraTiltSpeed", "mouseCameraSpeed", "anisotropy",
@@ -35,7 +35,7 @@ void usage() {
                  "  --install <image.iso> [--in-place | --copy]   add your copy of the game (once)\n"
                  "  --list                                        your copies and their settings\n"
                  "  --set <name>=<value>... [--disc <disc id>]    change a copy's settings\n"
-                 "        fullscreen, smoothTextures, packMipmaps, trueWeaponValues, fastSupplyBox, guildQuestScaling,\n"
+                 "        fullscreen, smoothTextures, packMipmaps, trueWeaponValues, fastSupplyBox, guildQuestScaling, questAutoclear,\n"
                  "        smithyBrowse, smithyLayout, projectedShadows, wholeMapShadows, widescreen: true or false\n"
                  "        scale 1-10, fps 30-180, hudSize 50-100, musicVolume 0-100, sfxVolume 0-100,\n"
                  "        anisotropy 1 (off), 2, 4, 8 or 16 (texture packs), shadowQuality 0-2, shadowDarkness 0-100\n"

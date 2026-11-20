@@ -3,7 +3,7 @@
 // usage: mhfu --iso <image.iso> --exe <decrypted executable> [--trace] [--memstick <dir>]
 //             [--window] [--auto-dialogs] [--dump-frames <dir> [--dump-every N] [--dump-from S]] [--seconds S] [--quiet-overlays]
 //             [--input "<seconds>:<button>,..."] [--name <text>] [--software] [--scale N] [--fullscreen]
-//             [--smooth-textures] [--texture-pack <folder> [--pack-mipmaps] [--anisotropy 1|2|4|8|16]] [--fps 30..180] [--hud-size 50-100] [--widescreen] [--true-weapon-values] [--fast-supply-box]
+//             [--smooth-textures] [--texture-pack <folder> [--pack-mipmaps] [--anisotropy 1|2|4|8|16]] [--fps 30..180] [--hud-size 50-100] [--widescreen] [--true-weapon-values] [--fast-supply-box] [--quest-autoclear]
 //             [--smithy-browse [--smithy-layout]]
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
 //             [--mouse-camera [--mouse-camera-speed 25-300]]
@@ -38,6 +38,7 @@
 #error "mhfu_region_data.hpp is missing from MHF_MHFU_GENERATED: re-run games/mhfu/tools/prepare.py"
 #endif
 #include "mhfu_region_data.hpp" // generated from this release's regions/<disc>/symbols.toml [data]
+#include "quest_autoclear.hpp"
 
 #include <algorithm>
 #include <array>
@@ -239,6 +240,11 @@ constexpr mhf::mhfu::GuildScalingSymbols kGuildScalingSymbols{
 constexpr bool kGuildScalingMapped = kGuildScalingSymbols.valid();
 std::atomic<bool> g_guild_quest_scaling{false};
 mhf::mhfu::GuildQuestScaling g_guild_scaling{kGuildScalingSymbols};
+// --quest-autoclear: hold L + R + Select for 2 seconds during an active quest (game_task.ovl) to mark the quest's
+// required objectives complete (quest_autoclear.hpp).
+constexpr bool kQuestAutoclearMapped =
+    region::mh_quest_manager.has_value() && region::mh_game_sys.has_value() && region::mh_horn_songs.has_value();
+std::atomic<bool> g_quest_autoclear{false};
 
 bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
     const mhf::psp::Program *overlay = rt.active_overlay_at(address);
@@ -985,6 +991,7 @@ int main(int argc, char **argv) {
     int shadow_quality = 0, shadow_darkness = 50;
     bool true_weapon_values = false; // --true-weapon-values: menus show attack and element without display multipliers
     bool fast_supply_box = false; // --fast-supply-box: the supply box takes the next button soon after a take-out
+    bool quest_autoclear = false; // --quest-autoclear: hold L + R + Select for 2 seconds during a quest to complete it
     bool smithy_browse = false; // --smithy-browse: the smithy's lists scroll with the R or Info panel open
     bool smithy_layout = false; // --smithy-layout: with Info open, Info on the left and the list with materials on the right
     bool analog_camera = false; // --analog-camera: the right stick turns and tilts the camera by how far it is pushed
@@ -1026,6 +1033,7 @@ int main(int argc, char **argv) {
         else if (a == "--shadow-darkness" && i + 1 < argc) shadow_darkness = std::clamp(std::stoi(argv[++i]), 0, 100);
         else if (a == "--true-weapon-values") true_weapon_values = true; // enhancement, off by default
         else if (a == "--fast-supply-box") fast_supply_box = true; // enhancement, off by default
+        else if (a == "--quest-autoclear") quest_autoclear = true; // enhancement, off by default
         else if (a == "--smithy-browse") smithy_browse = true; // enhancement, off by default
         else if (a == "--smithy-layout") smithy_layout = true; // enhancement, off by default; needs --smithy-browse
         else if (a == "--analog-camera") analog_camera = true; // enhancement, off by default
@@ -1090,6 +1098,12 @@ int main(int argc, char **argv) {
             true_weapon_values = false;
         }
     }
+    if constexpr (!kQuestAutoclearMapped) {
+        if (quest_autoclear) {
+            std::fprintf(stderr, "[mhfu] --quest-autoclear: not mapped for this release, ignored\n");
+            quest_autoclear = false;
+        }
+    }
     // In a window the player answers the system dialogs (messages, keyboard, save/load) on screen.
     options.interactive_dialogs = window && !auto_dialogs;
     if (texture_pack.empty()) {
@@ -1115,6 +1129,7 @@ int main(int argc, char **argv) {
         runtime.register_hook("mh_overlay_prepare", &on_overlay_prepare);
         // Hooks that read a switch every time, so the in-game menu can turn their enhancement on and off.
         g_fast_supply_box = fast_supply_box;
+        g_quest_autoclear = quest_autoclear;
         runtime.register_hook("mh_supply_box_update", &on_supply_box_update);
         g_gathering.language = language_pick ? options.system_language
                                : kFucomplete ? 1 : disc_product_code(options.disc_image) == "ULJM05500" ? 0 : options.system_language;
@@ -1264,6 +1279,24 @@ int main(int argc, char **argv) {
                 if (previous) previous();
             };
         }
+        // In a window the in-game menu can turn quest auto-clear on later; poll after any scripted input is applied.
+        if (quest_autoclear || (window && kQuestAutoclearMapped)) {
+            extra = [rt = &runtime,
+                     autoclear = mhf::mhfu::QuestAutoclear{{region::mh_quest_manager, region::mh_game_sys}},
+                     previous = std::move(extra)]() mutable {
+                if (previous) previous();
+                if constexpr (kQuestAutoclearMapped) {
+                    if (!quest_overlay_at(*rt, *region::mh_horn_songs)) {
+                        autoclear.clear();
+                        return;
+                    }
+                    if (autoclear.poll(rt->memory(), mhf::psp::controller_state(*rt).buttons, rt->now_us(),
+                                       g_quest_autoclear.load())) {
+                        std::fprintf(stderr, "[mhfu] quest auto-clear triggered\n");
+                    }
+                }
+            };
+        }
 #if defined(MHF_HAS_FRONTEND)
         mhf::psp::Frontend frontend;
         if (window && frontend.open(window_title(options.disc_image).c_str(), false, 2, !software, render_scale, fullscreen, smooth_textures, target_fps, keyboard, controller)) {
@@ -1324,6 +1357,12 @@ int main(int argc, char **argv) {
                      "Scales large-monster HP and part stagger in Guild quests to the active hunter count (1-4 players).",
                      false, g_guild_quest_scaling ? 1 : 0, 0, 1, 1, "",
                      [](int v) { g_guild_quest_scaling = v != 0; }});
+            }
+            if constexpr (kQuestAutoclearMapped) {
+                frontend.add_game_option({"questAutoclear", "Quest auto-clear",
+                                          "Hold L + R + Select for 2 seconds during a quest to complete it.",
+                                          false, g_quest_autoclear ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) { g_quest_autoclear = v != 0; }});
             }
             {
                 frontend.add_game_option({"analogCamera", "Analog camera",

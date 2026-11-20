@@ -155,6 +155,8 @@ Done too: a fast supply box, the box takes the next button 2 frames after a take
 launcher setting; `06-mhfu-module.md` §9).
 Done too: dynamic Guild quest scaling, adjusting large-monster HP and part stagger to 1–4 active hunters from the game's
 2-player Guild baseline (`--guild-quest-scaling`, launcher setting; `06-mhfu-module.md` §9).
+Done too: quest auto-clear, holding `L + R + Select` for 2 seconds during an active quest to mark its required
+objectives complete (`--quest-autoclear`, launcher setting and in-game Game tab; `06-mhfu-module.md` §9).
 Done too: the smithy's lists scroll with the materials (R) or Info panel open, the panel following the highlighted item
 (`--smithy-browse`, launcher setting; the first instruction patches, `04-recompiler.md` §6; `06-mhfu-module.md` §9).
 Done too: an improved smithy layout, Info on the left with the list and its materials on the right while Info is open

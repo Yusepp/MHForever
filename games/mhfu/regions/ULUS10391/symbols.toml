@@ -77,6 +77,7 @@ mh_horn_songs           = 0x09C0BD38 # u8[47][4] in game_task.ovl: each song's n
 mh_resource_manager     = 0x09A0B680 # ResourceManager*: the loaded resources by id (the quest text is resource 4)
 mh_quest_message_texts  = 0x089B56C4 # u16 per quest message (the songs' effects first): its text id in the quest text
 mh_cockpit              = 0x089CBD0C # Cockpit*: the quest HUD and its menus (Cockpit_menu_chk: a game menu is open)
+mh_quest_manager        = 0x08A62D9C # QuestManager*: active quest state, quest id, and objective slots (quest_autoclear.cpp)
 
 # Smithy Info panels (--smithy-browse): functions in lobby_task.ovl the game program calls, (List*): build the
 # Info panel for the item under the list's cursor.
