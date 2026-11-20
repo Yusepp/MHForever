@@ -59,7 +59,7 @@ WebKitGTK on Linux/Deck) through the header-only `webview` library (MIT). Qt was
   pseudonym, identity seed, settings, library, stats. Adding a copy reads PARAM.SFO (`platforms/psp/tools/param_sfo`)
   and compares size + SHA-1 with `games/*/regions/*/region.toml` (catalog generated at configure time; identification
   data only). Launching runs `mhfu(.exe)` next to the launcher with the settings as flags (`--scale`, `--fullscreen`,
-  `--smooth-textures`, `--pack-mipmaps`, `--anisotropy`, `--projected-shadows`, `--no-whole-map-shadows`, `--shadow-quality`, `--shadow-darkness`, `--widescreen`, `--fps`, `--true-weapon-values`, `--fast-supply-box`, `--smithy-browse`, `--smithy-layout`, `--horn-songs`, `--music-volume`, `--sfx-volume`, `--name`, `--language`), logs to `game.log`, and records play time and
+  `--smooth-textures`, `--pack-mipmaps`, `--anisotropy`, `--projected-shadows`, `--no-whole-map-shadows`, `--shadow-quality`, `--shadow-darkness`, `--widescreen`, `--fps`, `--true-weapon-values`, `--fast-supply-box`, `--quest-autoclear`, `--smithy-browse`, `--smithy-layout`, `--horn-songs`, `--music-volume`, `--sfx-volume`, `--name`, `--language`), logs to `game.log`, and records play time and
   sessions. The game also needs the prepared executable: the installer produces it (below); developer builds can instead use
   `../exe/<DISC_ID>_EBOOT.BIN` (or one next to the ISO), checked against `dev_executable` in region.toml.
 - **Friend code**: generated locally (SHA-256 of a random identity seed, Crockford base32). Provisional: online play will
@@ -134,7 +134,9 @@ WebKitGTK on Linux/Deck) through the header-only `webview` library (MIT). Qt was
   name plates, bottom left, or `custom:X,Y`. The in-game menu's Game tab picks the position or drags the list anywhere;
   the game writes the choice to the controls file and the launcher keeps it. The same Game section holds **Show true weapon
   values** (`trueWeaponValues`, `--true-weapon-values`), **Fast supply box** (`fastSupplyBox`, `--fast-supply-box`,
-  off by default: the supply box takes the next button 2 frames after a take-out instead of 30), **Smithy: browse
+  off by default: the supply box takes the next button 2 frames after a take-out instead of 30), **Quest auto-clear**
+  (`questAutoclear`, `--quest-autoclear`, off by default: hold `L + R + Select` for 2 seconds during a quest to complete
+  it; also toggled in the in-game menu's Game tab), **Smithy: browse
   with panels open** (`smithyBrowse`, `--smithy-browse`, off by default: the smithy's lists scroll with the materials
   or Info panel open), and under it, once that is on, **Smithy: improved layout** (`smithyLayout`, `--smithy-layout`,
   off by default: with Info open, Info on the left, the list with the materials on the right), and **Analog camera**
