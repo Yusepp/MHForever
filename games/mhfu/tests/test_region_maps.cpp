@@ -73,8 +73,8 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
     // --smithy-browse and --smithy-layout: their nine patches, all in the village overlay, the two Info functions and
     // the layout tables. --analog-camera: its four call patches, in the camera's d-pad code in the executable (not
     // mapped for every release: then none). Widescreen: its three call patches where a camera is set up and where it
-    // makes its culling planes, in every release.
-    std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches;
+    // makes its culling planes, in every release. --guild-quest-scaling: three call patches in game_task.ovl.
+    std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches, guild_scaling_patches;
     for (const auto &p : mhf::psp::recomp::region_patches(map_path)) {
         if (p.patch.name.starts_with("mh_smithy_")) {
             MHF_CHECK(p.module == "lobby_task.ovl");
@@ -82,6 +82,9 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_gathering_")) {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             gathering_patches.insert(p.patch.name);
+        } else if (p.patch.name.starts_with("mh_enemy_")) {
+            MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+            guild_scaling_patches.insert(p.patch.name);
         } else {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             (p.patch.name.starts_with("mh_camera_aspect_") ? aspect_patches : camera_patches).insert(p.patch.name);
@@ -96,9 +99,11 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
                                                : std::set<std::string>{}));
     MHF_CHECK(aspect_patches ==
               std::set<std::string>({"mh_camera_aspect_made", "mh_camera_aspect_reset", "mh_camera_aspect_culling"}));
+    MHF_CHECK(guild_scaling_patches ==
+              std::set<std::string>({"mh_enemy_hp_begin", "mh_enemy_hp_computed", "mh_enemy_stagger_store"}));
     for (const char *table : {"mh_smithy_panel_layout", "mh_smithy_side_layout", "mh_smithy_question_box",
                               "mh_smithy_skill_info_hint", "mh_smithy_model_scissor", "mh_smithy_panel_draw_entry",
-                              "mh_pad_input", "mh_draw_done"}) {
+                              "mh_pad_input", "mh_draw_done", "mh_quest_manager", "mh_enemy_species_table"}) {
         MHF_CHECK(entries.contains(table) && entries.at(table).has_value());
     }
     MHF_CHECK(entries.contains("mh_smithy_create_info_setup") && entries.at("mh_smithy_create_info_setup").has_value());
