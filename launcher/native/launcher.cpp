@@ -153,6 +153,7 @@ Json default_settings() {
     s["mouseCameraSpeed"] = 100;  // its sensitivity in percent: 25..300 in steps of 25
     s["hornSongs"] = false; // the hunting horn's songs over the quest HUD
     s["hornSongsPlace"] = "next-to-sheet"; // and where: a place's name, or "custom:X,Y" (overlay/song_panel.hpp)
+    s["guildQuestScaling"] = false; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
     s["copyImage"] = false; // keep a copy of the disc image in the data directory
     s["checkUpdates"] = true; // ask GitHub for a newer release when the launcher starts
     s["musicVolume"] = 100;
@@ -1018,8 +1019,8 @@ void Launcher::import_game_controls() {
             } else if (name == "horn-songs" || name == "hud-size" || name.starts_with("option.")) {
                 // What the game's in-game menu changes while playing: switches ("true", "false") and percentages, under
                 // the launcher's own names. Only these settings; apply_settings checks each value.
-                static constexpr std::string_view kGameOptions[] = {"trueWeaponValues", "fastSupplyBox", "analogCamera",
-                                                                    "analogCameraTurnSpeed", "analogCameraTiltSpeed",
+                static constexpr std::string_view kGameOptions[] = {"trueWeaponValues", "fastSupplyBox", "guildQuestScaling",
+                                                                    "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality",
                                                                     "shadowDarkness", "widescreen"};
@@ -1127,7 +1128,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
         const double level = std::clamp(partial["anisotropy"].as_number(), 1.0, 16.0);
         s["anisotropy"] = std::exp2(std::round(std::log2(level)));
     }
-    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "widescreen", "trueWeaponValues", "fastSupplyBox", "smithyBrowse", "smithyLayout",
+    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "smithyBrowse", "smithyLayout",
                             "analogCamera", "mouseCamera", "hornSongs", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
@@ -1528,6 +1529,7 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
         plan.args.push_back("--true-weapon-values");
     }
     if (s["fastSupplyBox"].as_bool()) plan.args.push_back("--fast-supply-box");
+    if (std::string_view(entry->game) == "mhfu" && s["guildQuestScaling"].as_bool()) plan.args.push_back("--guild-quest-scaling");
     if (s["smithyBrowse"].as_bool()) {
         plan.args.push_back("--smithy-browse");
         if (s["smithyLayout"].as_bool()) plan.args.push_back("--smithy-layout");

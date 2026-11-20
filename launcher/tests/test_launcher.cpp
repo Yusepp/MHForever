@@ -331,6 +331,18 @@ int main(int argc, char **argv) {
         wide["widescreen"] = false;
         l.set_settings(wide);
         // Hunting horn songs: off by default, a bool turns them on, anything else is ignored.
+        CHECK(!l.state()["settings"]["guildQuestScaling"].as_bool(true));
+        Json guild_scale;
+        guild_scale["guildQuestScaling"] = true;
+        l.set_settings(guild_scale);
+        CHECK(l.state()["settings"]["guildQuestScaling"].as_bool());
+        guild_scale["guildQuestScaling"] = "no";
+        l.set_settings(guild_scale);
+        CHECK(l.state()["settings"]["guildQuestScaling"].as_bool());
+        guild_scale["guildQuestScaling"] = false;
+        l.set_settings(guild_scale);
+        CHECK(!l.state()["settings"]["guildQuestScaling"].as_bool(true));
+
         CHECK(!l.state()["settings"]["hornSongs"].as_bool(true));
         Json horn;
         horn["hornSongs"] = true;
@@ -477,7 +489,7 @@ int main(int argc, char **argv) {
         // The options the game's menu changes while playing come back under the launcher's names; others are ignored.
         const bool true_values_before = l.state()["settings"]["trueWeaponValues"].as_bool();
         {
-            std::ofstream(l.controls_file()) << "horn-songs=true\nhud-size=70\noption.fastSupplyBox=true\noption.analogCamera=true\n"
+            std::ofstream(l.controls_file()) << "horn-songs=true\nhud-size=70\noption.fastSupplyBox=true\noption.guildQuestScaling=true\noption.analogCamera=true\n"
                                              << "option.analogCameraTurnSpeed=140\noption.analogCameraTiltSpeed=999\n"
                                              << "option.trueWeaponValues=maybe\noption.copyImage=true\n"
                                              << "option.packMipmaps=true\noption.anisotropy=8\n"
@@ -496,6 +508,7 @@ int main(int argc, char **argv) {
         CHECK(l.state()["settings"]["hornSongs"].as_bool());
         CHECK(l.state()["settings"]["hudSize"].as_number() == 70);
         CHECK(l.state()["settings"]["fastSupplyBox"].as_bool());
+        CHECK(l.state()["settings"]["guildQuestScaling"].as_bool());
         CHECK(l.state()["settings"]["analogCamera"].as_bool());
         CHECK(l.state()["settings"]["analogCameraTurnSpeed"].as_number() == 140);
         CHECK(l.state()["settings"]["analogCameraTiltSpeed"].as_number() == 200); // kept within 50..200
