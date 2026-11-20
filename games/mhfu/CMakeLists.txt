@@ -15,7 +15,7 @@ target_link_libraries(mhf_game_mhfu INTERFACE mhf_psp mhf_mhfu_data)
 
 if(MHF_BUILD_TESTS)
     add_executable(test_mhfu_key_quests tests/test_key_quests.cpp host/key_quests.cpp)
-    target_include_directories(test_mhfu_key_quests PRIVATE host ${PROJECT_SOURCE_DIR}/tests/support)
+    target_include_directories(test_mhfu_key_quests PRIVATE host ${PROJECT_SOURCE_DIR}/tests/support ${PROJECT_SOURCE_DIR}/platforms/psp/runtime/include)
     target_link_libraries(test_mhfu_key_quests PRIVATE psprecomp_core)
     mhf_target_warnings(test_mhfu_key_quests)
     add_test(NAME mhfu_key_quests COMMAND test_mhfu_key_quests)

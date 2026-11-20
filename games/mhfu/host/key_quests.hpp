@@ -1,11 +1,14 @@
 #pragma once
 
 #include "psprecomp/guest_memory.hpp"
+#include "mhf/psp/abi.hpp"
 #include <cstdint>
 #include <optional>
 #include <vector>
 
 namespace mhf::mhfu {
+
+bool key_quest_markers_mapped(std::span<const psp::Program *const> programs);
 
 struct QuestMarker {
     int x, y;

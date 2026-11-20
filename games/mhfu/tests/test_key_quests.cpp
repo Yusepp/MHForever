@@ -6,8 +6,28 @@
 #include <limits>
 
 using namespace mhf::mhfu;
+namespace psp = mhf::psp;
 
 int main() {
+    // An old or partial generated region must not advertise an option it cannot draw.
+    const psp::CallPatchEntry begin{1, "mh_quest_markers_begin"}, title{2, "mh_quest_markers_title"}, end{3, "mh_quest_markers_end"};
+    const psp::CallPatchEntry all[]{begin, title, end}, partial[]{begin, title};
+    psp::Program lobby{};
+    lobby.overlay_id = 7;
+    const psp::Program *programs[]{&lobby};
+    MHF_CHECK(!key_quest_markers_mapped(programs));
+    lobby.call_patches = partial;
+    MHF_CHECK(!key_quest_markers_mapped(programs));
+    psp::Program other{};
+    other.overlay_id = 8;
+    other.call_patches = std::span(&end, 1);
+    const psp::Program *split[]{&lobby, &other};
+    MHF_CHECK(!key_quest_markers_mapped(split)); // a triplet split across overlays cannot form one UI pass
+    lobby.call_patches = all;
+    MHF_CHECK(key_quest_markers_mapped(programs));
+    lobby.overlay_id = -1; // the names must be in an overlay, not an unrelated main program
+    MHF_CHECK(!key_quest_markers_mapped(programs));
+
     psprecomp::GuestMemory memory;
     constexpr std::uint32_t record = 0x08810000, layout = 0x08811000;
     memory.store16(layout + 0x18, 232);

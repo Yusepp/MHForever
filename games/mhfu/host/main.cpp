@@ -1073,11 +1073,15 @@ int main(int argc, char **argv) {
             runtime.add_overlay(*programs[i]);
         }
         runtime.register_hook("mh_overlay_prepare", &on_overlay_prepare);
-        runtime.register_hook("mh_quest_markers_begin", &on_quest_markers_begin);
-        runtime.register_hook("mh_quest_markers_title", &on_quest_markers_title);
-        runtime.register_hook("mh_quest_markers_end", &on_quest_markers_end);
-        if (window || g_key_quest_markers) {
-            for (const char *patch : {"mh_quest_markers_begin", "mh_quest_markers_title", "mh_quest_markers_end"}) runtime.enable_patch(patch);
+        const bool key_quests_mapped = mhf::mhfu::key_quest_markers_mapped(programs);
+        if (!key_quests_mapped && g_key_quest_markers) {
+            std::fprintf(stderr, "[mhfu] --key-quest-markers: not mapped; re-run games/mhfu/tools/prepare.py\n");
+            g_key_quest_markers = false;
+        }
+        if (key_quests_mapped && (window || g_key_quest_markers)) {
+            runtime.register_hook("mh_quest_markers_begin", &on_quest_markers_begin);
+            runtime.register_hook("mh_quest_markers_title", &on_quest_markers_title);
+            runtime.register_hook("mh_quest_markers_end", &on_quest_markers_end);
         }
         // Hooks that read a switch every time, so the in-game menu can turn their enhancement on and off.
         g_fast_supply_box = fast_supply_box;
@@ -1225,10 +1229,12 @@ int main(int argc, char **argv) {
                 }
                 frontend.set_game_overlay(image);
             };
-            frontend.add_game_option({"keyQuestMarkers", "Show key quest markers",
-                                      "A gold key beside Village and Guild Hall key quests, including completed quests.",
-                                      false, g_key_quest_markers ? 1 : 0, 0, 1, 1, "",
-                                      [](int v) { g_key_quest_markers = v != 0; }});
+            if (key_quests_mapped) {
+                frontend.add_game_option({"keyQuestMarkers", "Show key quest markers",
+                                          "A gold key beside Village and Guild Hall key quests, including completed quests.",
+                                          false, g_key_quest_markers ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) { g_key_quest_markers = v != 0; }});
+            }
             // The enhancements the in-game menu changes while playing; the launcher keeps what is chosen there.
             const auto percent = [](float speed) { return static_cast<int>(std::lround(speed * 100.0f)); };
             if (kTrueWeaponValuesMapped && !kFucomplete) {

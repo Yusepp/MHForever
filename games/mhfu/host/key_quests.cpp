@@ -1,5 +1,7 @@
 #include "key_quests.hpp"
 
+#include <string_view>
+
 namespace mhf::mhfu {
 namespace {
 
@@ -21,6 +23,22 @@ bool gold(int x, int y) {
 }
 
 } // namespace
+
+bool key_quest_markers_mapped(std::span<const psp::Program *const> programs) {
+    for (const psp::Program *program : programs) {
+        if (program == nullptr || program->overlay_id < 0) continue;
+        bool begin = false, title = false, end = false;
+        for (const auto &patch : program->call_patches) {
+            if (patch.name == nullptr) continue;
+            const std::string_view name = patch.name;
+            begin |= name == "mh_quest_markers_begin";
+            title |= name == "mh_quest_markers_title";
+            end |= name == "mh_quest_markers_end";
+        }
+        if (begin && title && end) return true;
+    }
+    return false;
+}
 
 std::optional<QuestMarker> key_quest_marker(const psprecomp::GuestMemory &memory, std::uint32_t record,
                                           std::uint32_t layout, int title_y) {
