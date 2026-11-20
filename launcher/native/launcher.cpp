@@ -144,6 +144,7 @@ Json default_settings() {
     s["widescreen"] = false; // the 3D fills a window wider than the PSP's screen (the in-game menu changes it too)
     s["trueWeaponValues"] = false; // menus show attack and element without the game's display multipliers
     s["fastSupplyBox"] = false; // the supply box takes the next button soon after a take-out
+    s["questAutoclear"] = false; // hold L + R + Select for 2 seconds during a quest to complete it
     s["smithyBrowse"] = false; // the smithy's lists scroll with the R (materials) or Info panel open
     s["smithyLayout"] = false; // and with Info open, Info on the left, the list and its materials on the right
     s["analogCamera"] = false; // the right stick turns and tilts the camera by how far it is pushed
@@ -1018,8 +1019,8 @@ void Launcher::import_game_controls() {
             } else if (name == "horn-songs" || name == "hud-size" || name.starts_with("option.")) {
                 // What the game's in-game menu changes while playing: switches ("true", "false") and percentages, under
                 // the launcher's own names. Only these settings; apply_settings checks each value.
-                static constexpr std::string_view kGameOptions[] = {"trueWeaponValues", "fastSupplyBox", "analogCamera",
-                                                                    "analogCameraTurnSpeed", "analogCameraTiltSpeed",
+                static constexpr std::string_view kGameOptions[] = {"trueWeaponValues", "fastSupplyBox", "questAutoclear",
+                                                                    "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality",
                                                                     "shadowDarkness", "widescreen"};
@@ -1127,7 +1128,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
         const double level = std::clamp(partial["anisotropy"].as_number(), 1.0, 16.0);
         s["anisotropy"] = std::exp2(std::round(std::log2(level)));
     }
-    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "widescreen", "trueWeaponValues", "fastSupplyBox", "smithyBrowse", "smithyLayout",
+    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "widescreen", "trueWeaponValues", "fastSupplyBox", "questAutoclear", "smithyBrowse", "smithyLayout",
                             "analogCamera", "mouseCamera", "hornSongs", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
@@ -1528,6 +1529,9 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
         plan.args.push_back("--true-weapon-values");
     }
     if (s["fastSupplyBox"].as_bool()) plan.args.push_back("--fast-supply-box");
+    if (std::string_view(entry->game) == "mhfu" && s["questAutoclear"].as_bool()) {
+        plan.args.push_back("--quest-autoclear");
+    }
     if (s["smithyBrowse"].as_bool()) {
         plan.args.push_back("--smithy-browse");
         if (s["smithyLayout"].as_bool()) plan.args.push_back("--smithy-layout");

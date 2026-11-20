@@ -29,6 +29,7 @@ export interface Settings {
   hudSize?: number; // the quest HUD's size in percent, 50..100 in steps of 10
   trueWeaponValues: boolean; // menus show attack and element without the game's display multipliers
   fastSupplyBox?: boolean; // the supply box takes the next button soon after a take-out
+  questAutoclear?: boolean; // hold L + R + Select for 2 seconds during a quest to complete it
   smithyBrowse?: boolean; // the smithy's lists scroll with the R (materials) or Info panel open
   smithyLayout?: boolean; // and with Info open, Info on the left, the list and its materials on the right
   analogCamera?: boolean; // the right stick turns and tilts the camera by how far it is pushed
@@ -251,7 +252,7 @@ function simulated(): Native {
     friends: [],
     blocked: [],
     settings: {
-      scale: 4, fullscreen: false, smoothTextures: false, packMipmaps: false, anisotropy: 16, widescreen: false, fps: 30, hudSize: 100, trueWeaponValues: false, fastSupplyBox: false,
+      scale: 4, fullscreen: false, smoothTextures: false, packMipmaps: false, anisotropy: 16, widescreen: false, fps: 30, hudSize: 100, trueWeaponValues: false, fastSupplyBox: false, questAutoclear: false,
       smithyBrowse: false, smithyLayout: false, analogCamera: false, analogCameraTurnSpeed: 100, analogCameraTiltSpeed: 100, mouseCamera: false, mouseCameraSpeed: 100,
       hornSongs: false, hornSongsPlace: 'next-to-sheet', language: '', copyImage: false, musicVolume: 80, sfxVolume: 90,
       keys: { ...defaultKeys }, pad: { ...defaultPad }, adhocServer: '', adhocRoom: '', checkUpdates: true,

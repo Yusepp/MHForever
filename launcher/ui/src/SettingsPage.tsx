@@ -598,6 +598,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.fastSupplyBox ?? false} onToggle={() => onChange({ fastSupplyBox: !(s.fastSupplyBox ?? false) })} label="Fast supply box" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Quest auto-clear</b><span>Hold L + R + Select for 2 seconds during a quest to complete it.</span></div>
+          <Toggle on={s.questAutoclear ?? false} onToggle={() => onChange({ questAutoclear: !(s.questAutoclear ?? false) })} label="Quest auto-clear" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Smithy: browse with panels open</b><span>Keeps the smithy list scrollable while the materials or Info panel is open.</span></div>
           <Toggle on={s.smithyBrowse ?? false} onToggle={() => onChange({ smithyBrowse: !(s.smithyBrowse ?? false) })} label="Smithy: browse with panels open" />
         </div>
