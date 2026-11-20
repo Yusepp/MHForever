@@ -2,6 +2,7 @@
 
 #include "dialog_overlay.hpp"
 #include "gl_backend.hpp"
+#include "game_overlay_policy.hpp"
 #include "host/keymap.hpp"
 #include "host/padmap.hpp"
 #include "host/sdl_host.hpp"
@@ -187,7 +188,7 @@ struct Frontend::Impl {
     // Whose picture the overlay holds (written with overlay.mutex held): the songs give way to everything else and only
     // ever take down their own picture.
     std::shared_ptr<const std::vector<std::uint32_t>> game_image, game_image_shown;
-    enum class OverlayOwner { none, menu, dialog, notice, songs, game };
+    using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
     bool dialog_stop{};
     std::filesystem::path font_directory;
@@ -412,8 +413,10 @@ void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>
     if (impl.gpu_state != 1) return;
     std::lock_guard lock(impl.overlay.mutex);
     const auto owner = impl.overlay_owner.load();
-    if (impl.menu_open || impl.dialog_visible || (owner != Impl::OverlayOwner::none && owner != Impl::OverlayOwner::game)) return;
-    if (image == impl.game_image_shown && (image ? owner == Impl::OverlayOwner::game : owner == Impl::OverlayOwner::none)) return;
+    const auto action = game_overlay_action(owner, image != nullptr, impl.menu_open || impl.dialog_visible || impl.song_placing);
+    if (action == GameOverlayAction::keep) return;
+    if (action == GameOverlayAction::hide) image.reset();
+    if (image == impl.game_image_shown && owner == Impl::OverlayOwner::game && image) return;
     impl.overlay.pixels = image ? *image : std::vector<std::uint32_t>{};
     impl.overlay.width = image ? 480 : 0;
     impl.overlay.height = image ? 272 : 0;
@@ -500,20 +503,6 @@ void copy_frame(Runtime &rt, std::vector<std::uint32_t> &out) {
             }
             out[y * 480 + x] = c | 0xFF000000u;
         }
-    }
-}
-
-void blend_over(std::vector<std::uint32_t> &frame, const std::vector<std::uint32_t> &overlay) {
-    for (std::size_t i = 0; i < frame.size() && i < overlay.size(); ++i) {
-        const std::uint32_t o = overlay[i], a = o >> 24u;
-        if (a == 0) continue;
-        const std::uint32_t f = frame[i], inv = 255u - a;
-        std::uint32_t out = 0xFF000000u;
-        for (unsigned shift = 0; shift < 24; shift += 8) {
-            const std::uint32_t c = ((o >> shift) & 0xFFu) + (((f >> shift) & 0xFFu) * inv + 127u) / 255u;
-            out |= std::min(c, 255u) << shift;
-        }
-        frame[i] = out;
     }
 }
 
@@ -1997,7 +1986,8 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
             if (vblank != impl->last_vblank && impl->gpu_state == 2) {
                 impl->last_vblank = vblank;
                 copy_frame(*runtime, impl->frame);
-                if (!impl->menu_open && !impl->dialog_visible && impl->game_image) blend_over(impl->frame, *impl->game_image);
+                refresh_game_overlay(impl->frame, impl->game_image, impl->menu_open || impl->dialog_visible || impl->song_placing,
+                                     [&] { if (extra) extra(); });
                 if (impl->menu_open) {
                     blend_over(impl->frame, impl->soft_menu);
                 } else if (impl->dialog_visible) {
@@ -2005,6 +1995,8 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                     blend_over(impl->frame, impl->soft_overlay);
                 }
                 impl->host.present(impl->frame.data(), 480, 272, 480);
+            } else if (extra) {
+                extra();
             }
             // Audio: hand the device the output for the real time elapsed since the last poll.
             const std::uint64_t elapsed = now - impl->last_audio_us;
@@ -2060,7 +2052,7 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                 if (produced > 0) impl->host.queue_audio(mixed.data(), produced);
             }
         }
-        if (extra) extra();
+        if (!impl->open && extra) extra();
     });
 }
 
