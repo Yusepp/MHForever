@@ -12,11 +12,10 @@ namespace {
 using mhf::mhfu::GuildQuestScaling;
 using mhf::mhfu::GuildScalingSymbols;
 using mhf::mhfu::active_human_hunters;
-using mhf::mhfu::active_quest_id;
-using mhf::mhfu::enemy_scale_group;
 using mhf::mhfu::guild_scale_factors;
 using mhf::mhfu::is_guild_scalable_quest;
 using mhf::mhfu::is_large_monster_group;
+using mhf::mhfu::kMaxPartStaggerS16;
 using mhf::mhfu::rescale_current_hp_s16;
 using mhf::mhfu::scale_stat_s16;
 
@@ -120,6 +119,7 @@ void test_groups_and_math() {
     MHF_CHECK(scale_stat_s16(5400.0f, f4.hp) == 8100);
     MHF_CHECK(scale_stat_s16(26666.0f, f3.hp) == 32767);
     MHF_CHECK(scale_stat_s16(26666.0f, f4.hp) == 32767);
+    MHF_CHECK(scale_stat_s16(3500.0f, f4.stagger, kMaxPartStaggerS16) == 4000); // matches game_task's 4000 stagger cap
     MHF_CHECK(scale_stat_s16(1.0f, 0.1f) == 1);
     MHF_CHECK(scale_stat_s16(0.0f, 1.0f) == 0);
     MHF_CHECK(scale_stat_s16(-10.0f, 1.0f) == 0);
@@ -133,13 +133,14 @@ void test_groups_and_math() {
 
 void test_memory_readers_and_safety() {
     psprecomp::GuestMemory mem;
-    // Uninitialized pointers return nullopt safely
-    MHF_CHECK(!active_quest_id(mem, kQuestMgrPtr).has_value());
+    // Uninitialized / out-of-bounds / unaligned pointers fail safely
     MHF_CHECK(!active_human_hunters(mem, kPlayerMgrPtr).has_value());
-    // Out-of-bounds / unaligned addresses fail safely
-    MHF_CHECK(!active_quest_id(mem, 0x00001000u).has_value());
+    MHF_CHECK(!active_human_hunters(mem, 0x00001000u).has_value());
     MHF_CHECK(!active_human_hunters(mem, kPlayerMgrPtr + 1u).has_value());
-    MHF_CHECK(!enemy_scale_group(mem, 0x00001000u, 1).has_value());
+    GuildQuestScaling bad_symbols(GuildScalingSymbols{0x00001000u, 0x00001004u, 0x00001008u});
+    bad_symbols.on_enemy_hp_begin(kEnemyBase);
+    MHF_CHECK(bad_symbols.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 5000.0f);
+    MHF_CHECK(bad_symbols.on_enemy_stagger_store(mem, kEnemyBase, 1, 0, 300, true) == 300);
 
     // Felyne comrades in slots 4..5 are ignored when counting human hunters
     setup_players(mem, 1, /*add_comrades=*/true);
@@ -180,10 +181,11 @@ void test_spawn_scaling_and_exclusions() {
     MHF_CHECK(scaling.on_enemy_stagger_store(mem, kEnemyBase + 0x1000u, 3, 0, 40, true) == 40);
     MHF_CHECK(scaling.tracked_enemy_count() == 1);
 
-    // 4-player Fatalis clamps cleanly to s16 max (32767) instead of overflowing negative
+    // 4-player Fatalis clamps cleanly to s16 max (32767) and part stagger clamps at game_task's 4000 cap
     setup_players(mem, 4);
     scaling.on_enemy_hp_begin(kEnemyBase + 0x2000u);
     MHF_CHECK(scaling.on_enemy_hp_computed(mem, 2, 26666.0f, true) == 32767.0f);
+    MHF_CHECK(scaling.on_enemy_stagger_store(mem, kEnemyBase + 0x2000u, 2, 0, 3200, true) == 4000);
 }
 
 void test_dynamic_mid_quest_rescaling_and_live_toggle() {

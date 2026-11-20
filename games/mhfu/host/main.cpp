@@ -239,42 +239,33 @@ bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
     return overlay != nullptr && std::string_view(overlay->name).ends_with("_ovl_game_task");
 }
 
-void on_enemy_hp_begin(Runtime &, Context &ctx) {
+void on_enemy_hp_begin(Runtime &, [[maybe_unused]] Context &ctx) {
     if constexpr (kGuildScalingMapped) g_guild_scaling.on_enemy_hp_begin(ctx.gpr[4]);
-    else (void)ctx;
 }
 
-void on_enemy_hp_computed(Runtime &rt, Context &ctx) {
+void on_enemy_hp_computed([[maybe_unused]] Runtime &rt, [[maybe_unused]] Context &ctx) {
     if constexpr (kGuildScalingMapped) {
         ctx.fpr[0] = g_guild_scaling.on_enemy_hp_computed(rt.memory(), static_cast<std::uint8_t>(ctx.gpr[6]),
                                                           ctx.fpr[0], g_guild_quest_scaling.load());
-    } else {
-        (void)rt;
-        (void)ctx;
     }
 }
 
-void on_enemy_stagger_store(Runtime &rt, Context &ctx) {
+void on_enemy_stagger_store([[maybe_unused]] Runtime &rt, [[maybe_unused]] Context &ctx) {
     if constexpr (kGuildScalingMapped) {
         const std::int16_t scaled = g_guild_scaling.on_enemy_stagger_store(
             rt.memory(), ctx.gpr[18], static_cast<std::uint8_t>(ctx.gpr[7]), ctx.gpr[17],
             static_cast<std::int16_t>(ctx.gpr[3]), g_guild_quest_scaling.load());
         ctx.set_gpr(3, static_cast<std::uint32_t>(static_cast<std::uint16_t>(scaled)));
-    } else {
-        (void)rt;
-        (void)ctx;
     }
 }
 
-void update_guild_quest_scaling(Runtime &rt) {
+void update_guild_quest_scaling([[maybe_unused]] Runtime &rt) {
     if constexpr (kGuildScalingMapped) {
         if (!quest_overlay_at(rt, *region::mh_enemy_species_table)) {
             g_guild_scaling.clear();
             return;
         }
         g_guild_scaling.sync(rt.memory(), g_guild_quest_scaling.load());
-    } else {
-        (void)rt;
     }
 }
 
