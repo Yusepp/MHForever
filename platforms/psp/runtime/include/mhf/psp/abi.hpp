@@ -23,6 +23,8 @@ using GuestFunction = void (*)(Runtime &, Context &);
 using HleHandler = void (*)(Runtime &, Context &);
 // Host code run on entry to a hooked guest function (the guest function then runs normally).
 using HookFunction = void (*)(Runtime &, Context &);
+// True skips a callee or a filtered instruction, depending on the patch kind.
+using CallFilter = bool (*)(Runtime &, Context &);
 
 struct HleFunction {
     const char *library;
@@ -46,12 +48,13 @@ struct ImportEntry {
 
 // Everything the generated code of one module provides. Overlays (overlay_id >= 0) share address ranges with other
 // overlays; the runtime dispatches into the one that is active in its region (docs/04-recompiler.md §4.4).
-// A region map's call patch in a recompiled program (docs/04-recompiler.md section 6): the host hook registered under
-// `name` runs before the instruction at `address`. Recompiled code calls it itself; the interpreter looks it up here, for a
-// function that runs there because the game rewrote its code (region map [guards]).
+// A region map callback patch in a recompiled program (docs/04-recompiler.md section 6). Call patches run a host hook
+// before the instruction; instruction filters can skip that instruction. The interpreter uses these when code was
+// rewritten at run time (region map [guards]).
 struct CallPatchEntry {
     std::uint32_t address;
     const char *name;
+    bool instruction_filter = false;
 };
 
 struct Program {

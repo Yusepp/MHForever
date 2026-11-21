@@ -4,9 +4,7 @@
 
 namespace mhf::psp {
 
-// True skips the callee of a patched direct call after the delay slot has run.
-using CallFilter = bool (*)(Runtime &, Context &);
-
+// True skips a patched callee or, for a `filter` instruction patch, that instruction.
 namespace abi {
 [[nodiscard]] CallFilter find_call_filter(Runtime &rt, const char *name);
 }

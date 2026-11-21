@@ -26,6 +26,8 @@
 
 namespace mhf::psp {
 
+// Debug trace phase used by MHFU's modern-carving investigation. The display-list worker reads it between draws.
+
 // Error codes returned to the guest (subset of SceKernelErrorCode).
 namespace error {
 inline constexpr std::uint32_t kUnknownUid = 0x800200CBu;
@@ -139,6 +141,7 @@ public:
     void register_call_filter(std::string name, CallFilter filter);
     [[nodiscard]] CallFilter find_call_filter(std::string_view name) const;
     [[nodiscard]] CallFilter call_patch_filter(std::uint32_t pc) const;
+    [[nodiscard]] CallFilter instruction_patch_filter(std::uint32_t pc) const;
     // Instruction patches (region map [patches]): generated code reads the switch the first time it runs the
     // instruction, so the game program turns patches on before the game starts.
     void enable_patch(std::string name);
@@ -236,7 +239,7 @@ private:
     };
     std::vector<OverlayRegion> overlay_regions_;
     std::unordered_map<std::int32_t, const Program *> overlays_;
-    [[nodiscard]] const char *call_patch_name(std::uint32_t pc) const noexcept;
+    [[nodiscard]] const CallPatchEntry *call_patch_entry(std::uint32_t pc) const noexcept;
     std::unordered_map<std::string, HookFunction> hooks_;
     std::unordered_map<std::string, CallFilter> call_filters_;
     const Program *main_program_ = nullptr; // the executable (add_program), for its call patches
