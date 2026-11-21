@@ -598,7 +598,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.fastSupplyBox ?? false} onToggle={() => onChange({ fastSupplyBox: !(s.fastSupplyBox ?? false) })} label="Fast supply box" />
         </div>
         <div className="srow">
-          <div className="slabel"><b>Dynamic Guild quest scaling</b><span>Scales large-monster HP and part stagger in Guild quests to the active hunter count (1–4 players, anchored at vanilla 2P).</span></div>
+          <div className="slabel"><b>Dynamic Guild quest scaling</b><span>Scales large-monster HP and part stagger in Guild quests to the active hunter count (1–4 players).</span></div>
           <Toggle on={s.guildQuestScaling ?? false} onToggle={() => onChange({ guildQuestScaling: !(s.guildQuestScaling ?? false) })} label="Dynamic Guild quest scaling" />
         </div>
         <div className="srow">

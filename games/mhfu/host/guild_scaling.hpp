@@ -21,7 +21,7 @@ struct GuildScalingSymbols {
     }
 };
 
-// Modern player-count multipliers (Wilds/Rise/Sunbreak) anchored at Freedom Unite's 2-player Guild baseline (1.00x).
+// Player-count multipliers relative to the game's unmodified Guild values.
 // Monster attack and defense multipliers stay untouched so each rank keeps its original hit weight and armor curve.
 struct GuildScaleFactors {
     float hp = 1.0f;
@@ -86,7 +86,7 @@ private:
         std::uint8_t em_id = 0;
         float vanilla_hp = 0.0f;
         std::int16_t applied_max_hp = 0;
-        int applied_players = 2;
+        int applied_players = 0; // vanilla, until a hunter count is available
         bool has_hp = false;
         std::array<TrackedPart, kMaxParts> parts{};
     };

@@ -110,16 +110,16 @@ void test_groups_and_math() {
     const auto f2 = guild_scale_factors(2);
     const auto f3 = guild_scale_factors(3);
     const auto f4 = guild_scale_factors(4);
-    MHF_CHECK(f1.hp < f2.hp && f2.hp == 1.0f && f3.hp > f2.hp && f4.hp > f3.hp);
-    MHF_CHECK(f1.stagger < f2.stagger && f2.stagger == 1.0f && f3.stagger > f2.stagger && f4.stagger > f3.stagger);
+    MHF_CHECK(f1.hp == 0.55f && f2.hp == 0.90f && f3.hp == 1.30f && f4.hp == 1.60f);
+    MHF_CHECK(f1.stagger == 0.55f && f2.stagger == 0.90f && f3.stagger == 1.30f && f4.stagger == 1.60f);
     MHF_CHECK(guild_scale_factors(0).hp == f1.hp);
     MHF_CHECK(guild_scale_factors(9).hp == f4.hp);
 
     // Normal scaling + signed 16-bit clamp on 26,666-HP bosses at 3P/4P
-    MHF_CHECK(scale_stat_s16(5400.0f, f1.hp) == 3780);
-    MHF_CHECK(scale_stat_s16(5400.0f, f2.hp) == 5400);
-    MHF_CHECK(scale_stat_s16(5400.0f, f3.hp) == 6750);
-    MHF_CHECK(scale_stat_s16(5400.0f, f4.hp) == 8100);
+    MHF_CHECK(scale_stat_s16(5400.0f, f1.hp) == 2970);
+    MHF_CHECK(scale_stat_s16(5400.0f, f2.hp) == 4860);
+    MHF_CHECK(scale_stat_s16(5400.0f, f3.hp) == 7020);
+    MHF_CHECK(scale_stat_s16(5400.0f, f4.hp) == 8640);
     MHF_CHECK(scale_stat_s16(26666.0f, f3.hp) == 32767);
     MHF_CHECK(scale_stat_s16(26666.0f, f4.hp) == 32767);
     MHF_CHECK(scale_stat_s16(3500.0f, f4.stagger, kMaxPartStaggerS16) == 4000); // matches game_task's 4000 stagger cap
@@ -171,12 +171,12 @@ void test_spawn_scaling_and_exclusions() {
     MHF_CHECK(scaling.on_enemy_stagger_store(mem, kEnemyBase, 1, 0, 200, true) == 200);
     MHF_CHECK(scaling.tracked_enemy_count() == 0);
 
-    // Guild G-Rank quest (3201) solo (1P): large monster scaled to 0.70x HP and 0.75x stagger, small monster untouched
+    // Guild G-Rank quest (3201) solo (1P): large monster scaled to 0.55x HP and stagger, small monster untouched
     setup_quest(mem, 3201);
     setup_players(mem, 1);
     scaling.on_enemy_hp_begin(kEnemyBase);
-    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 8000.0f, true) == 5600.0f);
-    MHF_CHECK(scaling.on_enemy_stagger_store(mem, kEnemyBase, 1, 0, 400, true) == 300);
+    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 8000.0f, true) == 4400.0f);
+    MHF_CHECK(scaling.on_enemy_stagger_store(mem, kEnemyBase, 1, 0, 400, true) == 220);
 
     // Small monster in the same Guild quest stays untouched
     scaling.on_enemy_hp_begin(kEnemyBase + 0x1000u);
@@ -207,7 +207,7 @@ void test_quest_header_not_countdown_selects_scaling() {
     mem.store32(kQuestMgr + 0x10u, 50000u);
     mem.store16(header + 0x64u, 1014u); // Guild, despite a smaller countdown
     scaling.on_enemy_hp_begin(kEnemyBase);
-    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 3500.0f);
+    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 2750.0f);
     mem.store32(header + 4u, 0u); // invalid header fails closed
     scaling.on_enemy_hp_begin(kEnemyBase);
     MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 5000.0f);
@@ -218,27 +218,27 @@ void test_dynamic_mid_quest_rescaling_and_live_toggle() {
     GuildQuestScaling scaling(make_symbols());
     set_species_group(mem, 1, 1); // Rathalos
     setup_quest(mem, 3005);       // Guild G1*
-    setup_players(mem, 3);        // 3 hunters depart together (1.25x HP & stagger)
+    setup_players(mem, 3);        // 3 hunters depart together (1.30x HP & stagger)
 
     scaling.on_enemy_hp_begin(kEnemyBase);
     const auto spawned_hp = static_cast<std::int16_t>(scaling.on_enemy_hp_computed(mem, 1, 6000.0f, true));
-    MHF_CHECK(spawned_hp == 7500);
+    MHF_CHECK(spawned_hp == 7800);
     setup_enemy(mem, kEnemyBase, 1, spawned_hp, spawned_hp);
 
     const std::int16_t spawned_stagger = scaling.on_enemy_stagger_store(mem, kEnemyBase, 1, 0, 400, true);
-    MHF_CHECK(spawned_stagger == 500);
+    MHF_CHECK(spawned_stagger == 520);
     setup_part(mem, kEnemyBase, 0, spawned_stagger);
 
-    // Hunters deal 50% damage to HP (3750 left) and 50% to part stagger (250 left)
-    mem.store16(kEnemyBase + kEnemyCurrentHp, 3750);
-    mem.store16(kEnemyBase + kEnemyPartBase + kEnemyPartThreshold, 250);
+    // Hunters deal 50% damage to HP (3900 left) and 50% to part stagger (260 left)
+    mem.store16(kEnemyBase + kEnemyCurrentHp, 3900);
+    mem.store16(kEnemyBase + kEnemyPartBase + kEnemyPartThreshold, 260);
 
-    // Two teammates disconnect -> drops from 3P (1.25x) to 1P (0.70x HP = 4200, 0.75x stagger = 300)
+    // Two teammates disconnect -> drops from 3P (1.30x) to 1P (0.55x HP = 3300, stagger = 220)
     setup_players(mem, 1);
     scaling.sync(mem, true);
-    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyMaxHp)) == 4200);
-    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyCurrentHp)) == 2100); // exact 50% preserved
-    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyPartBase + kEnemyPartThreshold)) == 150);
+    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyMaxHp)) == 3300);
+    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyCurrentHp)) == 1650); // exact 50% preserved
+    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyPartBase + kEnemyPartThreshold)) == 110);
 
     // Player toggles the option OFF in Esc > Game -> restores vanilla 2P (6000 HP, 400 stagger), still 50% remaining
     scaling.sync(mem, false);
@@ -271,16 +271,32 @@ void test_late_player_init_and_carryover_hp_clamp() {
     MHF_CHECK(spawned_hp == 5000);
     setup_enemy(mem, kEnemyBase, 1, spawned_hp, spawned_hp);
 
-    // Once the solo hunter finishes loading, sync scales to 1P (3500 HP)
+    // Once the solo hunter finishes loading, sync scales to 1P (2750 HP)
     setup_players(mem, 1);
     scaling.sync(mem, true);
-    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyMaxHp)) == 3500);
-    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyCurrentHp)) == 3500);
+    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyMaxHp)) == 2750);
+    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyCurrentHp)) == 2750);
 
     // If Elder Dragon carry-over overwrote current HP above scaled max, sync clamps it to max
     mem.store16(kEnemyBase + kEnemyCurrentHp, 4500);
     scaling.sync(mem, true);
-    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyCurrentHp)) == 3500);
+    MHF_CHECK(static_cast<std::int16_t>(mem.load16(kEnemyBase + kEnemyCurrentHp)) == 2750);
+}
+
+void test_two_player_toggle_restores_vanilla() {
+    psprecomp::GuestMemory mem;
+    GuildQuestScaling scaling(make_symbols());
+    set_species_group(mem, 1, 1);
+    setup_quest(mem, 2105);
+    setup_players(mem, 2);
+    scaling.on_enemy_hp_begin(kEnemyBase);
+    const auto hp = static_cast<std::int16_t>(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true));
+    MHF_CHECK(hp == 4500);
+    setup_enemy(mem, kEnemyBase, 1, hp, hp);
+    scaling.sync(mem, false);
+    MHF_CHECK(mem.load16(kEnemyBase + kEnemyMaxHp) == 5000);
+    scaling.sync(mem, true);
+    MHF_CHECK(mem.load16(kEnemyBase + kEnemyMaxHp) == 4500);
 }
 
 } // namespace
@@ -293,5 +309,6 @@ int main() {
     test_quest_header_not_countdown_selects_scaling();
     test_dynamic_mid_quest_rescaling_and_live_toggle();
     test_late_player_init_and_carryover_hp_clamp();
+    test_two_player_toggle_restores_vanilla();
     return mhf::test::finish("mhfu_guild_scaling");
 }

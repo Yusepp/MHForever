@@ -26,17 +26,19 @@ constexpr std::uint32_t kEnemyPartRemaining = 0x04;   // s16 at +0x580 + part*8,
 constexpr std::uint32_t kEnemyTrackedBytes =
     kEnemyPartBase + static_cast<std::uint32_t>(GuildQuestScaling::kMaxParts) * kEnemyPartStride;
 
-constexpr int kVanillaGuildBaselinePlayers = 2;
+constexpr int kVanillaGuildBaselinePlayers = 0; // distinct from an enabled two-player quest
 
-// Player-count curve anchored at MHFU's 2-player Guild baseline (1.00x):
-//   HP:      0.70 / 1.00 / 1.25 / 1.50  (equivalent to 1.00 / 1.43 / 1.79 / 2.14 from 1P)
-//   Stagger: 0.75 / 1.00 / 1.25 / 1.50  (slightly firmer solo to keep MHFU's flinch weight; prevents 4P stunlock)
+// HP and stagger multipliers relative to the game's unmodified Guild values.
 constexpr std::array<GuildScaleFactors, 4> kFactorsByPlayers = {{
-    {0.70f, 0.75f}, // 1 player (solo)
-    {1.00f, 1.00f}, // 2 players (vanilla Guild baseline)
-    {1.25f, 1.25f}, // 3 players
-    {1.50f, 1.50f}, // 4 players
+    {0.55f, 0.55f}, // 1 player (solo)
+    {0.90f, 0.90f}, // 2 players
+    {1.30f, 1.30f}, // 3 players
+    {1.60f, 1.60f}, // 4 players
 }};
+
+GuildScaleFactors applied_factors(int players) {
+    return players == kVanillaGuildBaselinePlayers ? GuildScaleFactors{1.0f, 1.0f} : guild_scale_factors(players);
+}
 
 bool aligned_u32(std::uint32_t addr) { return (addr & 3u) == 0u; }
 
@@ -150,7 +152,7 @@ float GuildQuestScaling::on_enemy_hp_computed(const psprecomp::GuestMemory &memo
     const auto ctx = resolve_spawn(memory, em_id, enabled);
     if (!ctx) return vanilla_hp;
 
-    const std::int16_t scaled = scale_stat_s16(vanilla_hp, guild_scale_factors(ctx->target_players).hp, kMaxEnemyHpS16);
+    const std::int16_t scaled = scale_stat_s16(vanilla_hp, applied_factors(ctx->target_players).hp, kMaxEnemyHpS16);
     if (scaled <= 0) return vanilla_hp;
 
     if (enemy_addr != 0u && aligned_u32(enemy_addr) && memory.contains(enemy_addr, kEnemyMaxHp + 2u)) {
@@ -171,7 +173,7 @@ std::int16_t GuildQuestScaling::on_enemy_stagger_store(const psprecomp::GuestMem
     if (!ctx) return vanilla_stagger;
 
     const std::int16_t scaled =
-        scale_stat_s16(static_cast<float>(vanilla_stagger), guild_scale_factors(ctx->target_players).stagger,
+        scale_stat_s16(static_cast<float>(vanilla_stagger), applied_factors(ctx->target_players).stagger,
                        kMaxPartStaggerS16);
     if (scaled <= 0) return vanilla_stagger;
 
@@ -197,7 +199,7 @@ void GuildQuestScaling::sync(psprecomp::GuestMemory &memory, bool enabled) {
     if (!players) return;
 
     const int target_players = enabled ? *players : kVanillaGuildBaselinePlayers;
-    const GuildScaleFactors factors = guild_scale_factors(target_players);
+    const GuildScaleFactors factors = applied_factors(target_players);
 
     std::size_t write = 0;
     for (std::size_t i = 0; i < enemies_.size(); ++i) {
