@@ -163,6 +163,8 @@ Done too: an improved smithy layout, Info on the left with the list and its mate
 (`--smithy-layout`, launcher setting; `06-mhfu-module.md` §9).
 Done too: optional gathering indicators and automatic tools for EU, US, JP and FUComplete, kept by the launcher
 (`gatheringAssistance`, `--gathering-indicators`, `--auto-gathering-tools`; `06-mhfu-module.md` §9).
+Done too: optional hold-to-repeat for ordinary gathering and monster/tail carving, using the stock interaction routine
+(`modernCarving`, `--modern-carving`; `06-mhfu-module.md` §9).
 Done too: optional key quest markers for Village and Guild Hall (`--key-quest-markers`, launcher setting;
 `06-mhfu-module.md` §9).
 Done too: an optional segmented sharpness bar on the quest HUD (`--better-sharpness`, launcher setting; `06-mhfu-module.md` §9).

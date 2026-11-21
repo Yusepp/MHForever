@@ -637,6 +637,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.gatheringAssistance ?? false} onToggle={() => onChange({ gatheringAssistance: !(s.gatheringAssistance ?? false) })} label="Gathering assistance" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat ordinary gathering and carving at the same spot.</span></div>
+          <Toggle on={s.modernCarving ?? false} onToggle={() => onChange({ modernCarving: !(s.modernCarving ?? false) })} label="Modern carving" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Show key quest markers</b><span>Marks Village and Guild Hall key quests with a gold key, including completed quests.</span></div>
           <Toggle on={s.keyQuestMarkers ?? false} onToggle={() => onChange({ keyQuestMarkers: !(s.keyQuestMarkers ?? false) })} label="Show key quest markers" />
         </div>

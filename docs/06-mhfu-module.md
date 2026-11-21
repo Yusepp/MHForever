@@ -262,6 +262,14 @@ Spanish, German and Italian, following the configured language; stock JP default
 and “Ask” keeps the host default. Inspired by Lunng's [Gathering Nodes mod](https://www.nexusmods.com/monsterhunterfreedomunite/mods/26)
 and [source](https://github.com/pggkun/mhfu_gathering_nodes).
 
+### Modern carving
+
+The optional **Modern carving** setting (`--modern-carving`, launcher and in-game Game tab) repeats ordinary gathering
+and monster/tail carving while Circle stays held. The repeat hooks preserve its action state only while the same target
+remains available. Releasing Circle, changing targets, opening a menu or exhausting the spot ends the repeat. Mining and
+bug-catching are unchanged; the game's own item and reward routines still run. The action is faster and the hunter stays crouched between repeats. Available for Europe, North America, Japan and
+FU Complete. Off by default.
+
 ## 10. Specific risks
 
 - System fonts: FU imports `sceLibFont` → free replacement fonts with compatible metrics (no PGF).
