@@ -40,7 +40,10 @@ GuildScalingSymbols make_symbols() { return GuildScalingSymbols{kQuestMgrPtr, kP
 
 void setup_quest(psprecomp::GuestMemory &mem, std::uint32_t qid) {
     mem.store32(kQuestMgrPtr, kQuestMgr);
-    mem.store32(kQuestMgr + 0x10u, qid);
+    constexpr std::uint32_t header = 0x08903000u;
+    mem.store32(kQuestMgr + 0x4Cu, header);
+    mem.store32(header + 4u, 0x47444E32u);
+    mem.store16(header + 0x64u, static_cast<std::uint16_t>(qid));
 }
 
 void setup_players(psprecomp::GuestMemory &mem, int human_count, bool add_comrades = true) {
@@ -188,6 +191,28 @@ void test_spawn_scaling_and_exclusions() {
     MHF_CHECK(scaling.on_enemy_stagger_store(mem, kEnemyBase + 0x2000u, 2, 0, 3200, true) == 4000);
 }
 
+void test_quest_header_not_countdown_selects_scaling() {
+    psprecomp::GuestMemory mem;
+    GuildQuestScaling scaling(make_symbols());
+    constexpr std::uint32_t header = 0x08903000u;
+    setup_players(mem, 1);
+    set_species_group(mem, 1, 1);
+    mem.store32(kQuestMgrPtr, kQuestMgr);
+    mem.store32(kQuestMgr + 0x4cu, header);
+    mem.store32(header + 4u, 0x47444e32u);
+    mem.store32(kQuestMgr + 0x10u, 90000u);
+    mem.store16(header + 0x64u, 10101u); // Village, despite a large countdown
+    scaling.on_enemy_hp_begin(kEnemyBase);
+    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 5000.0f);
+    mem.store32(kQuestMgr + 0x10u, 50000u);
+    mem.store16(header + 0x64u, 1014u); // Guild, despite a smaller countdown
+    scaling.on_enemy_hp_begin(kEnemyBase);
+    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 3500.0f);
+    mem.store32(header + 4u, 0u); // invalid header fails closed
+    scaling.on_enemy_hp_begin(kEnemyBase);
+    MHF_CHECK(scaling.on_enemy_hp_computed(mem, 1, 5000.0f, true) == 5000.0f);
+}
+
 void test_dynamic_mid_quest_rescaling_and_live_toggle() {
     psprecomp::GuestMemory mem;
     GuildQuestScaling scaling(make_symbols());
@@ -265,6 +290,7 @@ int main() {
     test_groups_and_math();
     test_memory_readers_and_safety();
     test_spawn_scaling_and_exclusions();
+    test_quest_header_not_countdown_selects_scaling();
     test_dynamic_mid_quest_rescaling_and_live_toggle();
     test_late_player_init_and_carryover_hp_clamp();
     return mhf::test::finish("mhfu_guild_scaling");

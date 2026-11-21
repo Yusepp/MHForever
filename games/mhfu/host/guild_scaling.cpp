@@ -6,8 +6,9 @@
 namespace mhf::mhfu {
 namespace {
 
-// Struct offsets verified across ULES01213, ULUS10391, ULJM05500, and ULJM05500-FUC.
-constexpr std::uint32_t kQuestManagerQuestId = 0x10;  // u32: active quest ID
+// The quest-header pointer and ID were checked in FUComplete; the header signature guards other releases.
+constexpr std::uint32_t kQuestManagerHeader = 0x4C;   // pointer to the active quest record
+constexpr std::uint32_t kQuestHeaderMagic = 0x47444E32u; // "2NDG"
 constexpr std::uint32_t kPlayerManagerPlayers = 0x0C; // Player*[6]: 0..3 human hunters, 4..5 Felyne comrades
 constexpr std::uint32_t kHumanPlayerSlots = 4;
 constexpr std::uint32_t kPlayerFlags = 0x04;          // u32: bit 0 set while the player entity is active
@@ -42,10 +43,13 @@ bool aligned_u32(std::uint32_t addr) { return (addr & 3u) == 0u; }
 std::optional<std::uint32_t> read_quest_id(const psprecomp::GuestMemory &memory, std::uint32_t quest_manager_ptr_addr) {
     if (!aligned_u32(quest_manager_ptr_addr) || !memory.contains(quest_manager_ptr_addr, 4u)) return std::nullopt;
     const std::uint32_t manager = memory.load32(quest_manager_ptr_addr);
-    if (manager == 0u || !aligned_u32(manager) || !memory.contains(manager, kQuestManagerQuestId + 4u)) {
+    if (manager == 0u || !aligned_u32(manager) || !memory.contains(manager, kQuestManagerHeader + 4u)) {
         return std::nullopt;
     }
-    return memory.load32(manager + kQuestManagerQuestId);
+    const std::uint32_t header = memory.load32(manager + kQuestManagerHeader);
+    if (header == 0u || !aligned_u32(header) || !memory.contains(header, 0x66u) ||
+        memory.load32(header + 4u) != kQuestHeaderMagic) return std::nullopt;
+    return memory.load16(header + 0x64u);
 }
 
 std::optional<std::int8_t> read_scale_group(const psprecomp::GuestMemory &memory, std::uint32_t species_table_addr,
