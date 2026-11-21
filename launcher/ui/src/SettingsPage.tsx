@@ -641,6 +641,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.keyQuestMarkers ?? false} onToggle={() => onChange({ keyQuestMarkers: !(s.keyQuestMarkers ?? false) })} label="Show key quest markers" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Better sharpness gauge</b><span>Shows how much of each sharpness tier is left during a quest.</span></div>
+          <Toggle on={s.betterSharpness ?? false} onToggle={() => onChange({ betterSharpness: !(s.betterSharpness ?? false) })} label="Better sharpness gauge" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Show hunting horn songs</b><span>Displays the hunting horn's songs, the song being played and active effects during quests.</span></div>
           <Toggle on={s.hornSongs ?? false} onToggle={() => onChange({ hornSongs: !(s.hornSongs ?? false) })} label="Show hunting horn songs" />
         </div>

@@ -1380,6 +1380,10 @@ int main(int argc, char **argv) {
                 if (previous) previous();
             };
             if constexpr (kSharpnessMapped) {
+                frontend.add_game_option({"betterSharpness", "Better sharpness gauge",
+                                          "Shows how much of each sharpness tier is left during a quest.",
+                                          false, better_sharpness ? 1 : 0, 0, 1, 1, "",
+                                          [&better_sharpness](int v) { better_sharpness = v != 0; }});
                 constexpr mhf::mhfu::SharpnessSymbols symbols{
                     *region::mh_game_sys, *region::mh_player_manager, *region::mh_cockpit, *region::mh_blademaster_weapons,
                     *region::mh_weapon_model_classes, *region::mh_sharpness_class_rows, *region::mh_sharpness_rows};
