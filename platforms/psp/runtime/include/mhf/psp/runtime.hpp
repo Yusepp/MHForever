@@ -5,7 +5,7 @@
 // Recompiled guest functions are plain C++ functions `void f(Runtime&, Context&)`. Each PSP thread runs on its own
 // host fiber with its own Context; blocking kernel calls switch fibers. Nothing in here is specific to a game.
 
-#include "mhf/psp/abi.hpp"
+#include "mhf/psp/call_filter.hpp"
 
 #include "psprecomp/allegrex_context.hpp"
 #include "psprecomp/guest_memory.hpp"
@@ -136,6 +136,9 @@ public:
     // The hook of a call patch at `pc` in the program that holds it (the executable, or the overlay loaded there), when
     // one is registered: for the interpreter, which runs it before the instruction as recompiled code does.
     [[nodiscard]] HookFunction call_patch_hook(std::uint32_t pc) const;
+    void register_call_filter(std::string name, CallFilter filter);
+    [[nodiscard]] CallFilter find_call_filter(std::string_view name) const;
+    [[nodiscard]] CallFilter call_patch_filter(std::uint32_t pc) const;
     // Instruction patches (region map [patches]): generated code reads the switch the first time it runs the
     // instruction, so the game program turns patches on before the game starts.
     void enable_patch(std::string name);
@@ -233,7 +236,9 @@ private:
     };
     std::vector<OverlayRegion> overlay_regions_;
     std::unordered_map<std::int32_t, const Program *> overlays_;
+    [[nodiscard]] const char *call_patch_name(std::uint32_t pc) const noexcept;
     std::unordered_map<std::string, HookFunction> hooks_;
+    std::unordered_map<std::string, CallFilter> call_filters_;
     const Program *main_program_ = nullptr; // the executable (add_program), for its call patches
     bool any_call_patches_ = false;
     std::unordered_map<std::string, bool> patches_;
