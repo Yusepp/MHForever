@@ -109,6 +109,12 @@ system_active_overlays  = 0x00F7A580 # u16[6] inside System, active DATA.BIN fil
 mh_sharpness_sword = "executable 0x088413E8 call"
 mh_sharpness_glow = "executable 0x08841500 call"
 mh_gathering_prompt_update = "executable 0x08845CE4 call"
+# While enabled by its call filters, preserves these player action bytes for held gathering/carving.
+mh_modern_carving_animation_sample = "executable 0x0885FA0C filter"
+mh_modern_carving_animation_update = "executable 0x088637C4 filter"
+mh_modern_carving_animation_clear = "game_task.ovl 0x09A67EC0 filter"
+mh_modern_carving_action_clear = "game_task.ovl 0x09A67EC4 filter"
+mh_modern_carving_pose_choice = "game_task.ovl 0x09AA19AC call"
 
 
 # Key quest marker: collect only titles drawn during this complete lobby UI pass.

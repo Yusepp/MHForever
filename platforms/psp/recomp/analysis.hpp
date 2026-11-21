@@ -51,6 +51,7 @@ struct InstructionPatch {
         Immediate, // an ALU instruction with an immediate operand gets `immediate` instead
         Never,     // a conditional branch is never taken (its delay slot runs as it does when not taken)
         Call,      // the host hook registered under the patch's name runs first, then the instruction as it is
+        Filter,    // a registered call filter can skip this instruction at run time
     };
     std::string name;
     Kind kind{Kind::Immediate};

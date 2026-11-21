@@ -274,6 +274,10 @@ struct Interpreter {
             if (const HookFunction hook = rt.call_patch_hook(pc)) hook(rt, ctx);
             const auto d = psprecomp::decode_allegrex(mem.load32(pc));
             if (!d.has_delay_slot() && d.kind != K::Jr && d.kind != K::Jalr) {
+                if (const CallFilter filter = rt.instruction_patch_filter(pc); filter != nullptr && filter(rt, ctx)) {
+                    pc += 4u;
+                    continue;
+                }
                 exec(d, pc);
                 pc += 4u;
                 continue;

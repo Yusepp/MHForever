@@ -20,7 +20,7 @@ constexpr std::uint32_t kPlayerAction = 0x299, kPlayerSelectedItem = 0x648;
 constexpr std::uint32_t kNodeId = 16, kNodeRemaining = 18, kNodeType = 20;
 constexpr std::uint32_t kDynamicNodes = 20, kDynamicNodeSize = 32, kStaticNodeSize = 24;
 constexpr std::uint32_t kInventorySlots = 25, kCircle = 0x2000;
-constexpr std::uint8_t kMiningAction = 0x51, kBugAction = 0x52;
+constexpr std::uint8_t kGatherAction = 0x47, kCarveAction = 0x4a, kMiningAction = 0x51, kBugAction = 0x52;
 constexpr std::uint64_t kHintLifetimeUs = 150'000;
 
 struct HintText {
@@ -128,22 +128,26 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         const auto *overlay = rt.active_overlay_at(*region::mh_gathering_probe);
         if (!overlay || !std::string_view(overlay->name).ends_with("_ovl_game_task")) {
             selection_.reset();
+            repeat_ = {};
             return;
         }
         auto &m = rt.memory();
         const auto sys = m.load32(*region::mh_game_sys), manager = m.load32(*region::mh_player_manager);
         if (!m.contains(sys, 0x29) || !m.contains(manager, 0x24)) {
             selection_.reset();
+            repeat_ = {};
             return;
         }
         const auto slot = m.load8(sys + kGameSysPlayerSlot);
         if (slot >= kPlayerSlots) {
             selection_.reset();
+            repeat_ = {};
             return;
         }
         const auto player = m.load32(manager + kPlayerManagerPlayers + slot * 4u);
         if (!m.contains(player, 0x696)) {
             selection_.reset();
+            repeat_ = {};
             return;
         }
         // Keep the tool selected until the game has finished consuming it. Never undo a later selection or write
@@ -157,13 +161,22 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
                 selection_.reset();
             }
         }
-        if (!indicators && !automatic_tools) return;
-        if ((input_blocked && input_blocked()) || psp::current_dialog(rt).kind != psp::DialogView::Kind::None) return;
+        if (!modern_carving || !circle) repeat_ = {};
+        if (!indicators && !automatic_tools && !modern_carving) return;
+        if ((input_blocked && input_blocked()) || psp::current_dialog(rt).kind != psp::DialogView::Kind::None) {
+            repeat_ = {};
+            return;
+        }
         const auto cockpit = m.load32(*region::mh_cockpit);
         if (!m.contains(cockpit, 0x605) || m.load8(sys + kGameSysMenu) != 0 || m.load8(cockpit + kCockpitMenu) != 0 ||
-            m.load8(cockpit + kCockpitWindow) != 0)
+            m.load8(cockpit + kCockpitWindow) != 0) {
+            repeat_ = {};
             return;
-        if (m.load8(player + kPlayerReady) > 1) return;
+        }
+        if (m.load8(player + kPlayerReady) > 1) {
+            repeat_ = {};
+            return;
+        }
         if (!scratch_) {
             const auto block = rt.allocate_kernel_block("gathering-query", 16);
             if (!block) return;
@@ -177,8 +190,44 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         // Every guest call gets a copy: probe/accessor/interaction must not clobber
         // the interrupted game's context.
         const auto target = read_target(rt, ctx, player, scratch_);
+        const auto action = m.load8(player + kPlayerAction);
+        const auto area = m.load16(player + kPlayerArea);
+        std::uint8_t repeat_action = 0;
+        if (target && target->remaining != 0 && (target->carving || (target->type != 3 && target->type != 4)))
+            repeat_action = target->carving ? kCarveAction : kGatherAction;
+        const bool repeatable = modern_carving && target && target->remaining != 0 && repeat_action != 0;
+        const bool same_target = target && repeat_.player == player && repeat_.area == area &&
+                                 repeat_.target == target->index && repeat_.type == target->type;
+        if (repeat_.armed || repeat_.working) {
+            if (repeat_.player != player || repeat_.area != area || (target && !same_target)) {
+                repeat_ = {};
+            } else if (repeat_.working && action == repeat_.action) {
+                // Keep the target latched through the game's normal gathering or carving animation.
+            } else if (repeat_.armed && action == repeat_.action && m.load8(player + kPlayerReady) == 1) {
+                repeat_.armed = false;
+                repeat_.working = true;
+            } else if (repeat_.armed && action == 0 && repeatable && same_target) {
+                // Wait for the first action to start; the game's own Circle handling starts it.
+            } else {
+                repeat_ = {};
+            }
+        } else if (repeatable && circle && action == repeat_action && m.load8(player + kPlayerReady) == 1) {
+            // Circle may have started the action just before this hook first observed the target.
+            repeat_ = {player, target->index, target->type, area, repeat_action, false, true};
+        } else if (repeatable && circle && action == 0 && m.load8(player + kPlayerReady) == 0) {
+            // Arm on the same target before the game's first action starts.
+            repeat_ = {player, target->index, target->type, area, repeat_action, true, false};
+        }
         if (!target) return;
         const auto [index, type, remaining, carving] = *target;
+        if (repeat_.working && modern_carving) {
+            if (repeat_target_ != index) { repeat_target_ = index; repeat_remaining_ = remaining; reward_received_ = false; }
+            else if (remaining < repeat_remaining_) {
+                reward_received_ = true; repeat_remaining_ = remaining;
+                hold_crouched_pose_ = remaining != 0; pose_next_cycle_ = false;
+            }
+            else if (remaining > repeat_remaining_) { repeat_remaining_ = remaining; reward_received_ = false; }
+        }
         auto bag_call = ctx;
         bag_call.gpr[4] = sys;
         bag_call.gpr[5] = 0;
@@ -216,7 +265,6 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
                 hint_ = "○  " + hint_;
         }
         if (!automatic_tools || !pressed || !decision.tool_slot || !decision.available) return;
-        const auto action = m.load8(player + kPlayerAction);
         if (action == kMiningAction || action == kBugAction) return;
         const auto previous_slot = m.load16(player + kPlayerSelectedItem);
         m.store16(player + kPlayerSelectedItem, *decision.tool_slot);
@@ -236,6 +284,68 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             selection_ = Selection{player, previous_slot, *decision.tool_slot, expected_action};
     }
 }
+
+bool Gathering::repeat_available(psp::Runtime &rt, psp::Context &ctx, std::uint32_t player) {
+    if (!modern_carving || !repeat_.working || (psp::controller_state(rt).buttons & kCircle) == 0 ||
+        (input_blocked && input_blocked()) || psp::current_dialog(rt).kind != psp::DialogView::Kind::None ||
+        !scratch_ || busy_)
+        return false;
+    auto &m = rt.memory();
+    if (player != repeat_.player || !m.contains(player, kPlayerAction + 1) ||
+        m.load8(player + kPlayerAction) != repeat_.action ||
+        m.load16(player + kPlayerArea) != repeat_.area)
+        return false;
+    busy_ = true;
+    struct Guard {
+        bool &busy;
+        ~Guard() { busy = false; }
+    } guard{busy_};
+    const auto target = read_target(rt, ctx, player, scratch_);
+    const bool available = target && target->index == repeat_.target && target->type == repeat_.type &&
+                           target->remaining != 0 &&
+                           (target->carving || (target->type != 3 && target->type != 4));
+    return available;
+}
+
+bool Gathering::preserve_action(psp::Runtime &rt, psp::Context &ctx) {
+    return repeat_available(rt, ctx, ctx.gpr[20]);
+}
+
+void Gathering::choose_crouched_pose(psp::Runtime &rt, psp::Context &ctx) {
+    if (ctx.gpr[4] == repeat_.player && repeat_.action == kCarveAction && repeat_available(rt, ctx, ctx.gpr[4]))
+        ctx.gpr[6] = 0x60u;
+}
+
+void Gathering::animation_sample(psp::Runtime &rt, psp::Context &ctx) {
+    if (modern_carving && hold_crouched_pose_ && repeat_.working &&
+        (psp::controller_state(rt).buttons & kCircle) && ctx.gpr[4] >= repeat_.player + 0x1200u &&
+        ctx.gpr[4] < repeat_.player + 0x4100u && std::isfinite(ctx.fpr[12]))
+        ctx.fpr[12] = 100.0f;
+}
+
+void Gathering::animation_update(psp::Runtime &rt, psp::Context &ctx) {
+    if (hold_crouched_pose_ && repeat_.working && ctx.gpr[4] == repeat_.player + 0x80u &&
+        rt.memory().contains(ctx.gpr[4] + 16u, 4u)) {
+        const auto clock = std::bit_cast<float>(rt.memory().load32(ctx.gpr[4] + 16u));
+        if (clock < 20.0f) pose_next_cycle_ = true;
+        if (pose_next_cycle_ && clock >= 100.0f) hold_crouched_pose_ = false;
+    }
+    if (!(psp::controller_state(rt).buttons & kCircle) || !repeat_.working) hold_crouched_pose_ = false;
+    if (!modern_carving || !repeat_.working || ctx.gpr[4] != repeat_.player + 0x80u ||
+        !(psp::controller_state(rt).buttons & kCircle)) return;
+    auto &memory = rt.memory();
+    const auto object = ctx.gpr[4];
+    if (!memory.contains(object, 32u)) return;
+    const auto clock = std::bit_cast<float>(memory.load32(object + 16u));
+    const auto step = std::bit_cast<float>(memory.load32(object + 20u));
+    const auto end = std::bit_cast<float>(memory.load32(object + 28u));
+    if (clock < 20.0f) reward_received_ = false;
+    const float extra = reward_received_ ? step : step * 0.25f;
+    if (std::isfinite(clock) && std::isfinite(step) && std::isfinite(end) && step > 0.0f &&
+        clock >= 0.0f && clock + step + extra < end)
+        memory.store32(object + 16u, std::bit_cast<std::uint32_t>(clock + extra));
+}
+
 std::string Gathering::hint(psp::Runtime &rt) const {
     return indicators && rt.now_us() - updated_ < kHintLifetimeUs ? hint_ : std::string{};
 }

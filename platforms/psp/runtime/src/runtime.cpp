@@ -154,7 +154,7 @@ HookFunction Runtime::find_hook(std::string_view name) const {
     return it != hooks_.end() ? it->second : nullptr;
 }
 
-const char *Runtime::call_patch_name(std::uint32_t pc) const noexcept {
+const CallPatchEntry *Runtime::call_patch_entry(std::uint32_t pc) const noexcept {
     if (!any_call_patches_) return nullptr;
     const Program *program = main_program_;
     for (const auto &region : overlay_regions_) {
@@ -167,11 +167,12 @@ const char *Runtime::call_patch_name(std::uint32_t pc) const noexcept {
     const auto it = std::lower_bound(program->call_patches.begin(), program->call_patches.end(), pc,
                                      [](const CallPatchEntry &p, std::uint32_t a) { return p.address < a; });
     if (it == program->call_patches.end() || it->address != pc) return nullptr;
-    return it->name;
+    return &*it;
 }
 
 HookFunction Runtime::call_patch_hook(std::uint32_t pc) const {
-    if (const char *name = call_patch_name(pc)) return find_hook(name);
+    if (const auto *patch = call_patch_entry(pc); patch != nullptr && !patch->instruction_filter)
+        return find_hook(patch->name);
     return nullptr;
 }
 
@@ -183,9 +184,15 @@ CallFilter Runtime::find_call_filter(std::string_view name) const {
 }
 
 CallFilter Runtime::call_patch_filter(std::uint32_t pc) const {
-    if (!call_filters_.empty()) {
-        if (const char *name = call_patch_name(pc)) return find_call_filter(name);
-    }
+    if (call_filters_.empty()) return nullptr;
+    if (const auto *patch = call_patch_entry(pc); patch != nullptr && !patch->instruction_filter)
+        return find_call_filter(patch->name);
+    return nullptr;
+}
+
+CallFilter Runtime::instruction_patch_filter(std::uint32_t pc) const {
+    if (const auto *patch = call_patch_entry(pc); patch != nullptr && patch->instruction_filter)
+        return find_call_filter(patch->name);
     return nullptr;
 }
 

@@ -155,6 +155,8 @@ Original design notes:
   decodes the instruction at the address, stops when it is not of the kind the patch changes or is not recompiled, and
   emits the original and the changed form behind `abi::patch_enabled(rt, "<name>")`, read once. The game program
   turns a patch on with `Runtime::enable_patch` before the game starts, so one build serves both settings.
+  A `filter` patch runs its registered call filter before one non-control-transfer instruction; returning true skips
+  that instruction. This supports run-time conditions such as keeping a held gathering animation active.
 - **Guarded words** (2026-11-07): for code a patch rewrites at run time (FUComplete's PRELOAD.BIN and MODLOAD.BIN store
   into the executable and the overlays, by its options). A region map's `[guards]` table lists them,
   `name = "<module> <address> <address>..."`. Every function that holds one of those words compares it in memory with

@@ -148,6 +148,11 @@ private:
     // The statements of a non-control-flow instruction; with an Immediate patch, both forms behind its switch.
     [[nodiscard]] std::string instruction_code(const DecodedInstruction &d, std::uint32_t pc) const {
         const InstructionPatch *patch = patch_at(pc);
+        if (patch != nullptr && patch->kind == InstructionPatch::Kind::Filter) {
+            return "    { static const auto filter = abi::find_call_filter(rt, \"" + cpp_escape(patch->name) +
+                   "\");\n      if (filter == nullptr || !filter(rt, ctx)) {\n" + emit_instruction(d, pc) +
+                   "      } }\n";
+        }
         if (patch == nullptr || patch->kind != InstructionPatch::Kind::Immediate) {
             return emit_instruction(d, pc);
         }
@@ -189,6 +194,10 @@ private:
                      << "\");\n      if (hook != nullptr) hook(rt, ctx); }\n";
             }
             if (!d.has_delay_slot() && d.kind != OpcodeKind::Jr && d.kind != OpcodeKind::Jalr) {
+                if (const InstructionPatch *patch = patch_at(pc);
+                    patch != nullptr && patch->kind == InstructionPatch::Kind::Filter) {
+                    uses_call_filter_ = true;
+                }
                 out_ << instruction_code(d, pc);
                 if (ends_block(d)) {
                     return; // emit_instruction already reported and returned
@@ -435,8 +444,9 @@ EmitResult emit_program(const ProgramInput &input, const Analysis &analysis, con
     std::size_t call_patches = 0;
     table << "\nconst CallPatchEntry kCallPatches[] = {\n";
     for (const auto &[address, patch] : input.patches) { // a std::map: sorted by address
-        if (patch.kind != InstructionPatch::Kind::Call) continue;
-        table << "    {" << hex32(address) << "u, \"" << cpp_escape(patch.name) << "\"},\n";
+        if (patch.kind != InstructionPatch::Kind::Call && patch.kind != InstructionPatch::Kind::Filter) continue;
+        table << "    {" << hex32(address) << "u, \"" << cpp_escape(patch.name) << "\", "
+              << (patch.kind == InstructionPatch::Kind::Filter ? "true" : "false") << "},\n";
         ++call_patches;
     }
     if (call_patches == 0) table << "    {0u, nullptr},\n"; // none: the span below is empty
@@ -549,8 +559,10 @@ std::vector<RegionPatch> region_patches(const std::filesystem::path &symbols) {
             p.patch.kind = InstructionPatch::Kind::Never;
         } else if (kind == "call" && immediate.empty()) {
             p.patch.kind = InstructionPatch::Kind::Call;
+        } else if (kind == "filter" && immediate.empty()) {
+            p.patch.kind = InstructionPatch::Kind::Filter;
         } else {
-            fail("the kind is \"immediate <value>\", \"never\" or \"call\"");
+            fail("the kind is \"immediate <value>\", \"never\", \"call\" or \"filter\"");
         }
         result.push_back(std::move(p));
     }
@@ -602,6 +614,10 @@ std::string patch_mismatch(const DecodedInstruction &d, const InstructionPatch &
         }
     case InstructionPatch::Kind::Call:
         return {}; // any instruction, but not in a delay slot (main.cpp checks the one before it)
+    case InstructionPatch::Kind::Filter:
+        if (d.has_delay_slot() || d.kind == OpcodeKind::Jr || d.kind == OpcodeKind::Jalr)
+            return "not a single non-control-transfer instruction (" + d.mnemonic + ")";
+        return {};
     }
     return "unknown patch kind";
 }
