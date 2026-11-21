@@ -97,6 +97,8 @@ public:
     void set_song_panel(std::optional<overlay::SongPanel> panel);
     // A game-supplied bar over the quest HUD, composed with the other quest overlays.
     void set_hud_bar(std::optional<overlay::HudBar> bar);
+    // True once the worker has published the replacement over the quest HUD.
+    [[nodiscard]] bool hud_bar_visible() const;
     // A short game-provided action prompt; hidden with the quest HUD and while menus are open.
     void set_game_hint(std::string hint, std::vector<overlay::HintSprite> sprites = {});
     [[nodiscard]] bool game_input_blocked() const;

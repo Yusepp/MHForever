@@ -80,6 +80,7 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
     // mapped for every release: then none). Widescreen: its three call patches where a camera is set up and where it
     // makes its culling planes, in every release. --guild-quest-scaling: three call patches in game_task.ovl.
     std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches, guild_scaling_patches, quest_patches;
+    std::set<std::string> sharpness_patches;
     for (const auto &p : mhf::psp::recomp::region_patches(map_path)) {
         if (p.patch.name.starts_with("mh_smithy_")) {
             MHF_CHECK(p.module == "lobby_task.ovl");
@@ -87,6 +88,9 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_gathering_")) {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             gathering_patches.insert(p.patch.name);
+        } else if (p.patch.name.starts_with("mh_sharpness_")) {
+            MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+            sharpness_patches.insert(p.patch.name);
         } else if (p.patch.name.starts_with("mh_enemy_")) {
             MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             guild_scaling_patches.insert(p.patch.name);
@@ -98,6 +102,7 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
             (p.patch.name.starts_with("mh_camera_aspect_") ? aspect_patches : camera_patches).insert(p.patch.name);
         }
     }
+    MHF_CHECK(sharpness_patches == std::set<std::string>({"mh_sharpness_sword", "mh_sharpness_glow"}));
     MHF_CHECK(gathering_patches == std::set<std::string>{"mh_gathering_prompt_update"});
     MHF_CHECK(quest_patches == std::set<std::string>({"mh_quest_markers_begin", "mh_quest_markers_title", "mh_quest_markers_end"}));
     MHF_CHECK(smithy_patches.size() == 9);

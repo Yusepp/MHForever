@@ -915,16 +915,42 @@ bool MenuRenderer::render_song_panel(const SongPanel &panel, float at_x, float a
     if (bar != nullptr) {
         const float x = bar->x * hud_scale, y = bar->y * hud_scale;
         const float w = bar->width * hud_scale, h = bar->height * hud_scale;
-        d.rect(x - hud_scale, y - hud_scale, w + 2 * hud_scale, h + 2 * hud_scale, kBlack, 0.9f);
-        d.rect(x, y, w, h, kDim, 0.35f);
-        float start = 0;
-        for (const auto &segment : bar->segments) {
-            const float end = std::min(bar->fill, segment.end);
-            if (end > start) {
-                const auto &[r, g, b] = segment.rgb;
-                d.rect(x + w * start, y, w * (end - start), h, {r, g, b}, 1.0f);
+        constexpr Color kSwordEdge{0.12f, 0.10f, 0.09f};
+        constexpr Color kSwordTrim{0.68f, 0.64f, 0.53f};
+        constexpr Color kSpentBlade{0.20f, 0.19f, 0.18f};
+        const auto rect = [&](float left, float top, float right, float bottom, Color color) {
+            d.rect(x + w * left, y + h * top, w * (right - left), h * (bottom - top), color, 1.0f);
+        };
+        rect(0.00f, 0.33f, 0.09f, 0.67f, kSwordEdge); // pommel
+        rect(0.06f, 0.38f, 0.23f, 0.62f, kSwordEdge); // grip
+        rect(0.03f, 0.42f, 0.20f, 0.56f, kSwordTrim);
+        rect(0.16f, 0.00f, 0.24f, 1.00f, kSwordEdge); // crossguard
+        rect(0.18f, 0.10f, 0.22f, 0.90f, kSwordTrim);
+
+        // Clip each colored band to the bevel as the blade tapers to its point.
+        constexpr float kBladeStart = 0.24f, kBladeEnd = 0.96f;
+        const int rows = std::max(1, static_cast<int>(std::ceil(h * static_cast<float>(height) / Impl::kH)));
+        for (int row = 0; row < rows; ++row) {
+            const float top = static_cast<float>(row) / static_cast<float>(rows);
+            const float bottom = static_cast<float>(row + 1) / static_cast<float>(rows);
+            const float bevel = std::abs((top + bottom) * 0.5f - 0.5f);
+            if (bevel > 0.35f) continue;
+            const float tip = 1.01f - 0.39f * bevel;
+            rect(0.23f, top, tip, bottom, kSwordEdge);
+            if (bevel > 0.26f) continue;
+            rect(kBladeStart, top, tip - 0.014f, bottom, kSwordTrim);
+            if (bevel > 0.19f) continue;
+            const float inner_tip = std::min(kBladeEnd, tip - 0.033f);
+            rect(kBladeStart, top, inner_tip, bottom, kSpentBlade);
+            float start = kBladeStart;
+            for (const auto &segment : bar->segments) {
+                const float end = std::min(inner_tip, std::lerp(kBladeStart, kBladeEnd, std::min(bar->fill, segment.end)));
+                if (end > start) {
+                    const auto &[r, g, b] = segment.rgb;
+                    rect(start, top, end, bottom, {r, g, b});
+                }
+                start = std::lerp(kBladeStart, kBladeEnd, segment.end);
             }
-            start = segment.end;
         }
     }
     // As wide as the picture, in logical units: 480 at the PSP's shape, more over a widescreen picture.

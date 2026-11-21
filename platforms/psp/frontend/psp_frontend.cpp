@@ -176,6 +176,7 @@ struct Frontend::Impl {
     bool widescreen_offered{}, shadows_offered{};
     bool game_hint_input_latched = false;
     std::optional<overlay::HudBar> hud_bar;
+    bool hud_bar_published{}; // overlay.mutex; relevant only while the quest overlay owns the picture
     std::string game_hint;
     std::vector<overlay::HintSprite> game_hint_sprites;
     std::optional<overlay::SongPanel> songs;
@@ -262,6 +263,7 @@ struct Frontend::Impl {
                         overlay.aspect = songs_view ? songs_view->aspect : 0.0f;
                         overlay.height = songs_view ? songs_view->height : 0;
                         overlay.visible = songs_view.has_value();
+                        hud_bar_published = songs_view && songs_view->bar.has_value();
                         overlay_owner = songs_view ? OverlayOwner::songs : OverlayOwner::none;
                         ++overlay.generation;
                     }
@@ -418,6 +420,14 @@ bool Frontend::game_input_blocked() const {
 }
 
 void Frontend::set_hud_bar(std::optional<overlay::HudBar> bar) { impl_->hud_bar = std::move(bar); }
+
+bool Frontend::hud_bar_visible() const {
+    auto &impl = *impl_;
+    if (!impl.hud_bar || impl.gpu_state != 1 || impl.menu_open || impl.dialog_visible || impl.song_placing ||
+        impl.notice_shown || !impl.live.quest_hud.load(std::memory_order_relaxed)) return false;
+    std::lock_guard lock(impl.overlay.mutex);
+    return impl.hud_bar_published && impl.overlay_owner == Impl::OverlayOwner::songs;
+}
 
 void Frontend::set_game_hint(std::string hint, std::vector<overlay::HintSprite> sprites) {
     impl_->game_hint = std::move(hint);

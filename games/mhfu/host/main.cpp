@@ -270,15 +270,28 @@ bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
 constexpr bool kSharpnessMapped = region::mh_game_sys && region::mh_player_manager && region::mh_cockpit &&
                                  region::mh_blademaster_weapons && region::mh_weapon_model_classes &&
                                  region::mh_sharpness_class_rows && region::mh_sharpness_rows && region::mh_horn_songs;
+constexpr mhf::mhfu::SharpnessSymbols kSharpnessSymbols{
+    region::mh_game_sys.value_or(0), region::mh_player_manager.value_or(0), region::mh_cockpit.value_or(0),
+    region::mh_blademaster_weapons.value_or(0), region::mh_weapon_model_classes.value_or(0),
+    region::mh_sharpness_class_rows.value_or(0), region::mh_sharpness_rows.value_or(0)};
+constexpr const char *kSharpnessDraws[] = {"mh_sharpness_sword", "mh_sharpness_glow"};
+
+mhf::psp::Frontend *g_sharpness_frontend = nullptr;
+bool g_better_sharpness = false;
+
+bool replace_sharpness_draw(Runtime &rt, Context &) {
+    return g_better_sharpness && g_sharpness_frontend != nullptr && g_sharpness_frontend->hud_bar_visible() &&
+           mhf::mhfu::read_sharpness(rt.memory(), kSharpnessSymbols).has_value();
+}
 
 mhf::overlay::HudBar sharpness_bar(const mhf::mhfu::Sharpness &gauge) {
     constexpr std::array<std::array<float, 3>, 7> colors{{
         {0.91f, 0.16f, 0.14f}, {1.0f, 0.49f, 0.15f}, {0.98f, 0.85f, 0.22f}, {0.24f, 0.82f, 0.32f},
         {0.27f, 0.54f, 0.96f}, {0.94f, 0.95f, 0.98f}, {0.72f, 0.38f, 0.94f},
     }};
-    // Between the sword and the name plates. The frontend scales this with the top-left HUD.
+    // At the stock sword's origin, below the stamina bar.
     const float units = static_cast<float>(gauge.maximum);
-    mhf::overlay::HudBar bar{62.0f, 44.0f, 80.0f, 6.0f, static_cast<float>(gauge.current) / units, {}};
+    mhf::overlay::HudBar bar{60.0f, 31.0f, 44.0f, 12.0f, static_cast<float>(gauge.current) / units, {}};
     bar.segments.reserve(colors.size());
     for (std::size_t i = 0; i < colors.size(); ++i) {
         bar.segments.push_back({static_cast<float>(gauge.ends[i]) / units, colors[i]});
@@ -1379,18 +1392,21 @@ int main(int argc, char **argv) {
                 }
                 if (previous) previous();
             };
-            if constexpr (kSharpnessMapped) {
+            const bool sharpness_draws_mapped = std::ranges::all_of(kSharpnessDraws, [&](std::string_view name) {
+                return std::ranges::any_of(programs.front()->call_patches, [&](const auto &patch) { return patch.name == name; });
+            });
+            if (kSharpnessMapped && sharpness_draws_mapped) {
+                g_sharpness_frontend = &frontend;
+                g_better_sharpness = better_sharpness;
+                for (const char *name : kSharpnessDraws) runtime.register_call_filter(name, &replace_sharpness_draw);
                 frontend.add_game_option({"betterSharpness", "Better sharpness gauge",
                                           "Shows how much of each sharpness tier is left during a quest.",
                                           false, better_sharpness ? 1 : 0, 0, 1, 1, "",
-                                          [&better_sharpness](int v) { better_sharpness = v != 0; }});
-                constexpr mhf::mhfu::SharpnessSymbols symbols{
-                    *region::mh_game_sys, *region::mh_player_manager, *region::mh_cockpit, *region::mh_blademaster_weapons,
-                    *region::mh_weapon_model_classes, *region::mh_sharpness_class_rows, *region::mh_sharpness_rows};
-                extra = [&frontend, &runtime, &better_sharpness, symbols, last_frame = std::uint64_t{0},
+                                          [](int v) { g_better_sharpness = v != 0; }});
+                extra = [&frontend, &runtime, last_frame = std::uint64_t{0},
                          shown = std::optional<mhf::mhfu::Sharpness>{}, previous = std::move(extra)]() mutable {
                     if (previous) previous();
-                    if (!better_sharpness) {
+                    if (!g_better_sharpness) {
                         if (shown) frontend.set_hud_bar(std::nullopt);
                         shown.reset();
                         last_frame = 0;
@@ -1400,8 +1416,8 @@ int main(int argc, char **argv) {
                     const std::uint64_t frame = mhf::psp::display_state(runtime).frames;
                     if (frame == last_frame) return;
                     last_frame = frame;
-                    const auto gauge = quest_overlay_at(runtime, *region::mh_horn_songs) ?
-                                       mhf::mhfu::read_sharpness(runtime.memory(), symbols) : std::nullopt;
+                    const auto gauge = quest_overlay_at(runtime, region::mh_horn_songs.value_or(0)) ?
+                                       mhf::mhfu::read_sharpness(runtime.memory(), kSharpnessSymbols) : std::nullopt;
                     if (gauge != shown) {
                         shown = gauge;
                         frontend.set_hud_bar(gauge ? std::optional(sharpness_bar(*gauge)) : std::nullopt);

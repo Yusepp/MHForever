@@ -99,6 +99,9 @@ system_active_overlays  = 0x00F7A580 # u16[6] inside System, active DATA.BIN fil
 # move (and paging) while the R panel is open (a test of flag 0x20; immediate 0 never finds it set) and while
 # Info is open (a branch on the Info level, never taken).
 [patches]
+# The cockpit draws the stock sword and its pulsing glow in two distinct calls.
+mh_sharpness_sword = "executable 0x088413E8 call"
+mh_sharpness_glow = "executable 0x08841500 call"
 mh_gathering_prompt_update = "executable 0x08845CE4 call"
 
 
