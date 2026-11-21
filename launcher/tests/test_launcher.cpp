@@ -356,6 +356,14 @@ int main(int argc, char **argv) {
         markers["keyQuestMarkers"] = "false";
         l.set_settings(markers);
         CHECK(l.state()["settings"]["keyQuestMarkers"].as_bool());
+        CHECK(!l.state()["settings"]["betterSharpness"].as_bool(true));
+        Json sharpness;
+        sharpness["betterSharpness"] = true;
+        l.set_settings(sharpness);
+        CHECK(l.state()["settings"]["betterSharpness"].as_bool());
+        sharpness["betterSharpness"] = "false";
+        l.set_settings(sharpness);
+        CHECK(l.state()["settings"]["betterSharpness"].as_bool());
         // Hunting horn songs: off by default, a bool turns them on, anything else is ignored.
         CHECK(!l.state()["settings"]["guildQuestScaling"].as_bool(true));
         Json guild_scale;
@@ -521,7 +529,7 @@ int main(int argc, char **argv) {
                                              << "option.packMipmaps=true\noption.anisotropy=8\n"
                                              << "option.projectedShadows=true\noption.wholeMapShadows=false\n"
                                              << "option.shadowQuality=1\noption.shadowDarkness=70\n"
-                                             << "option.widescreen=true\noption.gatheringAssistance=false\noption.keyQuestMarkers=false\n";
+                                             << "option.widescreen=true\noption.gatheringAssistance=false\noption.keyQuestMarkers=false\noption.betterSharpness=false\n";
         }
         l.import_game_controls();
         CHECK(l.state()["settings"]["packMipmaps"].as_bool()); // the texture pack filtering from the Video tab
@@ -532,6 +540,7 @@ int main(int argc, char **argv) {
         CHECK(l.state()["settings"]["shadowDarkness"].as_number() == 70);
         CHECK(l.state()["settings"]["widescreen"].as_bool()); // widescreen from the Video tab
         CHECK(!l.state()["settings"]["keyQuestMarkers"].as_bool(true));
+        CHECK(!l.state()["settings"]["betterSharpness"].as_bool(true));
         CHECK(l.state()["settings"]["hornSongs"].as_bool());
         CHECK(l.state()["settings"]["hudSize"].as_number() == 70);
         CHECK(l.state()["settings"]["fastSupplyBox"].as_bool());
@@ -1063,13 +1072,16 @@ int main(int argc, char **argv) {
         for (bool enabled : {false, true, false}) {
             Json gathering;
             gathering["gatheringAssistance"] = enabled;
+            gathering["betterSharpness"] = enabled;
             l.set_settings(gathering);
             const auto plan = l.plan_launch("mhfu");
             CHECK(plan.error.empty());
             CHECK((std::find(plan.args.begin(), plan.args.end(), "--gathering-indicators") != plan.args.end()) == enabled);
             CHECK((std::find(plan.args.begin(), plan.args.end(), "--auto-gathering-tools") != plan.args.end()) == enabled);
+            CHECK((std::find(plan.args.begin(), plan.args.end(), "--better-sharpness") != plan.args.end()) == enabled);
             Launcher again(base, data);
             CHECK(again.state()["settings"]["gatheringAssistance"].as_bool() == enabled);
+            CHECK(again.state()["settings"]["betterSharpness"].as_bool() == enabled);
         }
     }
 

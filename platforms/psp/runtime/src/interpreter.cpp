@@ -285,7 +285,8 @@ struct Interpreter {
                 if (d.kind == K::Jal) w(31, after);
                 exec(slot, pc + 4u);
                 if (d.kind == K::Jal) {
-                    pc = native_call(target) ? after : target;
+                    const CallFilter filter = rt.call_patch_filter(pc);
+                    pc = ((filter != nullptr && filter(rt, ctx)) || native_call(target)) ? after : target;
                 } else if (native_call(target)) {
                     // Recompiled code reached by a jump returns as if by `jr $ra`: carry on wherever $ra points.
                     if (ctx.gpr[31] == return_address && ctx.gpr[29] >= entry_sp) return;

@@ -154,7 +154,7 @@ HookFunction Runtime::find_hook(std::string_view name) const {
     return it != hooks_.end() ? it->second : nullptr;
 }
 
-HookFunction Runtime::call_patch_hook(std::uint32_t pc) const {
+const char *Runtime::call_patch_name(std::uint32_t pc) const noexcept {
     if (!any_call_patches_) return nullptr;
     const Program *program = main_program_;
     for (const auto &region : overlay_regions_) {
@@ -167,7 +167,26 @@ HookFunction Runtime::call_patch_hook(std::uint32_t pc) const {
     const auto it = std::lower_bound(program->call_patches.begin(), program->call_patches.end(), pc,
                                      [](const CallPatchEntry &p, std::uint32_t a) { return p.address < a; });
     if (it == program->call_patches.end() || it->address != pc) return nullptr;
-    return find_hook(it->name);
+    return it->name;
+}
+
+HookFunction Runtime::call_patch_hook(std::uint32_t pc) const {
+    if (const char *name = call_patch_name(pc)) return find_hook(name);
+    return nullptr;
+}
+
+void Runtime::register_call_filter(std::string name, CallFilter filter) { call_filters_[std::move(name)] = filter; }
+
+CallFilter Runtime::find_call_filter(std::string_view name) const {
+    const auto it = call_filters_.find(std::string(name));
+    return it != call_filters_.end() ? it->second : nullptr;
+}
+
+CallFilter Runtime::call_patch_filter(std::uint32_t pc) const {
+    if (!call_filters_.empty()) {
+        if (const char *name = call_patch_name(pc)) return find_call_filter(name);
+    }
+    return nullptr;
 }
 
 void Runtime::enable_patch(std::string name) { patches_[std::move(name)] = true; }
@@ -411,6 +430,7 @@ void unsupported(Runtime &rt, std::uint32_t pc, std::uint32_t word, const char *
 }
 void arithmetic_overflow(Runtime &rt, std::uint32_t pc, std::uint32_t word) { rt.arithmetic_overflow(pc, word); }
 HookFunction find_hook(Runtime &rt, const char *name) { return rt.find_hook(name); }
+CallFilter find_call_filter(Runtime &rt, const char *name) { return rt.find_call_filter(name); }
 bool patch_enabled(Runtime &rt, const char *name) { return rt.patch_enabled(name); }
 void interpret(Runtime &rt, Context &ctx, std::uint32_t entry) {
     static std::mutex logged_mutex;

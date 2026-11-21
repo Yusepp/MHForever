@@ -38,6 +38,7 @@ export interface Settings {
   mouseCamera?: boolean; // with the analog camera: the mouse turns and tilts it too
   mouseCameraSpeed?: number; // its sensitivity in percent: 25..300 in steps of 25
   gatheringAssistance?: boolean; // nearby indicators and automatic gathering tools
+  betterSharpness?: boolean; // segmented sharpness gauge
   keyQuestMarkers?: boolean; // a gold key beside progression quests
   hornSongs?: boolean; // the hunting horn's songs over the quest HUD
   hornSongsPlace?: string; // and where: 'next-to-sheet', 'top-middle', 'under-names', 'bottom-left', or 'custom:X,Y' (moved in the game)
@@ -257,7 +258,7 @@ function simulated(): Native {
     settings: {
       scale: 4, fullscreen: false, smoothTextures: false, packMipmaps: false, anisotropy: 16, widescreen: false, fps: 30, hudSize: 100, trueWeaponValues: false, fastSupplyBox: false, questAutoclear: false,
       smithyBrowse: false, smithyLayout: false, analogCamera: false, analogCameraTurnSpeed: 100, analogCameraTiltSpeed: 100, mouseCamera: false, mouseCameraSpeed: 100,
-      gatheringAssistance: false, keyQuestMarkers: false, hornSongs: false, hornSongsPlace: 'next-to-sheet', guildQuestScaling: false, language: '', copyImage: false, musicVolume: 80, sfxVolume: 90,
+      gatheringAssistance: false, betterSharpness: false, keyQuestMarkers: false, hornSongs: false, hornSongsPlace: 'next-to-sheet', guildQuestScaling: false, language: '', copyImage: false, musicVolume: 80, sfxVolume: 90,
       keys: { ...defaultKeys }, pad: { ...defaultPad }, adhocServer: '', adhocRoom: '', checkUpdates: true,
       friendRelays: ['wss://nos.lol', 'wss://relay.primal.net', 'wss://nostr.mom', 'wss://offchain.pub', 'wss://relay.nostr.net'],
     },

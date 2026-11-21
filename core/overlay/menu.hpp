@@ -6,6 +6,7 @@
 // Console- and game-independent: the program that owns the menu builds the sections and rows, reacts to what changed
 // and rebuilds them.
 
+#include "overlay/hud_bar.hpp"
 #include "overlay/song_panel.hpp"
 
 #include <cstdint>
@@ -181,9 +182,10 @@ public:
     // The hunting horn's songs (song_panel.hpp) at `width` x `height` pixels: a card placed so that the point
     // (`align_x`, `align_y`) of it (0 left or top, 1 right or bottom) is at logical (`x`, `y`), the rest transparent. The
     // song being played stands out; the others fade while it does. `placing`: the player is moving it (an outline, and a
-    // line on how to move it).
+    // line on how to move it). A HUD bar can share the transparent canvas at the given HUD scale.
     bool render_song_panel(const SongPanel &panel, float x, float y, float align_x, float align_y, int width, int height,
-                           std::vector<std::uint32_t> &pixels, bool placing = false);
+                           std::vector<std::uint32_t> &pixels, bool placing = false,
+                           const HudBar *bar = nullptr, float hud_scale = 1.0f);
     // The size render_song_panel() draws `panel` at, in logical units (width, height).
     [[nodiscard]] std::pair<float, float> song_panel_size(const SongPanel &panel) const;
 

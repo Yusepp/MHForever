@@ -153,6 +153,7 @@ Json default_settings() {
     s["mouseCamera"] = false;     // with the analog camera: the mouse turns and tilts it too
     s["mouseCameraSpeed"] = 100;  // its sensitivity in percent: 25..300 in steps of 25
     s["gatheringAssistance"] = false; // nearby indicators and automatic pickaxe/bug-net selection
+    s["betterSharpness"] = false; // segmented gauge next to the sharpness icon
     s["keyQuestMarkers"] = false; // a gold key beside progression quests
     s["hornSongs"] = false; // the hunting horn's songs over the quest HUD
     s["hornSongsPlace"] = "next-to-sheet"; // and where: a place's name, or "custom:X,Y" (overlay/song_panel.hpp)
@@ -1022,7 +1023,7 @@ void Launcher::import_game_controls() {
             } else if (name == "horn-songs" || name == "hud-size" || name.starts_with("option.")) {
                 // What the game's in-game menu changes while playing: switches ("true", "false") and percentages, under
                 // the launcher's own names. Only these settings; apply_settings checks each value.
-                static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers",
+                static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality",
@@ -1132,7 +1133,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
         s["anisotropy"] = std::exp2(std::round(std::log2(level)));
     }
     for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
-                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "keyQuestMarkers", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
+                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "keyQuestMarkers", "betterSharpness", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
         if (partial[key].is_bool()) s[key] = partial[key];
@@ -1559,6 +1560,7 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
         plan.args.push_back("--auto-gathering-tools");
     }
     if (std::string_view(entry->game) == "mhfu" && s["keyQuestMarkers"].as_bool()) plan.args.push_back("--key-quest-markers");
+    if (std::string_view(entry->game) == "mhfu" && s["betterSharpness"].as_bool()) plan.args.push_back("--better-sharpness");
     if (s["hornSongs"].as_bool()) plan.args.push_back("--horn-songs");
     if (s["hornSongsPlace"].is_string()) { // even with the songs off: the in-game menu can turn them on while playing
         plan.args.push_back("--horn-songs-place");

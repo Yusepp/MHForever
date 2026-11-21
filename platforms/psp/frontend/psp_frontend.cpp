@@ -155,6 +155,7 @@ struct Frontend::Impl {
     // nothing), `songs_pending` the worker's next job (an empty view takes them down).
     struct SongsView {
         overlay::SongPanel panel;
+        std::optional<overlay::HudBar> bar;
         overlay::SongSpot spot;
         int hud_size{}, width{}, height{};
         bool placing{};
@@ -174,6 +175,8 @@ struct Frontend::Impl {
     // offer them. A game without them (Freedom) would get a stretched picture, or shadows that cost and show nothing.
     bool widescreen_offered{}, shadows_offered{};
     bool game_hint_input_latched = false;
+    std::optional<overlay::HudBar> hud_bar;
+    bool hud_bar_published{}; // overlay.mutex; relevant only while the quest overlay owns the picture
     std::string game_hint;
     std::vector<overlay::HintSprite> game_hint_sprites;
     std::optional<overlay::SongPanel> songs;
@@ -248,7 +251,9 @@ struct Frontend::Impl {
                             a.x += (272.0f * songs_view->aspect - 480.0f) * 0.5f;
                         }
                         menu_renderer->render_song_panel(songs_view->panel, a.x, a.y, a.ax, a.ay, songs_view->width, songs_view->height,
-                                                         pixels, songs_view->placing);
+                                                         pixels, songs_view->placing,
+                                                         songs_view->bar ? &*songs_view->bar : nullptr,
+                                                         static_cast<float>(songs_view->hud_size) / 100.0f);
                     }
                     std::lock_guard overlay_lock(overlay.mutex);
                     const bool free = overlay_owner == OverlayOwner::none || overlay_owner == OverlayOwner::songs;
@@ -258,6 +263,7 @@ struct Frontend::Impl {
                         overlay.aspect = songs_view ? songs_view->aspect : 0.0f;
                         overlay.height = songs_view ? songs_view->height : 0;
                         overlay.visible = songs_view.has_value();
+                        hud_bar_published = songs_view && songs_view->bar.has_value();
                         overlay_owner = songs_view ? OverlayOwner::songs : OverlayOwner::none;
                         ++overlay.generation;
                     }
@@ -411,6 +417,16 @@ void Frontend::set_mouse_look(std::function<bool()> wanted) { impl_->mouse_look 
 
 bool Frontend::game_input_blocked() const {
     return impl_->menu_open || impl_->song_placing || impl_->dialog_visible || impl_->game_hint_input_latched;
+}
+
+void Frontend::set_hud_bar(std::optional<overlay::HudBar> bar) { impl_->hud_bar = std::move(bar); }
+
+bool Frontend::hud_bar_visible() const {
+    auto &impl = *impl_;
+    if (!impl.hud_bar || impl.gpu_state != 1 || impl.menu_open || impl.dialog_visible || impl.song_placing ||
+        impl.notice_shown || !impl.live.quest_hud.load(std::memory_order_relaxed)) return false;
+    std::lock_guard lock(impl.overlay.mutex);
+    return impl.hud_bar_published && impl.overlay_owner == Impl::OverlayOwner::songs;
 }
 
 void Frontend::set_game_hint(std::string hint, std::vector<overlay::HintSprite> sprites) {
@@ -587,7 +603,8 @@ void watch_friends(Frontend::Impl &impl, Runtime &rt) {
 void show_songs(Frontend::Impl &impl, Runtime &rt) {
     using Owner = Frontend::Impl::OverlayOwner;
     const auto now = std::chrono::steady_clock::now();
-    if (impl.live.quest_hud.load(std::memory_order_relaxed)) impl.quest_hud_seen = now;
+    const bool quest_hud = impl.live.quest_hud.load(std::memory_order_relaxed);
+    if (quest_hud) impl.quest_hud_seen = now;
     const bool hud = now - impl.quest_hud_seen < std::chrono::milliseconds(300);
     // What to show: the songs being moved, wherever the game is; else the host's songs at their place, over the quest HUD.
     const overlay::SongPanel *panel = nullptr;
@@ -607,6 +624,10 @@ void show_songs(Frontend::Impl &impl, Runtime &rt) {
         combined->hint_sprites = impl.game_hint_sprites;
         panel = &*combined;
     }
+    const auto *bar = impl.hud_bar && quest_hud && impl.gpu_state == 1 && !impl.dialog_visible &&
+                      !impl.notice_shown && !impl.song_placing ? &*impl.hud_bar : nullptr;
+    static const overlay::SongPanel empty_panel;
+    if (panel == nullptr && bar != nullptr) panel = &empty_panel;
     int width = 0, height = 0;
     // Widescreen: over the stretched picture, so that they stay by the quest HUD at the window's edge.
     const float aspect = impl.live.wide_aspect.load(std::memory_order_relaxed);
@@ -628,15 +649,19 @@ void show_songs(Frontend::Impl &impl, Runtime &rt) {
     }
     const int hud_size = impl.live.hud_size.load();
     const auto &shown = impl.songs_shown;
+    const bool same_bar = shown && (bar ? shown->bar && *shown->bar == *bar : !shown->bar);
     const bool same = panel == nullptr ? !shown
-                                       : shown && shown->panel == *panel && shown->spot == spot && shown->hud_size == hud_size &&
+                                       : same_bar && shown->panel == *panel && shown->spot == spot && shown->hud_size == hud_size &&
                                              shown->width == width && shown->height == height && shown->placing == impl.song_placing &&
                                              shown->aspect == aspect;
     // Asked again when the screen lost them to something that is gone now (the overlay is free).
     const bool lost = panel != nullptr && impl.overlay_owner == Owner::none;
     if (same && !lost) return;
     std::optional<Frontend::Impl::SongsView> want;
-    if (panel != nullptr) want = Frontend::Impl::SongsView{*panel, spot, hud_size, width, height, impl.song_placing, aspect};
+    if (panel != nullptr) {
+        want = Frontend::Impl::SongsView{*panel, bar ? std::optional(*bar) : std::nullopt, spot, hud_size, width, height,
+                                         impl.song_placing, aspect};
+    }
     {
         std::lock_guard lock(impl.dialog_mutex);
         if (same && impl.songs_pending) return; // lost, but asked again already and not drawn yet

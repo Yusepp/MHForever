@@ -4,6 +4,7 @@
 // mixed audio. Used by the game executables and the homebrew runner when a window is wanted.
 
 #include "mhf/psp/runtime.hpp"
+#include "overlay/hud_bar.hpp"
 #include "overlay/song_panel.hpp"
 
 // host/keymap.hpp and host/padmap.hpp are not included here on purpose: the PSP runtime and the homebrew runners include this
@@ -94,6 +95,10 @@ public:
     // its quest HUD and no menu, system dialog or notice is up; std::nullopt (no horn, not in a quest) hides them. Only
     // the OpenGL renderer finds the quest HUD, so the software renderer never shows them.
     void set_song_panel(std::optional<overlay::SongPanel> panel);
+    // A game-supplied bar over the quest HUD, composed with the other quest overlays.
+    void set_hud_bar(std::optional<overlay::HudBar> bar);
+    // True once the worker has published the replacement over the quest HUD.
+    [[nodiscard]] bool hud_bar_visible() const;
     // A short game-provided action prompt; hidden with the quest HUD and while menus are open.
     void set_game_hint(std::string hint, std::vector<overlay::HintSprite> sprites = {});
     [[nodiscard]] bool game_input_blocked() const;

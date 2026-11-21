@@ -60,6 +60,8 @@ mh_game_sys             = 0x089C7508 # GameSys*: the hunter's equipment, which p
 mh_player_manager       = 0x09A4AE04 # PlayerManager*: the Player* of each player slot
 mh_blademaster_weapons  = 0x089574C8 # 24 bytes per blademaster weapon id: model id u16 at +0x00, a horn's note set u8 at +0x13
 mh_weapon_model_classes = 0x08975984 # u8 per weapon model id: its weapon class (8 = hunting horn)
+mh_sharpness_rows      = 0x08976508 # 40 rows of seven s16 cumulative tier limits
+mh_sharpness_class_rows = 0x08976738 # one pointer per weapon class, each to a group of eight rows
 mh_horn_note_colors     = 0x089B2FB8 # u8[20][3]: the colour of notes 1-3 for each of the horns' 20 note sets
 mh_horn_songs           = 0x09C06EA8 # u8[47][4] in game_task.ovl: each song's notes, newest first (see horn_songs.cpp)
 mh_resource_manager     = 0x09A07280 # ResourceManager*: the loaded resources by id (the quest text is resource 4)
@@ -91,6 +93,9 @@ system_active_overlays  = 0x00F7A3C0 # u16[6] inside System, active DATA.BIN fil
 # move (and paging) while the R panel is open (a test of flag 0x20; immediate 0 never finds it set) and while
 # Info is open (a branch on the Info level, never taken).
 [patches]
+# The cockpit draws the stock sword and its pulsing glow in two distinct calls.
+mh_sharpness_sword = "executable 0x08841404 call"
+mh_sharpness_glow = "executable 0x0884151C call"
 mh_gathering_prompt_update = "executable 0x08845C94 call"
 
 

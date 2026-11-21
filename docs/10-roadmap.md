@@ -165,6 +165,7 @@ Done too: optional gathering indicators and automatic tools for EU, US, JP and F
 (`gatheringAssistance`, `--gathering-indicators`, `--auto-gathering-tools`; `06-mhfu-module.md` §9).
 Done too: optional key quest markers for Village and Guild Hall (`--key-quest-markers`, launcher setting;
 `06-mhfu-module.md` §9).
+Done too: an optional segmented sharpness bar on the quest HUD (`--better-sharpness`, launcher setting; `06-mhfu-module.md` §9).
 Done too: the hunting horn's songs over the quest HUD, from the game's own tables, with the song being played and the songs
 in effect marked, named in the game's own language (`--horn-songs`, launcher setting; `06-mhfu-module.md` §9).
 Done too: an analog camera, the right stick turning it as fast as it is pushed and tilting it smoothly from the game's
