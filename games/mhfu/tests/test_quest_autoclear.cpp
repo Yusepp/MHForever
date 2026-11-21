@@ -20,7 +20,7 @@ constexpr std::uint32_t kQuestMgrAddr = 0x09000000u;
 constexpr std::uint32_t kGameSysAddr = 0x09010000u;
 
 constexpr std::uint32_t kQuestState = 0x00u;
-constexpr std::uint32_t kQuestId = 0x10u;
+constexpr std::uint32_t kQuestTime = 0x10u;
 constexpr std::uint32_t kQuestRequired = 0x67Cu;
 constexpr std::uint32_t kQuestPostTimer = 0x710u;
 constexpr std::uint32_t kQuestObj0 = 0x728u;
@@ -37,10 +37,10 @@ struct TestHarness {
         setup_quest(60001u, 1u, 0x12u, 0x0001u, 1u, 0u, 0u, 0u);
     }
 
-    void setup_quest(std::uint32_t qid, std::uint8_t required, std::uint32_t flags0, std::uint16_t target0,
+    void setup_quest(std::uint32_t remaining_time, std::uint8_t required, std::uint32_t flags0, std::uint16_t target0,
                      std::uint16_t rem0, std::uint32_t flags1, std::uint16_t target1, std::uint16_t rem1) {
         memory.store8(kQuestMgrAddr + kQuestState, 0u);
-        memory.store32(kQuestMgrAddr + kQuestId, qid);
+        memory.store32(kQuestMgrAddr + kQuestTime, remaining_time);
         memory.store8(kQuestMgrAddr + kQuestRequired, required);
         memory.store32(kQuestMgrAddr + kQuestPostTimer, 1800u); // 60s countdown (must remain untouched)
         memory.store32(kQuestMgrAddr + kQuestObj0, flags0);
@@ -84,7 +84,7 @@ void test_single_objective_hold_and_latch() {
     MHF_CHECK(!h.autoclear.poll(h.memory, kQuestAutoclearCombo, 20'000'000u, true));
     MHF_CHECK(h.memory.load32(kQuestMgrAddr + kQuestObj0) == 0x12u);
 
-    // Once the quest transitions to clear (state = 1) and a new quest begins (even same qid), latch resets.
+    // Once the quest transitions to clear (state = 1) and a new quest begins (even with the same timer), latch resets.
     h.memory.store8(kQuestMgrAddr + kQuestState, 1u);
     MHF_CHECK(!h.autoclear.poll(h.memory, kQuestAutoclearCombo, 21'000'000u, true));
     h.setup_quest(60001u, 1u, 0x14u, 0x0022u, 3u, 0u, 0u, 0u);
@@ -107,6 +107,16 @@ void test_dual_objective_quest() {
     MHF_CHECK(h.memory.load16(kQuestMgrAddr + kQuestObj1 + 6u) == 0u);
 }
 
+void test_hold_while_quest_timer_counts_down() {
+    TestHarness h;
+    h.setup_quest(90000u, 1u, 0x11u, 1u, 1u, 0u, 0u, 0u);
+    MHF_CHECK(!h.autoclear.poll(h.memory, kQuestAutoclearCombo, 1'000'000u, true));
+    h.memory.store32(kQuestMgrAddr + kQuestTime, 89970u);
+    MHF_CHECK(!h.autoclear.poll(h.memory, kQuestAutoclearCombo, 2'000'000u, true));
+    h.memory.store32(kQuestMgrAddr + kQuestTime, 89940u);
+    MHF_CHECK(h.autoclear.poll(h.memory, kQuestAutoclearCombo, 3'000'000u, true));
+}
+
 void test_guards() {
     // Disabled option never triggers and clears any in-progress hold.
     {
@@ -117,7 +127,7 @@ void test_guards() {
         MHF_CHECK(h.memory.load32(kQuestMgrAddr + kQuestObj0) == 0x12u);
     }
 
-    // Quest not active: state != 0, qid == 0, game_sys phase != 2, required == 0 or > 2.
+    // Quest not active: state != 0, remaining time == 0, game_sys phase != 2, required == 0 or > 2.
     {
         TestHarness h;
         h.memory.store8(kQuestMgrAddr + kQuestState, 2u); // failed
@@ -199,6 +209,7 @@ void test_guards() {
 int main() {
     test_single_objective_hold_and_latch();
     test_dual_objective_quest();
+    test_hold_while_quest_timer_counts_down();
     test_guards();
     return mhf::test::finish("mhfu_quest_autoclear");
 }

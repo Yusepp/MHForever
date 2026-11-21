@@ -41,7 +41,7 @@ public:
 
 private:
     QuestAutoclearSymbols symbols_{};
-    std::uint32_t active_quest_id_ = 0;
+    std::uint32_t active_quest_manager_ = 0;
     std::uint64_t hold_start_us_ = 0;
     bool holding_ = false;
     bool triggered_ = false;
