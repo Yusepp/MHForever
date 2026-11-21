@@ -7,7 +7,7 @@
 //             [--smithy-browse [--smithy-layout]]
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
 //             [--mouse-camera [--mouse-camera-speed 25-300]]
-//             [--gathering-indicators] [--auto-gathering-tools]
+//             [--gathering-indicators] [--auto-gathering-tools] [--modern-carving]
 //             [--key-quest-markers] [--better-sharpness]
 //             [--horn-songs [--horn-songs-place next-to-sheet|top-middle|under-names|bottom-left|custom:X,Y]]
 //             [--guild-quest-scaling]
@@ -90,6 +90,10 @@ using mhf::psp::Runtime;
 namespace region = mhf::psp::generated::mhfu_region_data;
 mhf::mhfu::Gathering g_gathering;
 void on_gathering_update(Runtime &rt, Context &ctx) { g_gathering.update(rt, ctx); }
+bool preserve_modern_carving_action(Runtime &rt, Context &ctx) { return g_gathering.preserve_action(rt, ctx); }
+void choose_modern_carving_pose(Runtime &rt, Context &ctx) { g_gathering.choose_crouched_pose(rt, ctx); }
+bool modern_carving_animation_sample(Runtime &rt, Context &ctx) { g_gathering.animation_sample(rt, ctx); return false; }
+bool modern_carving_animation_update(Runtime &rt, Context &ctx) { g_gathering.animation_update(rt, ctx); return false; }
 
 bool g_log_overlays = true;
 std::atomic<bool> g_key_quest_markers{false};
@@ -1096,6 +1100,7 @@ int main(int argc, char **argv) {
             g_mouse_speed = static_cast<float>(std::clamp(std::stoi(argv[++i]), 25, 300)) / 100.0f; // in percent
         else if (a == "--gathering-indicators") g_gathering.indicators = true;
         else if (a == "--auto-gathering-tools") g_gathering.automatic_tools = true;
+        else if (a == "--modern-carving") g_gathering.modern_carving = true;
         else if (a == "--better-sharpness") better_sharpness = true;
         else if (a == "--key-quest-markers") g_key_quest_markers = true; // enhancement
         else if (a == "--horn-songs") horn_songs = true; // enhancement
@@ -1380,6 +1385,11 @@ int main(int argc, char **argv) {
             // The horn's songs over the quest HUD, read from the game a few times a second (horn_songs.hpp). The
             // in-game menu turns them on and off, so they are read even while off.
             g_gathering.input_blocked = [&frontend] { return frontend.game_input_blocked(); };
+            runtime.register_call_filter("mh_modern_carving_animation_clear", &preserve_modern_carving_action);
+            runtime.register_call_filter("mh_modern_carving_action_clear", &preserve_modern_carving_action);
+            runtime.register_hook("mh_modern_carving_pose_choice", &choose_modern_carving_pose);
+            runtime.register_call_filter("mh_modern_carving_animation_sample", &modern_carving_animation_sample);
+            runtime.register_call_filter("mh_modern_carving_animation_update", &modern_carving_animation_update);
             frontend.offer_songs(horn_songs, mhf::overlay::parse_song_spot(horn_songs_place).value_or(mhf::overlay::SongSpot{}));
             extra = [&frontend, rt = &runtime, songs = mhf::mhfu::HornSongs{}, read_at = std::uint64_t{0},
                      previous = std::move(extra)]() mutable {
@@ -1432,6 +1442,10 @@ int main(int argc, char **argv) {
                         if (v != 0) load_gathering_icons();
                         g_gathering.indicators = g_gathering.automatic_tools = v != 0;
                     }});
+                frontend.add_game_option({"modernCarving", "Modern carving",
+                    "Hold Circle to repeat gathering and carving at the same spot.",
+                    false, g_gathering.modern_carving ? 1 : 0, 0, 1, 1, "",
+                    [](int v) { g_gathering.modern_carving = v != 0; }});
             }
             extra = [&frontend, previous = std::move(extra), shown = std::optional<mhf::mhfu::QuestMarker>{},
                      image = std::shared_ptr<const std::vector<std::uint32_t>>{}]() mutable {

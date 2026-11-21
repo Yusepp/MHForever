@@ -79,8 +79,12 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
     // the layout tables. --analog-camera: its four call patches, in the camera's d-pad code in the executable (not
     // mapped for every release: then none). Widescreen: its three call patches where a camera is set up and where it
     // makes its culling planes, in every release. --guild-quest-scaling: three call patches in game_task.ovl.
-    std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches, guild_scaling_patches, quest_patches;
+    std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches, modern_carving_patches,
+        guild_scaling_patches, quest_patches;
     std::set<std::string> sharpness_patches;
+    const std::uint32_t modern_clear = disc_id == "ULES01213" ? 0x09A67DC0u
+                                       : disc_id == "ULUS10391" ? 0x09A67EC0u
+                                                                : 0x09A630C0u;
     for (const auto &p : mhf::psp::recomp::region_patches(map_path)) {
         if (p.patch.name.starts_with("mh_smithy_")) {
             MHF_CHECK(p.module == "lobby_task.ovl");
@@ -88,6 +92,25 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_gathering_")) {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             gathering_patches.insert(p.patch.name);
+        } else if (p.patch.name.starts_with("mh_modern_carving_")) {
+            if (p.patch.name.ends_with("animation_sample") || p.patch.name.ends_with("animation_update")) {
+                const bool japan = disc_id == "ULJM05500" || disc_id == "ULJM05500-FUC";
+                const auto address = p.patch.name.ends_with("animation_sample") ? 0x0885FA0Cu : 0x088637C4u;
+                MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Filter);
+                MHF_CHECK(p.address == address - (japan ? 8u : 0u));
+            } else if (p.patch.name.ends_with("pose_choice")) {
+                MHF_CHECK(p.module == "game_task.ovl");
+                const std::uint32_t pose_call = disc_id == "ULES01213" ? 0x09AA18ACu
+                                                : disc_id == "ULUS10391" ? 0x09AA19ACu
+                                                                         : 0x09A9CBACu;
+                MHF_CHECK(p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+                MHF_CHECK(p.address == pose_call);
+            } else {
+                MHF_CHECK(p.module == "game_task.ovl");
+                MHF_CHECK(p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Filter);
+                MHF_CHECK(p.address == modern_clear + (p.patch.name.ends_with("action_clear") ? 4u : 0u));
+            }
+            modern_carving_patches.insert(p.patch.name);
         } else if (p.patch.name.starts_with("mh_sharpness_")) {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             sharpness_patches.insert(p.patch.name);
@@ -104,6 +127,11 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
     }
     MHF_CHECK(sharpness_patches == std::set<std::string>({"mh_sharpness_sword", "mh_sharpness_glow"}));
     MHF_CHECK(gathering_patches == std::set<std::string>{"mh_gathering_prompt_update"});
+    MHF_CHECK(modern_carving_patches == std::set<std::string>({"mh_modern_carving_animation_clear",
+                                                                "mh_modern_carving_action_clear",
+                                                                "mh_modern_carving_animation_sample",
+                                                                "mh_modern_carving_animation_update",
+                                                                "mh_modern_carving_pose_choice"}));
     MHF_CHECK(quest_patches == std::set<std::string>({"mh_quest_markers_begin", "mh_quest_markers_title", "mh_quest_markers_end"}));
     MHF_CHECK(smithy_patches.size() == 9);
     MHF_CHECK(camera_patches == (camera_mapped ? std::set<std::string>({"mh_camera_buttons_copied",
