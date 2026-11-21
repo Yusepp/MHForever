@@ -641,6 +641,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.modernCarving ?? false} onToggle={() => onChange({ modernCarving: !(s.modernCarving ?? false) })} label="Modern carving" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Invulnerable post-quest carving</b><span>Ignores hits, roars and wind while carving after Quest Clear; normal vulnerability resumes right away.</span></div>
+          <Toggle on={s.invulnerableCarveQuest ?? false} onToggle={() => onChange({ invulnerableCarveQuest: !(s.invulnerableCarveQuest ?? false) })} label="Invulnerable post-quest carving" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Show key quest markers</b><span>Marks Village and Guild Hall key quests with a gold key, including completed quests.</span></div>
           <Toggle on={s.keyQuestMarkers ?? false} onToggle={() => onChange({ keyQuestMarkers: !(s.keyQuestMarkers ?? false) })} label="Show key quest markers" />
         </div>
