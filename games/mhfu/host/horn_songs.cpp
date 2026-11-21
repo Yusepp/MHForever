@@ -1,5 +1,7 @@
 #include "horn_songs.hpp"
 
+#include "quest_player.hpp"
+
 #include "mhfu_region_data.hpp" // generated from this release's regions/<disc>/symbols.toml [data]
 
 #include <algorithm>
@@ -11,11 +13,7 @@ namespace {
 namespace region = psp::generated::mhfu_region_data;
 
 // Struct offsets, the same in the three releases (each checked in their code: the same instructions read them).
-constexpr std::uint32_t kGameSysPlayerId = 0x28;         // u8: the player slot this machine plays
 constexpr std::uint32_t kGameSysWeapon = 0x4A0 + 0x20;   // the hunter's weapon: u8 type at +1 (5 blademaster), u16 id at +2
-// A game menu is open (the game's own Cockpit_menu_chk) when any of these bytes is set.
-constexpr std::uint32_t kGameSysMenu = 0x10, kCockpitMenu = 0x604, kCockpitWindow = 0x52F;
-constexpr std::uint32_t kPlayerManagerPlayers = 0x0C;    // Player*[6], by player slot
 constexpr std::uint32_t kPlayerNoteCount = 0x1102;       // u8, one more for every note played
 constexpr std::uint32_t kPlayerNotesPlayed = 0x1103;     // u8[8], the newest first
 // The songs' effects: a time left in frames per effect (the game's own "is it on" test is that it is above 0), and a
@@ -25,7 +23,7 @@ constexpr std::uint32_t kPlayerSongLevels = 0x5F7;       // u8[21]
 constexpr std::uint32_t kSongEffects = 21;
 constexpr std::uint32_t kWeaponInfoSize = 24, kWeaponNoteSet = 0x13;
 constexpr std::uint8_t kBlademasterWeapon = 5, kHuntingHorn = 8;
-constexpr std::uint32_t kPlayerSlots = 6, kNoteSets = 20, kSongs = 47;
+constexpr std::uint32_t kNoteSets = 20, kSongs = 47;
 constexpr std::uint64_t kNotesStayUs = 6'000'000; // the notes played count this long after the last one
 // The quest text (mh_resource_manager, mh_quest_message_texts): the resource manager keeps a table of the loaded
 // resources, {u32 id, u32 data, u32} each; the quest text is resource 4, and the messages of the songs' effects are in
@@ -129,15 +127,6 @@ std::optional<std::string> quest_message(const psprecomp::GuestMemory &memory, s
     return std::nullopt;
 }
 
-// The Player* of the hunter on this machine, 0 when there is none (not in a quest).
-std::uint32_t local_player(const psprecomp::GuestMemory &memory, std::uint32_t game_sys) {
-    const std::uint32_t slot = memory.load8(game_sys + kGameSysPlayerId);
-    const std::uint32_t manager = memory.load32(*region::mh_player_manager);
-    if (slot >= kPlayerSlots || !memory.contains(manager + kPlayerManagerPlayers, kPlayerSlots * 4)) return 0;
-    const std::uint32_t player = memory.load32(manager + kPlayerManagerPlayers + slot * 4);
-    return memory.contains(player + kPlayerNotesPlayed, 8) ? player : 0;
-}
-
 } // namespace
 
 std::vector<std::uint8_t> song_notes_in_order(const SongNotes &song) {
@@ -182,11 +171,7 @@ std::optional<overlay::SongPanel> HornSongs::read(psp::Runtime &rt) {
         const std::uint32_t game_sys = memory.load32(*region::mh_game_sys);
         if (!memory.contains(game_sys + kGameSysWeapon, 4)) return std::nullopt;
         if constexpr (region::mh_cockpit.has_value()) { // hidden while one of the game's own menus is open over the HUD
-            const std::uint32_t cockpit = memory.load32(*region::mh_cockpit);
-            const bool menu = memory.load8(game_sys + kGameSysMenu) != 0 ||
-                              (memory.contains(cockpit + kCockpitMenu, 1) &&
-                               (memory.load8(cockpit + kCockpitMenu) != 0 || memory.load8(cockpit + kCockpitWindow) != 0));
-            if (menu) return std::nullopt;
+            if (quest_menu_open(memory, game_sys, memory.load32(*region::mh_cockpit))) return std::nullopt;
         }
         if (memory.load8(game_sys + kGameSysWeapon + 1) != kBlademasterWeapon) return std::nullopt;
         const std::uint32_t weapon = *region::mh_blademaster_weapons + memory.load16(game_sys + kGameSysWeapon + 2) * kWeaponInfoSize;
@@ -200,7 +185,7 @@ std::optional<overlay::SongPanel> HornSongs::read(psp::Runtime &rt) {
             horn[i] = memory.load8(*region::mh_horn_note_colors + note_set * 3 + i);
         }
         PlayedNotes played{};
-        const std::uint32_t player = local_player(memory, game_sys);
+        const std::uint32_t player = local_player(memory, game_sys, *region::mh_player_manager, kPlayerNotesPlayed + 8);
         const bool effects = player != 0 && memory.contains(player + kPlayerSongTimers, kSongEffects * 2) &&
                              memory.contains(player + kPlayerSongLevels, kSongEffects);
         if (player != 0) {

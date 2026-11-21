@@ -59,6 +59,11 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         if (entries.contains(name)) MHF_CHECK(entries.at(name).has_value());
     }
 
+    for (const char *name : {"mh_sharpness_rows", "mh_sharpness_class_rows", "mh_game_sys", "mh_player_manager",
+                             "mh_cockpit", "mh_blademaster_weapons", "mh_weapon_model_classes", "mh_horn_songs"}) {
+        MHF_CHECK(entries.contains(name) && entries.at(name).has_value());
+    }
+
     const fs::path map_path = fs::path(MHF_MHFU_REGIONS_DIR) / disc_id / "symbols.toml";
     const auto map = mhf::psp::recomp::toml::parse_file(map_path);
     const auto functions = map.tables.find("functions");
