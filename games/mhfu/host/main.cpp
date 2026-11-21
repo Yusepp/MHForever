@@ -8,7 +8,7 @@
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
 //             [--mouse-camera [--mouse-camera-speed 25-300]]
 //             [--gathering-indicators] [--auto-gathering-tools]
-//             [--key-quest-markers]
+//             [--key-quest-markers] [--better-sharpness]
 //             [--horn-songs [--horn-songs-place next-to-sheet|top-middle|under-names|bottom-left|custom:X,Y]]
 //             [--guild-quest-scaling]
 //             [--projected-shadows [--no-whole-map-shadows] [--shadow-quality 0-2] [--shadow-darkness 0-100]]
@@ -55,6 +55,7 @@
 #include "horn_songs.hpp"
 #include "psp_frontend.hpp"
 #include "shadow_textures.hpp"
+#include "sharpness.hpp"
 #endif
 #include <cstdlib>
 #include <cstring>
@@ -264,6 +265,27 @@ bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
     const mhf::psp::Program *overlay = rt.active_overlay_at(address);
     return overlay != nullptr && std::string_view(overlay->name).ends_with("_ovl_game_task");
 }
+
+#if defined(MHF_HAS_FRONTEND)
+constexpr bool kSharpnessMapped = region::mh_game_sys && region::mh_player_manager && region::mh_cockpit &&
+                                 region::mh_blademaster_weapons && region::mh_weapon_model_classes &&
+                                 region::mh_sharpness_class_rows && region::mh_sharpness_rows && region::mh_horn_songs;
+
+mhf::overlay::HudBar sharpness_bar(const mhf::mhfu::Sharpness &gauge) {
+    constexpr std::array<std::array<float, 3>, 7> colors{{
+        {0.91f, 0.16f, 0.14f}, {1.0f, 0.49f, 0.15f}, {0.98f, 0.85f, 0.22f}, {0.24f, 0.82f, 0.32f},
+        {0.27f, 0.54f, 0.96f}, {0.94f, 0.95f, 0.98f}, {0.72f, 0.38f, 0.94f},
+    }};
+    // Between the sword and the name plates. The frontend scales this with the top-left HUD.
+    const float units = static_cast<float>(gauge.maximum);
+    mhf::overlay::HudBar bar{62.0f, 44.0f, 80.0f, 6.0f, static_cast<float>(gauge.current) / units, {}};
+    bar.segments.reserve(colors.size());
+    for (std::size_t i = 0; i < colors.size(); ++i) {
+        bar.segments.push_back({static_cast<float>(gauge.ends[i]) / units, colors[i]});
+    }
+    return bar;
+}
+#endif
 
 void on_enemy_hp_begin(Runtime &, [[maybe_unused]] Context &ctx) {
     if constexpr (kGuildScalingMapped) g_guild_scaling.on_enemy_hp_begin(ctx.gpr[4]);
@@ -1009,6 +1031,7 @@ int main(int argc, char **argv) {
     bool smithy_browse = false; // --smithy-browse: the smithy's lists scroll with the R or Info panel open
     bool smithy_layout = false; // --smithy-layout: with Info open, Info on the left and the list with materials on the right
     bool analog_camera = false; // --analog-camera: the right stick turns and tilts the camera by how far it is pushed
+    [[maybe_unused]] bool better_sharpness = false; // --better-sharpness: the quest HUD's segmented gauge
     bool horn_songs = false; // --horn-songs: the hunting horn's songs over the quest HUD (enhancement)
     std::string horn_songs_place = "next-to-sheet"; // --horn-songs-place: where (overlay/song_panel.hpp, parse_song_spot)
     bool guild_quest_scaling = false; // --guild-quest-scaling: dynamic 1P-4P scaling for Guild Hall/Event quests
@@ -1060,6 +1083,7 @@ int main(int argc, char **argv) {
             g_mouse_speed = static_cast<float>(std::clamp(std::stoi(argv[++i]), 25, 300)) / 100.0f; // in percent
         else if (a == "--gathering-indicators") g_gathering.indicators = true;
         else if (a == "--auto-gathering-tools") g_gathering.automatic_tools = true;
+        else if (a == "--better-sharpness") better_sharpness = true;
         else if (a == "--key-quest-markers") g_key_quest_markers = true; // enhancement
         else if (a == "--horn-songs") horn_songs = true; // enhancement
         else if (a == "--horn-songs-place" && i + 1 < argc) horn_songs_place = argv[++i];
@@ -1355,6 +1379,31 @@ int main(int argc, char **argv) {
                 }
                 if (previous) previous();
             };
+            if constexpr (kSharpnessMapped) {
+                constexpr mhf::mhfu::SharpnessSymbols symbols{
+                    *region::mh_game_sys, *region::mh_player_manager, *region::mh_cockpit, *region::mh_blademaster_weapons,
+                    *region::mh_weapon_model_classes, *region::mh_sharpness_class_rows, *region::mh_sharpness_rows};
+                extra = [&frontend, &runtime, &better_sharpness, symbols, last_frame = std::uint64_t{0},
+                         shown = std::optional<mhf::mhfu::Sharpness>{}, previous = std::move(extra)]() mutable {
+                    if (previous) previous();
+                    if (!better_sharpness) {
+                        if (shown) frontend.set_hud_bar(std::nullopt);
+                        shown.reset();
+                        last_frame = 0;
+                        return;
+                    }
+                    // SetFrameBuf counts game frames. Interpolated frames reuse the last painted bar.
+                    const std::uint64_t frame = mhf::psp::display_state(runtime).frames;
+                    if (frame == last_frame) return;
+                    last_frame = frame;
+                    const auto gauge = quest_overlay_at(runtime, *region::mh_horn_songs) ?
+                                       mhf::mhfu::read_sharpness(runtime.memory(), symbols) : std::nullopt;
+                    if (gauge != shown) {
+                        shown = gauge;
+                        frontend.set_hud_bar(gauge ? std::optional(sharpness_bar(*gauge)) : std::nullopt);
+                    }
+                };
+            }
             if (region::mh_gathering_probe && region::mh_gathering_interact) {
                 frontend.add_game_option({"gatheringAssistance", "Gathering assistance",
                     "Shows nearby targets; Circle selects a usable pickaxe or bug net.",

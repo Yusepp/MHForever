@@ -908,9 +908,25 @@ std::pair<float, float> MenuRenderer::song_panel_size(const SongPanel &panel) co
 }
 
 bool MenuRenderer::render_song_panel(const SongPanel &panel, float at_x, float at_y, float align_x, float align_y,
-                                     int width, int height, std::vector<std::uint32_t> &pixels, bool placing) {
+                                     int width, int height, std::vector<std::uint32_t> &pixels, bool placing,
+                                     const HudBar *bar, float hud_scale) {
     Impl &d = *impl_;
     d.begin(pixels, width, height, static_cast<float>(height) / Impl::kH);
+    if (bar != nullptr) {
+        const float x = bar->x * hud_scale, y = bar->y * hud_scale;
+        const float w = bar->width * hud_scale, h = bar->height * hud_scale;
+        d.rect(x - hud_scale, y - hud_scale, w + 2 * hud_scale, h + 2 * hud_scale, kBlack, 0.9f);
+        d.rect(x, y, w, h, kDim, 0.35f);
+        float start = 0;
+        for (const auto &segment : bar->segments) {
+            const float end = std::min(bar->fill, segment.end);
+            if (end > start) {
+                const auto &[r, g, b] = segment.rgb;
+                d.rect(x + w * start, y, w * (end - start), h, {r, g, b}, 1.0f);
+            }
+            start = segment.end;
+        }
+    }
     // As wide as the picture, in logical units: 480 at the PSP's shape, more over a widescreen picture.
     const float canvas_w = static_cast<float>(width) * Impl::kH / static_cast<float>(std::max(height, 1));
     if (!panel.songs.empty()) {

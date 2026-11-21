@@ -441,6 +441,25 @@ int main() {
         MHF_CHECK(renderer.render_song_panel(icons, 0, 0, 0, 0, 960, 544, card));
         MHF_CHECK(card[180u * 960u + 470u] == 0u);
     }
+    // A quest HUD bar shares the canvas with prompts, scales from the top left and drains at its exact fill point.
+    {
+        const HudBar bar{62, 44, 80, 6, 0.7f, {{0.5f, {1, 0, 0}}, {1.0f, {0, 1, 0}}}};
+        SongPanel panel;
+        panel.hint = "Gather";
+        std::vector<std::uint32_t> pixels;
+        for (const auto &[width, scale] : {std::pair{960, 1.0f}, std::pair{1280, 0.5f}}) {
+            MHF_CHECK(renderer.render_song_panel(panel, 0, 0, 0, 0, width, 544, pixels, false, &bar, scale));
+            const auto at = [&](int x, int y) {
+                return pixels[static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)];
+            };
+            const int unit = static_cast<int>(scale * 2);
+            MHF_CHECK(at(70 * unit, 47 * unit) == 0xFF0000FFu);
+            MHF_CHECK(at(110 * unit, 47 * unit) == 0xFF00FF00u);
+            MHF_CHECK(at(120 * unit, 47 * unit) != 0xFF00FF00u);
+            MHF_CHECK(at(146 * unit, 47 * unit) == 0u);
+            MHF_CHECK(at(width / 2, 420) != 0u);
+        }
+    }
     // Where the songs go, as the launcher and the controls file write it.
     MHF_CHECK(parse_song_spot("next-to-sheet") == SongSpot{SongPlace::next_to_sheet});
     MHF_CHECK(SongSpot{}.place == SongPlace::next_to_sheet); // the default
