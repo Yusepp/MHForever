@@ -25,12 +25,11 @@ void test_skips_after_hold() {
     mhf::mhfu::QuestTimerSkip skip({kQuestManagerPtrAddr, kGameSysPtrAddr});
     MHF_CHECK(!skip.poll(mem, 0u, 1'000'000u, true));
     MHF_CHECK(skip.can_skip());
-    MHF_CHECK(skip.hint(1) == "Hold SELECT: Return");
-    MHF_CHECK(skip.hint(3) == "Mantener SELECT: Volver");
-    MHF_CHECK(skip.sprites().size() == 1u);
+    MHF_CHECK(skip.label(1) == "Hold: Return Now");
+    MHF_CHECK(skip.label(3) == "Mantener: Volver");
 
     MHF_CHECK(!skip.poll(mem, mhf::mhfu::kQuestTimerSkipButton, 1'100'000u, true));
-    MHF_CHECK(skip.hint(1) == "Returning to village...");
+    MHF_CHECK(skip.label(1) == "Returning...");
     MHF_CHECK(!skip.poll(mem, mhf::mhfu::kQuestTimerSkipButton, 1'700'000u, true));
     MHF_CHECK(skip.hold_progress() > 0.5f);
     MHF_CHECK(mem.load32(kQuestManagerAddr + 0x710u) == 1800u);

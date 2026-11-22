@@ -1,8 +1,6 @@
 #include "quest_timer_skip.hpp"
 
 #include <algorithm>
-#include <cmath>
-#include <memory>
 
 namespace mhf::mhfu {
 namespace {
@@ -22,64 +20,16 @@ bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t a
     return (address & 3u) == 0u && memory.contains(address, 4u);
 }
 
-std::uint32_t premul(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) noexcept {
-    const auto pr = static_cast<std::uint32_t>((static_cast<int>(r) * a + 127) / 255);
-    const auto pg = static_cast<std::uint32_t>((static_cast<int>(g) * a + 127) / 255);
-    const auto pb = static_cast<std::uint32_t>((static_cast<int>(b) * a + 127) / 255);
-    return pr | (pg << 8u) | (pb << 16u) | (static_cast<std::uint32_t>(a) << 24u);
-}
-
-// Crisp 3x5 bitmap glyphs for "SELECT" inside the PSP-style pill button.
-constexpr const char *kSelectGlyphs[6][5] = {
-    {"111", "100", "111", "001", "111"}, // S
-    {"111", "100", "110", "100", "111"}, // E
-    {"100", "100", "100", "100", "111"}, // L
-    {"111", "100", "110", "100", "111"}, // E
-    {"111", "100", "100", "100", "111"}, // C
-    {"111", "010", "010", "010", "010"}, // T
-};
-
-// Renders a Monster Hunter / PSP-styled [SELECT] pill inside a 36x36 square sprite with hold progress fill.
-std::shared_ptr<const std::vector<std::uint32_t>> make_select_pill_sprite(float progress) {
-    constexpr int s = 36, h = 14, y_off = (s - h) / 2;
-    auto px = std::make_shared<std::vector<std::uint32_t>>(static_cast<std::size_t>(s * s), 0u);
-    const int fill_x = 2 + static_cast<int>(std::lround(std::clamp(progress, 0.0f, 1.0f) * static_cast<float>(s - 4)));
-
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < s; ++x) {
-            const int rx = x < 5 ? 5 - x : (x >= s - 5 ? x - (s - 6) : 0);
-            const int ry = y < 5 ? 5 - y : (y >= h - 5 ? y - (h - 6) : 0);
-            const float d = std::sqrt(static_cast<float>(rx * rx + ry * ry));
-            if (d > 5.4f) continue;
-
-            std::uint32_t color = 0u;
-            if (d >= 4.2f) {
-                color = progress > 0.01f ? premul(255, 212, 96, 245) : premul(204, 174, 108, 235);
-            } else if (x < fill_x && progress > 0.01f) {
-                color = premul(215, 148, 36, 225);
-            } else {
-                const std::uint8_t shade = y <= 4 ? 46 : 26;
-                color = premul(shade, static_cast<std::uint8_t>(shade - 2), static_cast<std::uint8_t>(shade - 6), 220);
-            }
-            (*px)[static_cast<std::size_t>((y + y_off) * s + x)] = color;
-        }
-    }
-
-    const int start_x = 7;
-    const int start_y = y_off + 5;
-    for (int ch = 0; ch < 6; ++ch) {
-        for (int row = 0; row < 5; ++row) {
-            for (int col = 0; col < 3; ++col) {
-                if (kSelectGlyphs[ch][row][col] == '1') {
-                    const int x = start_x + ch * 4 + col;
-                    const int y = start_y + row;
-                    (*px)[static_cast<std::size_t>(y * s + x)] = premul(248, 244, 230, 250);
-                }
-            }
-        }
-    }
-    return px;
-}
+// MH-inspired warm dark leather/slate & antique-gold palette.
+constexpr mhf::overlay::Color kMhCardTop{0.125f, 0.106f, 0.086f};
+constexpr mhf::overlay::Color kMhCardBot{0.063f, 0.055f, 0.047f};
+constexpr mhf::overlay::Color kMhGold{0.847f, 0.706f, 0.392f};
+constexpr mhf::overlay::Color kMhGoldBright{0.988f, 0.843f, 0.451f};
+constexpr mhf::overlay::Color kMhGoldDim{0.443f, 0.357f, 0.204f};
+constexpr mhf::overlay::Color kMhParchment{0.969f, 0.937f, 0.855f};
+constexpr mhf::overlay::Color kMhSubtle{0.761f, 0.706f, 0.588f};
+constexpr mhf::overlay::Color kMhPillTop{0.216f, 0.184f, 0.141f};
+constexpr mhf::overlay::Color kMhPillBot{0.118f, 0.098f, 0.075f};
 
 } // namespace
 
@@ -94,38 +44,74 @@ void QuestTimerSkip::clear() noexcept {
     can_skip_ = false;
 }
 
-std::string QuestTimerSkip::hint(int language) const {
+std::string QuestTimerSkip::label(int language) const {
     if (!can_skip_ || triggered_) return {};
     if (holding_) {
         switch (language) {
         case 0: return "帰還中...";
-        case 2: return "Retour au village...";
-        case 3: return "Volviendo a la aldea...";
-        case 4: return "Rückkehr ins Dorf...";
-        case 5: return "Ritorno al villaggio...";
-        default: return "Returning to village...";
+        case 2: return "Retour en cours...";
+        case 3: return "Volviendo...";
+        case 4: return "Rückkehr...";
+        case 5: return "Ritorno...";
+        default: return "Returning...";
         }
     }
     switch (language) {
-    case 0: return "SELECT長押しで帰還";
-    case 2: return "Maintenir SELECT : Retour";
-    case 3: return "Mantener SELECT: Volver";
-    case 4: return "SELECT halten: Zurück";
-    case 5: return "Tieni SELECT: Torna";
-    default: return "Hold SELECT: Return";
+    case 0: return "長押しで村へ帰還";
+    case 2: return "Maintenir : Retour";
+    case 3: return "Mantener: Volver";
+    case 4: return "Halten: Zurück";
+    case 5: return "Tieni: Torna";
+    default: return "Hold: Return Now";
     }
 }
 
-std::vector<mhf::overlay::HintSprite> QuestTimerSkip::sprites() const {
-    if (!can_skip_ || triggered_) return {};
-    mhf::overlay::HintSprite pill;
-    pill.x = 432.0f;
-    pill.y = 236.0f;
-    pill.size = 36.0f;
-    pill.alpha = 1.0f;
-    pill.source_size = 36;
-    pill.pixels = make_select_pill_sprite(hold_progress_);
-    return {std::move(pill)};
+void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) const {
+    if (!can_skip_ || triggered_) return;
+
+    const std::string text = label(language);
+    const float text_size = 9.0f;
+    const float text_w = painter.font_ok() ? painter.measure(text, text_size, true) : 84.0f;
+
+    const float pill_w = 38.0f;
+    const float pill_h = 14.0f;
+    const float pad_x = 8.0f;
+    const float gap = 7.0f;
+    const float card_w = std::clamp(pad_x * 2.0f + pill_w + gap + text_w, 126.0f, 198.0f);
+    const float card_h = 28.0f;
+    const float card_x = 480.0f - card_w - 10.0f;
+    const float card_y = 272.0f - card_h - 10.0f;
+
+    // Soft drop shadow + MH leather/slate gradient panel + double antique-gold bevel frame.
+    painter.rrect(card_x + 1.5f, card_y + 2.0f, card_w, card_h, 5.0f, mhf::overlay::kBlack, 0.45f);
+    painter.rrect(card_x, card_y, card_w, card_h, 4.5f, kMhCardTop, 0.90f, 0.0f, &kMhCardBot);
+    painter.rrect(card_x, card_y, card_w, card_h, 4.5f, holding_ ? kMhGoldBright : kMhGold, 0.92f, 1.0f);
+    painter.rrect(card_x + 2.0f, card_y + 2.0f, card_w - 4.0f, card_h - 4.0f, 3.0f, kMhGoldDim, 0.55f, 0.75f);
+
+    // PSP [SELECT] button pill on the left.
+    const float pill_x = card_x + pad_x;
+    const float pill_y = card_y + (card_h - 4.0f - pill_h) * 0.5f;
+    painter.rrect(pill_x, pill_y, pill_w, pill_h, 7.0f, holding_ ? kMhGold : kMhPillTop, 0.95f, 0.0f,
+                  holding_ ? &kMhGoldBright : &kMhPillBot);
+    painter.rrect(pill_x, pill_y, pill_w, pill_h, 7.0f, holding_ ? kMhGoldBright : kMhGold, 0.95f, 1.0f);
+    const float sel_w = painter.font_ok() ? painter.measure("SELECT", 6.8f, true, 0.4f) : 28.0f;
+    painter.text(pill_x + (pill_w - sel_w) * 0.5f, pill_y + 9.5f, "SELECT", 6.8f,
+                 holding_ ? mhf::overlay::kInk : kMhParchment, 0.98f, true, 0.4f);
+
+    // Localized action text in crisp anti-aliased TrueType font.
+    const float tx = pill_x + pill_w + gap;
+    const float ty = pill_y + 10.2f;
+    painter.text(tx + 0.8f, ty + 0.8f, text, text_size, mhf::overlay::kBlack, 0.75f, true);
+    painter.text(tx, ty, text, text_size, holding_ ? kMhGoldBright : kMhParchment, 0.98f, true);
+
+    // Sleek hold-progress bar tucked along the bottom interior of the card.
+    const float bar_x = card_x + 6.0f;
+    const float bar_y = card_y + card_h - 5.5f;
+    const float bar_w = card_w - 12.0f;
+    painter.rrect(bar_x, bar_y, bar_w, 2.5f, 1.25f, kMhSubtle, 0.25f);
+    if (hold_progress_ > 0.01f) {
+        painter.rrect(bar_x, bar_y, std::max(3.0f, bar_w * hold_progress_), 2.5f, 1.25f, kMhGoldBright, 0.98f);
+    }
 }
 
 bool QuestTimerSkip::poll(psprecomp::GuestMemory &memory, std::uint32_t buttons, std::uint64_t now_us, bool enabled) {

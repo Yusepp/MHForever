@@ -1,13 +1,12 @@
 #pragma once
 
 #include "mhf/psp/host.hpp"
-#include "overlay/song_panel.hpp"
+#include "overlay/painter.hpp"
 #include "psprecomp/guest_memory.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace mhf::mhfu {
 
@@ -36,10 +35,10 @@ public:
 
     [[nodiscard]] bool can_skip() const noexcept { return can_skip_; }
     [[nodiscard]] float hold_progress() const noexcept { return hold_progress_; }
-    // Localized text prompt matching the game's system language (0=JP, 1=EN, 2=FR, 3=ES, 4=DE, 5=IT).
-    [[nodiscard]] std::string hint(int language = 1) const;
-    // MH-styled PSP [SELECT] pill + return emblem sprite with hold-progress highlight.
-    [[nodiscard]] std::vector<mhf::overlay::HintSprite> sprites() const;
+    // Localized label matching the game's system language (0=JP, 1=EN, 2=FR, 3=ES, 4=DE, 5=IT).
+    [[nodiscard]] std::string label(int language = 1) const;
+    // Renders a Monster Hunter-styled Quest Return card with PSP [SELECT] pill, TrueType font, and progress bar.
+    void render_card(mhf::overlay::Painter &painter, int language = 1) const;
 
 private:
     QuestTimerSkipSymbols symbols_;
