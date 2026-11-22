@@ -56,7 +56,34 @@ void main() {
     if (kSpecClear == 0u) {
         DrawParams p = pc.params.items[pc.draw_idx];
         uint bits = p.tex_func_bits;
-        if (kSpecTextured != 0u && ((bits & 0x40u) != 0u)) {
+        if (kSpecTextured != 0u && ((bits & 0x400u) != 0u)) {
+            // Quest-clear 4x killcam subtle peripheral cinematic bokeh (center subject stays razor-sharp, 0ms in combat!).
+            vec2 dc = v_uv - vec2(0.5, 0.48);
+            float coc = smoothstep(0.24, 0.62, length(dc)) * 0.0042;
+            vec4 t = texture(sampler2D(u_textures[nonuniformEXT(p.tex_idx)],
+                                       u_samplers[nonuniformEXT(p.sampler_idx)]), v_uv);
+            if (coc > 0.0003) {
+                vec4 b = t * 0.28;
+                const vec2 kRing[8] = vec2[8](
+                    vec2( 1.0,  0.0), vec2(-1.0,  0.0), vec2( 0.0,  1.0), vec2( 0.0, -1.0),
+                    vec2( 0.707,  0.707), vec2(-0.707,  0.707), vec2( 0.707, -0.707), vec2(-0.707, -0.707)
+                );
+                for (int i = 0; i < 8; ++i) {
+                    vec2 suv = clamp(v_uv + kRing[i] * vec2(coc, coc * 1.77), vec2(0.001), vec2(0.999));
+                    b += texture(sampler2D(u_textures[nonuniformEXT(p.tex_idx)],
+                                           u_samplers[nonuniformEXT(p.sampler_idx)]), suv) * 0.09;
+                }
+                t = b;
+            }
+            uint func = bits & 7u;
+            bool rgba = (bits & 8u) != 0u;
+            if (func == 0u) { c.rgb *= t.rgb; if (rgba) c.a *= t.a; }
+            else if (func == 1u) { c.rgb = rgba ? mix(c.rgb, t.rgb, t.a) : t.rgb; }
+            else if (func == 2u) { c.rgb = mix(c.rgb, p.env_and_flags.rgb, t.rgb); if (rgba) c.a *= t.a; }
+            else if (func == 3u) { c.rgb = t.rgb; if (rgba) c.a = t.a; }
+            else { c.rgb += t.rgb; if (rgba) c.a *= t.a; }
+            if ((bits & 16u) != 0u) c.rgb *= 2.0;
+        } else if (kSpecTextured != 0u && ((bits & 0x40u) != 0u)) {
             vec4 t = texture(sampler2D(u_textures[nonuniformEXT(p.tex_idx)],
                                        u_samplers[nonuniformEXT(p.sampler_idx)]), v_uv);
             uint func = bits & 7u;

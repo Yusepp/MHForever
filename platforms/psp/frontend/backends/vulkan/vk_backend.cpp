@@ -173,6 +173,7 @@ struct DrawSetup {
     float tex_width = 1.0f, tex_height = 1.0f;
     std::uint32_t target = 0;
     bool self_sampled = false;
+    bool is_killcam = false;
 };
 
 struct FrameSlice {
@@ -313,6 +314,7 @@ private:
         std::uint32_t tex_slot = 0;
         bool texture_mips = false;
         bool linear_override = false;
+        bool is_killcam = false;
         float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     };
     struct PackCacheEntry {
@@ -934,6 +936,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 setup_.tex_slot = fit->second.tex_slot;
                 setup_.texture_mips = fit->second.texture_mips;
                 setup_.linear_override = fit->second.linear_override;
+                setup_.is_killcam = fit->second.is_killcam;
                 std::copy_n(fit->second.uv_xform, 4, setup_.uv_xform);
             } else {
                 if (prof_.enabled) ++prof_.tex_misses;
@@ -1013,6 +1016,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                         setup_.uv_xform[2] = static_cast<float>(kc_ox) / 480.0f;
                         setup_.uv_xform[3] = static_cast<float>(kc_oy) / 272.0f;
                         setup_.linear_override = true;
+                        setup_.is_killcam = true;
                     } else {
                         auto it = textures_.find(h);
                         if (it == textures_.end()) {
@@ -1041,6 +1045,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                                 setup_.uv_xform[2] = static_cast<float>(kc_ox) / 480.0f;
                                 setup_.uv_xform[3] = static_cast<float>(kc_oy) / 272.0f;
                                 setup_.linear_override = true;
+                                setup_.is_killcam = true;
                             } else {
                                 CachedTexture ct{};
                                 ct.width = info.width;
@@ -1060,6 +1065,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 bind.tex_slot = setup_.tex_slot;
                 bind.texture_mips = setup_.texture_mips;
                 bind.linear_override = setup_.linear_override;
+                bind.is_killcam = setup_.is_killcam;
                 std::copy_n(setup_.uv_xform, 4, bind.uv_xform);
                 frame_tex_cache_.emplace(param_key, bind);
             }
@@ -1204,7 +1210,8 @@ void VkBackend::draw_batch() {
 
     const std::uint32_t func = R(kTexFunc);
     dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
-                       (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
+                       (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u) |
+                       (setup_.is_killcam && live_->enhanced_lighting.load(std::memory_order_relaxed) ? 1024u : 0u);
     if (is_soft_particle && soft_depth_copy_.bindless_slot != 0) {
         const std::uint32_t bmode = R(kBlendMode);
         const bool is_additive_one = ((bmode & 0xFu) == 10u && ((bmode >> 4u) & 0xFu) == 10u && ((bmode >> 8u) & 0xFu) == 0u);
@@ -2733,7 +2740,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
             linear, rb.setup.texture_mips, (R(kTexWrap) & 1u) != 0, (R(kTexWrap) & 0x100u) != 0, aniso);
         const std::uint32_t func = R(kTexFunc);
         dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
-                           (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
+                           (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u) |
+                           (rb.setup.is_killcam && live_->enhanced_lighting.load(std::memory_order_relaxed) ? 1024u : 0u);
         if (is_soft_particle && soft_depth_copy_.bindless_slot != 0) {
             const std::uint32_t bmode = R(kBlendMode);
             const bool is_additive_one = ((bmode & 0xFu) == 10u && ((bmode >> 4u) & 0xFu) == 10u && ((bmode >> 8u) & 0xFu) == 0u);
