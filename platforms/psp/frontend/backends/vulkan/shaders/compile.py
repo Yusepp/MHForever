@@ -30,6 +30,7 @@ SHADERS = [
     ("kVolumetricFogCompSpv", "volumetric_fog.comp"),
     ("kBloomExtractCompSpv", "bloom_extract.comp"),
     ("kSsgiBounceCompSpv", "ssgi_bounce.comp"),
+    ("kGlowBlurCompSpv", "glow_blur.comp"),
     ("kLightingCompositeCompSpv", "lighting_composite.comp"),
 ]
 

@@ -39,17 +39,29 @@ layout(push_constant) uniform LightingPush {
 
 vec3 soft_threshold(vec3 c, float thresh) {
     float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    float knee = 0.22;
-    float soft = clamp(luma - thresh + knee, 0.0, 2.0 * knee);
+    // Chromatic emissive boost: fire, torches, lava, fireballs, lightning, and sparks have high saturation
+    // and bloom richly, while neutral white snow stays clean and un-washed-out!
+    float cmax = max(c.r, max(c.g, c.b));
+    float cmin = min(c.r, min(c.g, c.b));
+    float sat = (cmax - cmin) / max(cmax, 1e-4);
+    float eff_luma = luma * (0.82 + 0.55 * sat);
+
+    float knee = 0.24;
+    float soft = clamp(eff_luma - thresh + knee, 0.0, 2.0 * knee);
     soft = (soft * soft) / (4.0 * knee + 1e-5);
-    float contrib = max(luma - thresh, soft) / max(luma, 1e-4);
-    return c * contrib;
+    float contrib = max(eff_luma - thresh, soft) / max(eff_luma, 1e-4);
+    return c * (contrib * (0.75 + 0.85 * sat));
+}
+
+// Karis luminance weight suppresses single-pixel firefly aliasing on tiny torch flames & sparks.
+float karis_weight(vec3 c) {
+    return 1.0 / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722)));
 }
 
 vec3 sample_scene(LightingParams p, vec2 uv) {
     return texture(sampler2D(u_textures[nonuniformEXT(p.tex_slots.x)],
                              u_samplers[nonuniformEXT(p.aux_slots.y)]),
-                   clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+                   clamp(uv, vec2(0.001), vec2(0.999))).rgb;
 }
 
 void main() {
@@ -58,19 +70,38 @@ void main() {
     if (gid.x >= int(p.aux_slots.z) || gid.y >= int(p.aux_slots.w)) return;
 
     vec2 uv = (vec2(gid) + 0.5) / vec2(p.aux_slots.zw);
-    vec2 tx = 2.5 / p.vz_and_size.zw;
+    vec2 tx = 2.0 / p.vz_and_size.zw;
     float th = p.bloom_rim.x;
 
-    // 9-tap wide tent filter at quarter-res for smooth, shimmer-free emissive glow.
-    vec3 sum = soft_threshold(sample_scene(p, uv), th) * 0.25;
-    sum += soft_threshold(sample_scene(p, uv + vec2(-tx.x, -tx.y)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2( tx.x, -tx.y)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2(-tx.x,  tx.y)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2( tx.x,  tx.y)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2(-2.0 * tx.x, 0.0)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2( 2.0 * tx.x, 0.0)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2(0.0, -2.0 * tx.y)), th) * 0.09375;
-    sum += soft_threshold(sample_scene(p, uv + vec2(0.0,  2.0 * tx.y)), th) * 0.09375;
+    // 13-tap Karis-averaged downsample (anti-flicker on small torches, embers, and hit sparks).
+    vec3 c0 = soft_threshold(sample_scene(p, uv), th);
+    vec3 c1 = soft_threshold(sample_scene(p, uv + vec2(-tx.x, -tx.y)), th);
+    vec3 c2 = soft_threshold(sample_scene(p, uv + vec2( tx.x, -tx.y)), th);
+    vec3 c3 = soft_threshold(sample_scene(p, uv + vec2(-tx.x,  tx.y)), th);
+    vec3 c4 = soft_threshold(sample_scene(p, uv + vec2( tx.x,  tx.y)), th);
+
+    vec3 e1 = soft_threshold(sample_scene(p, uv + vec2(-2.0 * tx.x, 0.0)), th);
+    vec3 e2 = soft_threshold(sample_scene(p, uv + vec2( 2.0 * tx.x, 0.0)), th);
+    vec3 e3 = soft_threshold(sample_scene(p, uv + vec2(0.0, -2.0 * tx.y)), th);
+    vec3 e4 = soft_threshold(sample_scene(p, uv + vec2(0.0,  2.0 * tx.y)), th);
+
+    vec3 d1 = soft_threshold(sample_scene(p, uv + vec2(-2.0 * tx.x, -2.0 * tx.y)), th);
+    vec3 d2 = soft_threshold(sample_scene(p, uv + vec2( 2.0 * tx.x, -2.0 * tx.y)), th);
+    vec3 d3 = soft_threshold(sample_scene(p, uv + vec2(-2.0 * tx.x,  2.0 * tx.y)), th);
+    vec3 d4 = soft_threshold(sample_scene(p, uv + vec2( 2.0 * tx.x,  2.0 * tx.y)), th);
+
+    vec3 g0 = (c1 + c2 + c3 + c4) * 0.25;
+    vec3 g1 = (d1 + e3 + e1 + c0) * 0.25;
+    vec3 g2 = (e3 + d2 + c0 + e2) * 0.25;
+    vec3 g3 = (e1 + c0 + d3 + e4) * 0.25;
+    vec3 g4 = (c0 + e2 + e4 + d4) * 0.25;
+
+    float w0 = karis_weight(g0) * 0.50;
+    float w1 = karis_weight(g1) * 0.125;
+    float w2 = karis_weight(g2) * 0.125;
+    float w3 = karis_weight(g3) * 0.125;
+    float w4 = karis_weight(g4) * 0.125;
+    vec3 sum = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / max(w0 + w1 + w2 + w3 + w4, 1e-4);
 
     imageStore(u_bloom_out, gid, vec4(sum, 1.0));
 }

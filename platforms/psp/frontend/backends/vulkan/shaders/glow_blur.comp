@@ -1,0 +1,70 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Quarter-resolution 9-tap wide Kawase blur used to smooth both Bloom and SSGI bounce
+// into silky, flicker-free warm firelight & emissive halos (~0.03 ms per pass).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D u_blur_out;
+
+struct LightingParams {
+    vec4 proj_info;
+    vec4 vz_and_size;
+    vec4 sun_dir_view;
+    vec4 sun_screen;
+    vec4 shadow_tint;
+    vec4 fog_color;
+    vec4 scatter_color;
+    vec4 bloom_rim;
+    vec4 world_up_view;
+    vec4 ground_bounce;
+    vec4 spec_contact;
+    uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
+    uvec4 aux_slots;    // x = src_slot_to_blur, y = linear_sampler, z = out_w, w = out_h
+    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+vec3 tap(uint slot, uint samp, vec2 uv) {
+    return texture(sampler2D(u_textures[nonuniformEXT(slot)],
+                             u_samplers[nonuniformEXT(samp)]),
+                   clamp(uv, vec2(0.001), vec2(0.999))).rgb;
+}
+
+void main() {
+    LightingParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(p.aux_slots.z) || gid.y >= int(p.aux_slots.w)) return;
+
+    vec2 inv_sz = 1.0 / vec2(p.aux_slots.zw);
+    vec2 uv = (vec2(gid) + 0.5) * inv_sz;
+    uint src = p.aux_slots.x;
+    uint samp = p.aux_slots.y;
+
+    // Dual-radius Kawase tent (eliminates quarter-res grid aliasing and fire shimmer).
+    vec2 d1 = inv_sz * 1.25;
+    vec2 d2 = inv_sz * 2.50;
+    vec3 sum = tap(src, samp, uv) * 0.24;
+    sum += tap(src, samp, uv + vec2(-d1.x, -d1.y)) * 0.11;
+    sum += tap(src, samp, uv + vec2( d1.x, -d1.y)) * 0.11;
+    sum += tap(src, samp, uv + vec2(-d1.x,  d1.y)) * 0.11;
+    sum += tap(src, samp, uv + vec2( d1.x,  d1.y)) * 0.11;
+    sum += tap(src, samp, uv + vec2(-d2.x,  0.0 )) * 0.08;
+    sum += tap(src, samp, uv + vec2( d2.x,  0.0 )) * 0.08;
+    sum += tap(src, samp, uv + vec2( 0.0,  -d2.y)) * 0.08;
+    sum += tap(src, samp, uv + vec2( 0.0,   d2.y)) * 0.08;
+
+    imageStore(u_blur_out, gid, vec4(sum, 1.0));
+}

@@ -75,7 +75,8 @@ public:
     [[nodiscard]] bool ready() const noexcept {
         return gtao_pipe_ != VK_NULL_HANDLE && gtao_denoise_pipe_ != VK_NULL_HANDLE &&
                vol_pipe_ != VK_NULL_HANDLE && bloom_pipe_ != VK_NULL_HANDLE &&
-               ssgi_pipe_ != VK_NULL_HANDLE && comp_pipe_ != VK_NULL_HANDLE;
+               ssgi_pipe_ != VK_NULL_HANDLE && glow_blur_pipe_ != VK_NULL_HANDLE &&
+               comp_pipe_ != VK_NULL_HANDLE;
     }
 
     // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
@@ -97,8 +98,8 @@ public:
                   void *params_cpu_ptr, VkDeviceAddress params_bda);
 
     // Number of LightingComputeParams structs needed per dispatch
-    // (gtao, vol, bloom, ssgi, gtao_denoise, composite).
-    static constexpr std::size_t kParamSlotsPerDispatch = 6;
+    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, composite).
+    static constexpr std::size_t kParamSlotsPerDispatch = 8;
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
@@ -121,7 +122,9 @@ private:
     VkDescriptorSet gtao_blur_set_ = VK_NULL_HANDLE;
     VkDescriptorSet vol_set_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet bloom_blur_set_ = VK_NULL_HANDLE;
     VkDescriptorSet ssgi_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet ssgi_blur_set_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
     std::size_t scene_set_cursor_ = 0;
 
@@ -131,13 +134,16 @@ private:
     VkPipeline vol_pipe_ = VK_NULL_HANDLE;
     VkPipeline bloom_pipe_ = VK_NULL_HANDLE;
     VkPipeline ssgi_pipe_ = VK_NULL_HANDLE;
+    VkPipeline glow_blur_pipe_ = VK_NULL_HANDLE;
     VkPipeline comp_pipe_ = VK_NULL_HANDLE;
 
-    Target2D gtao_tex_;      // half-res RGBA8 (ao, nx, ny, contact_shadow)
-    Target2D gtao_blur_tex_; // half-res RGBA8 (denoised ao, crisp nx, ny, denoised contact_shadow)
-    Target2D vol_tex_;       // quarter-res RGBA16F (in_scatter.rgb, transmittance)
-    Target2D bloom_tex_;     // quarter-res RGBA16F (emissive bloom.rgb)
-    Target2D ssgi_tex_;      // quarter-res RGBA16F (colored indirect bounce.rgb)
+    Target2D gtao_tex_;       // half-res RGBA8 (ao, nx, ny, contact_shadow)
+    Target2D gtao_blur_tex_;  // half-res RGBA8 (denoised ao, crisp nx, ny, denoised contact_shadow)
+    Target2D vol_tex_;        // quarter-res RGBA16F (in_scatter.rgb, transmittance)
+    Target2D bloom_tex_;      // quarter-res RGBA16F (Karis-extracted emissive bloom.rgb)
+    Target2D bloom_blur_tex_; // quarter-res RGBA16F (Kawase-smoothed bloom.rgb)
+    Target2D ssgi_tex_;       // quarter-res RGBA16F (colored indirect bounce.rgb)
+    Target2D ssgi_blur_tex_;  // quarter-res RGBA16F (Kawase-smoothed indirect bounce.rgb)
 
     // Zone & biome classification tables (populated once from LiveSettings).
     struct ZoneInfo {

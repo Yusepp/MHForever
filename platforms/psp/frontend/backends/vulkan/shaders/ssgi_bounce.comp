@@ -76,17 +76,18 @@ void main() {
     float z0 = linear_eye_z(p, d0);
     vec2 uv0 = (vec2(ip) + 0.5) / p.vz_and_size.zw;
 
-    // 6-tap golden-angle IGN-rotated bounce gather across nearby screen-space neighborhood.
-    float noise = ign(vec2(gid) + p.sun_screen.w * 5.71);
+    // Static spatial 8-tap golden-spiral bounce gather (NO frame-index rotation -> zero fire/torch flicker!).
+    // Paired with quarter-res glow_blur.comp for silky-smooth indirect firelight & lava bounce.
+    float noise = ign(vec2(gid));
     float base_ang = noise * 6.2831853;
-    float max_rad = clamp(0.065 * (20.0 / max(z0 * 0.08, 1.0)), 0.018, 0.085);
+    float max_rad = clamp(0.072 * (20.0 / max(z0 * 0.08, 1.0)), 0.020, 0.090);
 
     vec3 bounce_sum = vec3(0.0);
     float w_sum = 0.0;
-    const int kTaps = 6;
+    const int kTaps = 8;
     for (int i = 0; i < kTaps; ++i) {
-        float ang = base_ang + float(i) * 1.04719755; // 60 deg
-        float rad = max_rad * (0.35 + 0.65 * fract(noise * 3.17 + float(i) * 0.381966));
+        float ang = base_ang + float(i) * 0.78539816; // 45 deg
+        float rad = max_rad * (0.28 + 0.72 * (float(i & 3) + 0.5) * 0.25);
         vec2 suv = clamp(uv0 + vec2(cos(ang), sin(ang) * 1.77) * rad, vec2(0.002), vec2(0.998));
         ivec2 sip = clamp(ivec2(suv * p.vz_and_size.zw), ivec2(0), full_max);
         float sd = texelFetch(u_textures[nonuniformEXT(dslot)], sip, 0).r;
@@ -95,20 +96,20 @@ void main() {
         float zs = linear_eye_z(p, sd);
         // Only bounce light between surfaces that are actually close in 3D space (prevents sky/distant bleed).
         float z_diff = abs(zs - z0) / max(z0, 4.0);
-        float depth_w = exp(-z_diff * 4.5);
+        float depth_w = exp(-z_diff * 4.2);
         if (depth_w < 0.03) continue;
 
         vec3 sc = texture(sampler2D(u_textures[nonuniformEXT(cslot)],
                                     u_samplers[nonuniformEXT(lsamp)]), suv).rgb;
         float luma = dot(sc, vec3(0.2126, 0.7152, 0.0722));
-        // Favor saturated/bright light sources (lava, fireballs, campfires, lightning, sunlit snow)
-        // while suppressing dark muddiness.
+        // Strongly favor saturated emissive sources (fireplaces, torches, lava, fireballs, lightning)
+        // while keeping matte white snow clean.
         float cmax = max(sc.r, max(sc.g, sc.b));
         float cmin = min(sc.r, min(sc.g, sc.b));
         float sat = (cmax - cmin) / max(cmax, 1e-4);
-        float energy = smoothstep(0.28, 0.92, luma) * (0.65 + 0.85 * sat);
+        float energy = smoothstep(0.32, 0.90, luma) * (0.40 + 1.35 * sat);
 
-        float w = depth_w * (1.0 - rad / max(max_rad, 1e-4) * 0.5);
+        float w = depth_w * (1.0 - rad / max(max_rad, 1e-4) * 0.45);
         bounce_sum += sc * (energy * w);
         w_sum += w;
     }
