@@ -100,12 +100,15 @@ private:
         void destroy(const Context &ctx, BindlessDescriptors &desc);
     };
 
+    static constexpr std::size_t kSceneSetCount = 16;
+
     VkDescriptorSetLayout storage_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool storage_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet gtao_set_ = VK_NULL_HANDLE;
     VkDescriptorSet vol_set_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_set_ = VK_NULL_HANDLE;
-    VkDescriptorSet scene_set_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
+    std::size_t scene_set_cursor_ = 0;
 
     VkPipelineLayout pipe_layout_ = VK_NULL_HANDLE;
     VkPipeline gtao_pipe_ = VK_NULL_HANDLE;
@@ -128,6 +131,8 @@ private:
     std::unordered_map<std::uint32_t, int> tex_to_zone_;
     std::vector<std::uint32_t> zone_votes_;
     int active_zone_ = -1;
+    int pending_zone_ = -1;
+    std::uint32_t pending_zone_streak_ = 0;
     BiomeKind active_biome_ = BiomeKind::DefaultOutdoor;
     bool active_is_cave_ = false;
 };

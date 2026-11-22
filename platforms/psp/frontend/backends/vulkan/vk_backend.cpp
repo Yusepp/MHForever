@@ -746,7 +746,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             cur_light_in_.light0_dir[2] = f24(ge.reg(0x65u));
             cur_light_in_.has_light0 = true;
         }
-        if ((ge.reg(kFogEnable) & 1u) != 0) {
+        if ((ge.reg(kFogEnable) & 1u) != 0 && (ge.reg(kAlphaBlendEnable) & 1u) == 0 && !cur_light_in_.has_psp_fog) {
             unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
             cur_light_in_.has_psp_fog = true;
         }
@@ -1174,7 +1174,9 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
     cur_layer_ = draw.layer;
     const auto sum = (!draw.through && !draw.clear) || subframes_ > 1 ? interpolation::summarize(draw)
                                                                       : interpolation::DrawSummary{};
-    if (!draw.through && !draw.clear && sum.perspective) {
+    if (!draw.through && !draw.clear && sum.perspective &&
+        std::fabs(draw.viewport[0]) >= 100.0f && std::fabs(draw.viewport[1]) >= 50.0f &&
+        cur_light_in_.proj[0] == 0.0f) {
         std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
         cur_light_in_.vz_scale = draw.viewport[2];
         cur_light_in_.vz_center = draw.viewport[5];
@@ -2291,7 +2293,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
         if (!clear) {
             if (!rb.setup.through) {
                 interp_saw_3d = true;
-            } else if (interp_saw_3d && !interp_lit && lighting_.ready() &&
+            } else if (interp_saw_3d && !interp_lit && !rb.setup.self_sampled && lighting_.ready() &&
                        live_->enhanced_lighting.load(std::memory_order_relaxed)) {
                 vkCmdEndRendering(f.cmd);
                 apply_enhanced_lighting(interp_rt_, last_light_in_);

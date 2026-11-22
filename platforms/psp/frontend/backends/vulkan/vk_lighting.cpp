@@ -63,18 +63,23 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4};
-    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 4, 1, &ps};
+    constexpr std::uint32_t kTotalSets = 3u + static_cast<std::uint32_t>(kSceneSetCount);
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
 
-    std::array<VkDescriptorSetLayout, 4> dsls = {storage_layout_, storage_layout_, storage_layout_, storage_layout_};
-    std::array<VkDescriptorSet, 4> sets{};
-    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, storage_pool_, 4, dsls.data()};
+    std::array<VkDescriptorSetLayout, kTotalSets> dsls{};
+    dsls.fill(storage_layout_);
+    std::array<VkDescriptorSet, kTotalSets> sets{};
+    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, storage_pool_, kTotalSets, dsls.data()};
     if (vkAllocateDescriptorSets(ctx.device, &dsai, sets.data()) != VK_SUCCESS) return false;
     gtao_set_ = sets[0];
     vol_set_ = sets[1];
     bloom_set_ = sets[2];
-    scene_set_ = sets[3];
+    for (std::size_t i = 0; i < kSceneSetCount; ++i) {
+        scene_sets_[i] = sets[3 + i];
+    }
+    scene_set_cursor_ = 0;
 
     std::array<VkDescriptorSetLayout, 2> pipe_sets = {bindless_layout, storage_layout_};
     VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkDeviceAddress)};
@@ -177,9 +182,24 @@ void LightingPipeline::end_frame_zone_vote() noexcept {
         zone_votes_[i] = 0u;
     }
     if (best_zone >= 0 && best_votes >= 2u) {
-        active_zone_ = best_zone;
-        active_biome_ = zones_[static_cast<std::size_t>(best_zone)].biome;
-        active_is_cave_ = zones_[static_cast<std::size_t>(best_zone)].is_cave;
+        if (active_zone_ < 0 || best_zone == active_zone_) {
+            active_zone_ = best_zone;
+            active_biome_ = zones_[static_cast<std::size_t>(best_zone)].biome;
+            active_is_cave_ = zones_[static_cast<std::size_t>(best_zone)].is_cave;
+            pending_zone_ = -1;
+            pending_zone_streak_ = 0;
+        } else if (best_zone == pending_zone_) {
+            if (++pending_zone_streak_ >= 3u) {
+                active_zone_ = best_zone;
+                active_biome_ = zones_[static_cast<std::size_t>(best_zone)].biome;
+                active_is_cave_ = zones_[static_cast<std::size_t>(best_zone)].is_cave;
+                pending_zone_ = -1;
+                pending_zone_streak_ = 0;
+            }
+        } else {
+            pending_zone_ = best_zone;
+            pending_zone_streak_ = 1u;
+        }
     }
 }
 
@@ -386,9 +406,12 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return;
     if (!ensure_targets(ctx, const_cast<BindlessDescriptors &>(desc), scene_w, scene_h)) return;
 
-    // Bind scene_color as storage image for the final in-place composite pass.
+    // Cycle through a ring of storage descriptor sets so we NEVER mutate a descriptor set
+    // referenced by an earlier dispatch in the same command buffer or an in-flight frame!
+    const VkDescriptorSet scene_set = scene_sets_[scene_set_cursor_];
+    scene_set_cursor_ = (scene_set_cursor_ + 1u) % kSceneSetCount;
     VkDescriptorImageInfo sii{VK_NULL_HANDLE, scene_color_view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set_, 0, 0, 1,
+    VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set, 0, 0, 1,
                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
     vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
 
@@ -409,18 +432,22 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     slots[2] = base; slots[2].aux_slots[2] = bloom_tex_.w; slots[2].aux_slots[3] = bloom_tex_.h;
     slots[3] = base; slots[3].aux_slots[2] = scene_w;      slots[3].aux_slots[3] = scene_h;
 
-    // Transition intermediate targets -> GENERAL for compute writes.
+    // Transition intermediate targets -> GENERAL for compute writes, waiting for any prior
+    // composite pass's sampled reads to finish so back-to-back dispatches never race!
     Context::cmd_transition_image(cmd, gtao_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     Context::cmd_transition_image(cmd, vol_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     Context::cmd_transition_image(cmd, bloom_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
     // Passes 1, 2, 3 are independent (all read scene_depth / scene_color in SHADER_READ_ONLY_OPTIMAL) ->
@@ -458,7 +485,7 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
                                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
     // Pass 4: Unified full-res composite in-place on scene_color.
-    run_pass(comp_pipe_, scene_set_, scene_w, scene_h, 3);
+    run_pass(comp_pipe_, scene_set, scene_w, scene_h, 3);
 }
 
 } // namespace mhf::psp::vk

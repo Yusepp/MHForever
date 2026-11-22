@@ -45,10 +45,12 @@ vec3 multi_bounce_ao(float ao, vec3 albedo) {
     return max(vec3(ao), ((ao * a + b) * ao + c) * ao);
 }
 
-// Gentle highlight-preserving filmic shoulder (keeps midtones/blacks faithful to MHFU art).
+// Gentle highlight-preserving filmic shoulder: exact identity below 0.85 so bright snow & midtones
+// stay faithful to MHFU art, with C1-smooth asymptotic rolloff above 0.85 for HDR bloom/shafts.
 vec3 soft_filmic(vec3 x) {
     vec3 a = max(x, vec3(0.0));
-    return (a * (1.0 + a * 0.22)) / (1.0 + a * 0.35);
+    vec3 hi = 0.85 + 0.15 * tanh((a - 0.85) / 0.15);
+    return mix(a, hi, step(vec3(0.85), a));
 }
 
 void main() {

@@ -108,8 +108,8 @@ void main() {
     for (int d_idx = 0; d_idx < kDirs; ++d_idx) {
         float ang = base_angle + float(d_idx) * (3.14159265 / float(kDirs));
         vec2 dir = vec2(cos(ang), sin(ang));
-        float max_h1 = -1.0;
-        float max_h2 = -1.0;
+        float max_sin1 = 0.0;
+        float max_sin2 = 0.0;
 
         for (int s = 1; s <= kSteps; ++s) {
             float frac = (float(s) - 0.35 * fract(noise * 13.7 + float(d_idx) * 0.5)) / float(kSteps);
@@ -122,8 +122,8 @@ void main() {
                 float len2 = dot(S1, S1);
                 if (len2 > 1e-4) {
                     float falloff = clamp(1.0 - len2 * inv_r2, 0.0, 1.0);
-                    float h = dot(S1, V) * inversesqrt(len2);
-                    max_h1 = max(max_h1, mix(-1.0, h, falloff));
+                    float sin_h = dot(S1, N) * inversesqrt(len2);
+                    max_sin1 = max(max_sin1, max(sin_h - 0.12, 0.0) * falloff);
                 }
             }
 
@@ -134,21 +134,19 @@ void main() {
                 float len2 = dot(S2, S2);
                 if (len2 > 1e-4) {
                     float falloff = clamp(1.0 - len2 * inv_r2, 0.0, 1.0);
-                    float h = dot(S2, V) * inversesqrt(len2);
-                    max_h2 = max(max_h2, mix(-1.0, h, falloff));
+                    float sin_h = dot(S2, N) * inversesqrt(len2);
+                    max_sin2 = max(max_sin2, max(sin_h - 0.12, 0.0) * falloff);
                 }
             }
         }
 
-        // Convert cosine horizons to ambient visibility with subtle bias against self-occlusion.
-        float h1 = acos(clamp(max_h1, -1.0, 1.0));
-        float h2 = acos(clamp(max_h2, -1.0, 1.0));
-        float v1 = 0.5 * (1.0 - cos(clamp(h1, 0.0, 1.5707963)));
-        float v2 = 0.5 * (1.0 - cos(clamp(h2, 0.0, 1.5707963)));
-        visibility += clamp(1.0 - (v1 + v2) * 0.85, 0.0, 1.0);
+        // Normal-oriented horizon occlusion: zero self-occlusion on flat planes at any viewing angle,
+        // crisp physically grounded contact shadows inside real crevices and corners.
+        float occ = 0.5 * (max_sin1 + max_sin2);
+        visibility += clamp(1.0 - occ * 1.15, 0.0, 1.0);
     }
 
     float ao = clamp(visibility / float(kDirs), 0.0, 1.0);
-    ao = mix(1.0, pow(ao, 1.15), p.shadow_tint.a);
+    ao = mix(1.0, pow(ao, 1.1), p.shadow_tint.a);
     imageStore(u_gtao_out, gid, vec4(ao, N.x * 0.5 + 0.5, N.y * 0.5 + 0.5, 1.0));
 }
