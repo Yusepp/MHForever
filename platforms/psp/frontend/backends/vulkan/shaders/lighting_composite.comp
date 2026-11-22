@@ -70,7 +70,7 @@ void main() {
     float d_here = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
     bool is_sky = (d_here >= 0.99992 || d_here <= 0.00001);
 
-    // 1. Depth-aware bilateral upsample of half-res GTAO + view-space normal.
+    // 1. Depth-aware bilateral upsample of denoised half-res GTAO, Contact Shadows & view-space normal.
     if (!is_sky && p.tex_slots.z != 0u) {
         ivec2 gsize = textureSize(u_textures[nonuniformEXT(p.tex_slots.z)], 0);
         ivec2 gmax = gsize - ivec2(1);
@@ -80,6 +80,7 @@ void main() {
         vec2 f = clamp(gpos - vec2(base), 0.0, 1.0);
 
         float ao_sum = 0.0;
+        float cs_sum = 0.0;
         vec2 nxy_sum = vec2(0.0);
         float w_sum = 0.0;
         for (int dy = 0; dy <= 1; ++dy) {
@@ -87,41 +88,73 @@ void main() {
                 ivec2 gc = clamp(base + ivec2(dx, dy), ivec2(0), gmax);
                 ivec2 fc = clamp(gc * 2, ivec2(0), full_max);
                 float ds = texelFetch(u_textures[nonuniformEXT(dslot)], fc, 0).r;
+                float valid = (ds < 0.99992 && ds > 0.00001) ? 1.0 : 0.0;
                 vec4 g = texelFetch(u_textures[nonuniformEXT(p.tex_slots.z)], gc, 0);
                 float bw = (dx == 1 ? f.x : 1.0 - f.x) * (dy == 1 ? f.y : 1.0 - f.y);
-                float dw = exp(-abs(ds - d_here) * 3500.0) * g.a;
+                float dw = exp(-abs(ds - d_here) * 3500.0) * valid;
                 float w = bw * dw + 1e-4;
                 ao_sum += g.r * w;
+                cs_sum += g.a * w;
                 nxy_sum += (g.gb * 2.0 - 1.0) * w;
                 w_sum += w;
             }
         }
         float ao = clamp(ao_sum / w_sum, 0.0, 1.0);
+        float contact = clamp(cs_sum / w_sum, 0.0, 1.0);
         vec2 nxy = nxy_sum / w_sum;
         float nz = sqrt(max(1.0 - dot(nxy, nxy), 0.001));
         vec3 N = normalize(vec3(nxy, nz));
 
-        // Multi-bounce AO tinted slightly toward the biome's sky/ambient shadow color.
+        vec2 ndc = uv * 2.0 - 1.0;
+        vec3 V = normalize(vec3(-ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, 1.0));
+        vec3 L = normalize(p.sun_dir_view.xyz);
+        vec3 U = normalize(p.world_up_view.xyz);
+
+        // Multi-bounce AO + Screen-Space Contact Shadows tinted by biome sky/shadow color.
         vec3 mb_ao = multi_bounce_ao(ao, col);
         vec3 tinted_ao = mix(p.shadow_tint.rgb, vec3(1.0), mb_ao);
-        col *= tinted_ao;
+        vec3 tinted_cs = mix(p.shadow_tint.rgb * 0.72, vec3(1.0), contact);
+        col *= tinted_ao * tinted_cs;
 
-        // 2. Subtle per-pixel sun key contrast + Fresnel rim light (gives 3D volume to armor & monsters).
-        vec3 L = normalize(p.sun_dir_view.xyz);
+        // 2. World-up Hemisphere Ambient Bounce (sky bounce upward, snow/sand/magma under-glow downward).
+        if (p.ground_bounce.a > 0.001) {
+            float up_dot = clamp(dot(N, U), -1.0, 1.0);
+            float sky_w = max(up_dot, 0.0);
+            float gnd_w = max(-up_dot, 0.0);
+            vec3 hemi = p.shadow_tint.rgb * (sky_w * 0.45) + p.ground_bounce.rgb * gnd_w;
+            col += col * hemi * (p.ground_bounce.a * (0.4 + 0.6 * ao));
+        }
+
+        // 3. Per-pixel sun key contrast + GGX-lite biome specular sheen + Fresnel rim light.
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
-        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * ao;
+        float sun_vis = ao * contact;
+        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis;
         col *= clamp(key_boost, 0.88, 1.16);
 
+        float ndotv = clamp(dot(N, V), 0.0, 1.0);
+        float fresnel = pow(1.0 - ndotv, 3.0);
+        if (p.spec_contact.x > 0.001 && p.sun_dir_view.w < 0.5) {
+            vec3 H = normalize(L + V);
+            float ndoth = clamp(dot(N, H), 0.0, 1.0);
+            float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+            float spec = pow(ndoth, max(p.spec_contact.y, 4.0)) * (0.25 + 0.75 * fresnel) * ndotl;
+            col += p.scatter_color.rgb * (spec * p.spec_contact.x * sun_vis * (0.35 + 0.65 * luma));
+        }
         if (p.bloom_rim.z > 0.001) {
-            vec2 ndc = uv * 2.0 - 1.0;
-            vec3 V = normalize(vec3(-ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, 1.0));
-            float fresnel = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.0);
             float sun_align = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
-            col += p.scatter_color.rgb * (fresnel * sun_align * p.bloom_rim.z * ao);
+            col += p.scatter_color.rgb * (fresnel * sun_align * p.bloom_rim.z * sun_vis);
+        }
+
+        // 4. Quarter-res Screen-Space Indirect Bounce (SSGI-lite: lava, campfires, fireballs, lightning).
+        if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
+            vec3 ssgi = texture(sampler2D(u_textures[nonuniformEXT(p.ext_slots.x)],
+                                          u_samplers[nonuniformEXT(p.aux_slots.y)]),
+                                uv).rgb;
+            col += ssgi * (0.35 + 0.65 * col) * (p.world_up_view.w * (0.45 + 0.55 * ao));
         }
     }
 
-    // 3. Smooth bilinear upsample of quarter-res volumetric fog & sun shafts.
+    // 5. Smooth bilinear upsample of quarter-res volumetric fog & sun shafts.
     if (p.tex_slots.w != 0u) {
         vec4 vol = texture(sampler2D(u_textures[nonuniformEXT(p.tex_slots.w)],
                                      u_samplers[nonuniformEXT(p.aux_slots.y)]),
@@ -129,7 +162,7 @@ void main() {
         col = col * vol.a + vol.rgb;
     }
 
-    // 4. Selective emissive bloom (campfires, fireballs, lightning, magma, snow glare).
+    // 6. Selective emissive bloom (campfires, fireballs, lightning, magma, snow glare).
     if (p.aux_slots.x != 0u && p.bloom_rim.y > 0.001) {
         vec3 bloom = texture(sampler2D(u_textures[nonuniformEXT(p.aux_slots.x)],
                                        u_samplers[nonuniformEXT(p.aux_slots.y)]),
@@ -137,7 +170,17 @@ void main() {
         col += bloom * p.bloom_rim.y;
     }
 
-    // 5. Gentle highlight rolloff so bright embers/sun shafts stay rich without clipping.
+    // 7. Subtle biome color harmony (gentle vibrance boost on desaturated midtones, preserving highlights).
+    if (p.spec_contact.w > 0.001) {
+        float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        float cmax = max(col.r, max(col.g, col.b));
+        float cmin = min(col.r, min(col.g, col.b));
+        float sat = cmax - cmin;
+        float vib = p.spec_contact.w * (1.0 - clamp(sat, 0.0, 1.0));
+        col = mix(vec3(luma), col, 1.0 + vib);
+    }
+
+    // 8. Gentle C1-smooth highlight rolloff so bright snow stays crisp white while HDR blooms never clip.
     col = clamp(soft_filmic(col), vec3(0.0), vec3(1.0));
     imageStore(u_scene_color, ip, vec4(col, scene.a));
 }
