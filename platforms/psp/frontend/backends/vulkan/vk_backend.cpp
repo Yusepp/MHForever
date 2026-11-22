@@ -268,6 +268,7 @@ private:
         VkDeviceAddress addr = 0;
         void *mapped = nullptr;
         std::size_t cap = 0;
+        std::uint64_t last_gpu_timeline = 0;
     };
     bool upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVertex> &verts);
 
@@ -389,8 +390,11 @@ private:
     bool cur_draw_eligible_ = false;
     std::uint32_t cur_draw_index_ = 0;
 
-    SnapRawBuf snap_raw_old_;
-    SnapRawBuf snap_raw_new_;
+    // Double-buffered so present() NEVER overwrites raw vertices while an in-flight subframe's
+    // place_v2.comp is still reading the previous 30 Hz frame's buffers!
+    SnapRawBuf snap_raw_old_[2];
+    SnapRawBuf snap_raw_new_[2];
+    int snap_buf_idx_ = 0;
 
     RenderTarget interp_rt_;
     bool interp_active_ = false;
@@ -487,8 +491,10 @@ void VkBackend::shutdown() {
             sb = SnapRawBuf{};
         }
     };
-    destroy_snap_buf(snap_raw_old_);
-    destroy_snap_buf(snap_raw_new_);
+    for (int i = 0; i < 2; ++i) {
+        destroy_snap_buf(snap_raw_old_[i]);
+        destroy_snap_buf(snap_raw_new_[i]);
+    }
 
     pack_streamer_.shutdown(ctx_, descriptors_);
     shadow_compute_.shutdown(ctx_, descriptors_);
@@ -520,7 +526,10 @@ void VkBackend::shutdown() {
 
 void VkBackend::retire_image(VkImageResource &res) {
     if (res.image == VK_NULL_HANDLE && res.view == VK_NULL_HANDLE) return;
-    const std::uint64_t retire_at = ctx_.graphics_timeline_value + 1u;
+    // Frame-gen snapshots (blend_older_ / blend_newer_) hold bindless texture slots across up to
+    // 2 full 30 Hz frames (2 * subframes_ submissions), so keep retired images alive past that horizon.
+    const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
+    const std::uint64_t retire_at = ctx_.graphics_timeline_value + margin;
     if (res.bindless_slot != 0) {
         descriptors_.free_texture(res.bindless_slot, retire_at);
         res.bindless_slot = 0;
@@ -2044,6 +2053,9 @@ void VkBackend::apply_live_fps() {
 bool VkBackend::upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVertex> &verts) {
     if (verts.empty()) return false;
     const std::size_t rbytes = verts.size() * sizeof(vk::RawGpuVertex);
+    if (dst.last_gpu_timeline != 0) {
+        ctx_.wait_timeline(ctx_.graphics_timeline, dst.last_gpu_timeline);
+    }
     if (dst.cap < rbytes || dst.buf == VK_NULL_HANDLE) {
         ctx_.wait_idle();
         if (dst.buf != VK_NULL_HANDLE) {
@@ -2099,7 +2111,9 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
 }
 
 void VkBackend::render_interpolated_subframe(float phase) {
-    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || snap_raw_old_.buf == VK_NULL_HANDLE) {
+    SnapRawBuf &cur_old_buf = snap_raw_old_[snap_buf_idx_];
+    SnapRawBuf &cur_new_buf = snap_raw_new_[snap_buf_idx_];
+    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || cur_old_buf.buf == VK_NULL_HANDLE) {
         // Cut / 2D / movie screen: present latest rendered frame at target cadence so pacing & MangoHUD stay locked.
         if (last_shown_slot_ != 0) {
             show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
@@ -2198,17 +2212,20 @@ void VkBackend::render_interpolated_subframe(float phase) {
         bool has_vertex_pair = false;
         std::uint32_t old_start = (i < blend_older_.draw_raw_start.size()) ? blend_older_.draw_raw_start[i] : 0u;
         std::uint32_t new_start = 0u;
-        if (older.skinned && has_partner && snap_raw_new_.buf != VK_NULL_HANDLE) {
+        if (older.skinned && has_partner && cur_new_buf.buf != VK_NULL_HANDLE &&
+            cur_new_buf.cap >= blend_newer_.raw_verts.size() * sizeof(vk::RawGpuVertex)) {
             const std::size_t pi = static_cast<std::size_t>(partner);
             const std::uint32_t old_cnt = (i < blend_older_.draw_raw_count.size()) ? blend_older_.draw_raw_count[i] : 0u;
             const std::uint32_t new_cnt = (pi < blend_newer_.draw_raw_count.size()) ? blend_newer_.draw_raw_count[pi] : 0u;
-            if (old_cnt > 0u && old_cnt == new_cnt) {
+            const std::uint32_t cand_new_start = (pi < blend_newer_.draw_raw_start.size()) ? blend_newer_.draw_raw_start[pi] : 0u;
+            if (old_cnt > 0u && old_cnt == new_cnt &&
+                static_cast<std::size_t>(cand_new_start) + new_cnt <= blend_newer_.raw_verts.size()) {
                 const auto &newer = blend_newer_.summaries[pi];
                 interpolation::Matrix inv_world_new;
                 if (interpolation::affine_inverse(newer.world, inv_world_new)) {
                     const auto world_to_eye_new = interpolation::multiply(eye_blend, inv_world_new);
                     pack_3x4(world_to_eye_new, transforms[i].mv_new);
-                    new_start = blend_newer_.draw_raw_start[pi];
+                    new_start = cand_new_start;
                     has_vertex_pair = true;
                 }
             }
@@ -2236,7 +2253,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
     const std::uint32_t raw_count = static_cast<std::uint32_t>(blend_older_.raw_verts.size());
-    interpolator_.dispatch_place_v2(f.cmd, snap_raw_old_.addr, snap_raw_new_.addr, tslice.address, raw_count, scene_phase);
+    interpolator_.dispatch_place_v2(f.cmd, cur_old_buf.addr, cur_new_buf.addr, tslice.address, raw_count, scene_phase);
+    cur_old_buf.last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
+    cur_new_buf.last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
 
     // 3. Render interpolated 3D + 2D batches into interp_rt_ via Dynamic Rendering.
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2267,12 +2286,14 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     // Upload 2D/flat vertices once for this subframe.
     VkDeviceSize flat_base_off = 0;
+    bool flat_uploaded = false;
     if (!blend_older_.flat_verts.empty()) {
         const std::size_t fb = blend_older_.flat_verts.size() * sizeof(GpuVertex);
         auto vsl = f.vertices.allocate(fb, 16);
         if (vsl.ptr) {
             std::memcpy(vsl.ptr, blend_older_.flat_verts.data(), fb);
             flat_base_off = vsl.offset;
+            flat_uploaded = true;
         }
     }
 
@@ -2426,12 +2447,14 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
         std::uint32_t draw_vcount = rb.v_count;
         if (rb.use_gpu_raw) {
+            if (static_cast<std::uint64_t>(rb.v_offset) + rb.v_count > interpolator_.max_in_vertices()) continue;
             VkBuffer gpu_vb = interpolator_.out_vertex_buffer();
             // place_v2.comp emits 2 clipped triangles (6 verts) per input triangle (3 verts).
             const VkDeviceSize off = static_cast<VkDeviceSize>(rb.v_offset) * 2u * sizeof(GpuVertex);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &off);
             draw_vcount = rb.v_count * 2u;
         } else {
+            if (!flat_uploaded) continue;
             const VkDeviceSize off = flat_base_off + static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &off);
         }
@@ -2557,8 +2580,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                 if (last_matching_.cut == nullptr) {
                     last_cam_motion_ = last_matching_.camera_found ? interpolation::rigid_motion(last_matching_.camera)
                                                                    : interpolation::RigidMotion{};
-                    const bool ok_old = upload_snap_raw(snap_raw_old_, blend_older_.raw_verts);
-                    (void)upload_snap_raw(snap_raw_new_, blend_newer_.raw_verts);
+                    snap_buf_idx_ = 1 - snap_buf_idx_;
+                    const bool ok_old = upload_snap_raw(snap_raw_old_[snap_buf_idx_], blend_older_.raw_verts);
+                    (void)upload_snap_raw(snap_raw_new_[snap_buf_idx_], blend_newer_.raw_verts);
                     interp_can_blend_ = ok_old;
                 } else {
                     interpolator_.matcher().forget_motion();
@@ -2595,7 +2619,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     lit_3d_this_frame_ = false;
     cur_light_in_ = vk::LightingFrameInput{};
     if ((frame_number_ % 60u) == 0u) {
-        pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + 1u);
+        const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
+        pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + margin);
     }
     apply_live_scale();
     apply_live_fps();

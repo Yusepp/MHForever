@@ -59,6 +59,7 @@ public:
 
     [[nodiscard]] VkBuffer out_vertex_buffer() const noexcept { return out_buf_; }
     [[nodiscard]] VkDeviceAddress out_vertex_address() const noexcept { return out_addr_; }
+    [[nodiscard]] std::uint32_t max_in_vertices() const noexcept { return max_in_vertices_; }
 
     interpolation::Matcher &matcher() noexcept { return matcher_; }
 

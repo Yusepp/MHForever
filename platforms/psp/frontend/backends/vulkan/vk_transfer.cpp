@@ -270,6 +270,10 @@ void PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std:
         }
         if (device_budget > (256ull << 20)) budget = device_budget * 7u / 10u;
     }
+    if (total_vram_bytes_ <= budget) return;
+    // Wait for all in-flight GPU work before destroying evicted pack images so no command buffer
+    // or frame-gen snapshot can sample an unmapped GPUVM page!
+    ctx.wait_idle();
     while (total_vram_bytes_ > budget && !uploaded_.empty()) {
         auto oldest = uploaded_.begin();
         for (auto it = uploaded_.begin(); it != uploaded_.end(); ++it) {
