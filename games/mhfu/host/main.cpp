@@ -1754,15 +1754,15 @@ int main(int argc, char **argv) {
                                       false, g_infinite_whetstone.load() ? 1 : 0, 0, 1, 1, "",
                                       [](int v) { g_infinite_whetstone = v != 0; }, "Items & Crafting"});
             frontend.add_game_option({"infinitePaintballs", "Infinite paintballs",
-                                      "Carrying at least 1 Paintball gives unlimited throws during quests.",
+                                      "Throw Paintballs without consuming them (supplies a temporary Paintball if none carried).",
                                       false, g_infinite_paintballs.load() ? 1 : 0, 0, 1, 1, "",
                                       [](int v) { g_infinite_paintballs = v != 0; }, "Items & Crafting"});
             frontend.add_game_option({"comboBooksFromBox", "Combo books from item box",
                                       "Guarantees 100% combine success once you own all 5 Books of Combos (box or pouch).",
                                       false, g_combo_books_from_box.load() ? 1 : 0, 0, 1, 1, "",
                                       [](int v) { g_combo_books_from_box = v != 0; }, "Items & Crafting"});
-            frontend.add_game_option({"itemPouchLoadouts", "Item pouch loadouts",
-                                      "Save and restock up to 5 item pouch presets from your Item Box in Village or Hall.",
+            frontend.add_game_option({"itemPouchLoadouts", "Hunter loadouts (Item & Armor sets)",
+                                      "Press Select in your House or Guild Hall Item Box to save and load up to 5 Item & Armor Sets.",
                                       false, g_item_pouch_loadouts.load() ? 1 : 0, 0, 1, 1, "",
                                       [](int v) { g_item_pouch_loadouts = v != 0; }, "Items & Crafting"});
             {

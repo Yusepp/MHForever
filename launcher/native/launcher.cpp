@@ -175,13 +175,13 @@ Json default_settings() {
     s["guildQuestScaling"] = false; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
     s["targetLockCamera"] = false; // R3 monster target lock-on camera
     s["skipQuestClearTimer"] = false; // hold Select after Quest Clear to fast-forward 60s timer
-    s["itemPouchLoadouts"] = false; // save/load item pouch presets from Item Box in Village/Hall
-    s["capturableIndicator"] = false; // World/Rise-style blue skull when monster is capturable
+    s["itemPouchLoadouts"] = false; // save/load Item & Armor Sets from Item Box in Village/Hall
+    s["capturableIndicator"] = false; // cyan minimap dot when monster is capturable
     s["questStartTracker"] = false; // reveal large monsters on the map for the first 60s of each quest
     s["infiniteWhetstone"] = false; // sharpen without consuming Whetstones
     s["damageNumbers"] = false; // World/Rise/Wilds-style floating damage numbers
     s["comboBooksFromBox"] = false; // 100% combine rate once all 5 Books of Combos are owned
-    s["infinitePaintballs"] = false; // carrying >= 1 Paintball gives unlimited throws
+    s["infinitePaintballs"] = false; // throw Paintballs without consuming them
     s["copyImage"] = false; // keep a copy of the disc image in the data directory
     s["checkUpdates"] = true; // ask GitHub for a newer release when the launcher starts
     s["musicVolume"] = 100;

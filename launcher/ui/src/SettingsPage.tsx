@@ -706,7 +706,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.damageNumbers ?? false} onToggle={() => onChange({ damageNumbers: !(s.damageNumbers ?? false) })} label="Floating damage numbers" />
         </div>
         <div className="srow">
-          <div className="slabel"><b>Capturable monster indicator</b><span>Shows a blue skull badge when a large monster in your area is ready to capture.</span></div>
+          <div className="slabel"><b>Capturable monster indicator</b><span>Turns a capturable large monster's minimap dot cyan instead of pink.</span></div>
           <Toggle on={s.capturableIndicator ?? false} onToggle={() => onChange({ capturableIndicator: !(s.capturableIndicator ?? false) })} label="Capturable monster indicator" />
         </div>
         <div className="srow">
@@ -722,7 +722,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.infiniteWhetstone ?? false} onToggle={() => onChange({ infiniteWhetstone: !(s.infiniteWhetstone ?? false) })} label="Infinite whetstone" />
         </div>
         <div className="srow">
-          <div className="slabel"><b>Infinite paintballs</b><span>Carrying at least 1 Paintball gives unlimited throws during quests.</span></div>
+          <div className="slabel"><b>Infinite paintballs</b><span>Throw Paintballs without consuming them (supplies a temporary Paintball if none carried).</span></div>
           <Toggle on={s.infinitePaintballs ?? false} onToggle={() => onChange({ infinitePaintballs: !(s.infinitePaintballs ?? false) })} label="Infinite paintballs" />
         </div>
         <div className="srow">
@@ -730,8 +730,8 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.comboBooksFromBox ?? false} onToggle={() => onChange({ comboBooksFromBox: !(s.comboBooksFromBox ?? false) })} label="Combo books from item box" />
         </div>
         <div className="srow">
-          <div className="slabel"><b>Item pouch loadouts</b><span>Save and restock up to 5 item pouch presets from your Item Box in Village or Hall (Esc &gt; QoL).</span></div>
-          <Toggle on={s.itemPouchLoadouts ?? false} onToggle={() => onChange({ itemPouchLoadouts: !(s.itemPouchLoadouts ?? false) })} label="Item pouch loadouts" />
+          <div className="slabel"><b>Hunter loadouts (Item &amp; Armor sets)</b><span>Press Select in your House or Guild Hall Item Box to save and load up to 5 Item &amp; Armor Sets.</span></div>
+          <Toggle on={s.itemPouchLoadouts ?? false} onToggle={() => onChange({ itemPouchLoadouts: !(s.itemPouchLoadouts ?? false) })} label="Hunter loadouts (Item & Armor sets)" />
         </div>
         <div className="srow">
           <div className="slabel"><b>Show hunting horn songs</b><span>Displays the hunting horn's songs, the song being played and active effects during quests.</span></div>
