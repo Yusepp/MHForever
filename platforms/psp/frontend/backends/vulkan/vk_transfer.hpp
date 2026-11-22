@@ -37,14 +37,17 @@ public:
 
     // Non-blocking lookup: returns bindless slot > 0 when the replacement image is resident on GPU, or 0 while
     // loading/missing (so the caller draws the original PSP texture until ready).
+    // Sets `pending_out = true` when a replacement exists in the pack and is still decoding/uploading.
     [[nodiscard]] std::uint32_t lookup_or_queue(const Context &ctx, BindlessDescriptors &desc,
                                                 const textures::TextureFacts &facts,
                                                 const textures::MemoryReader &reader,
                                                 std::uint64_t frame_num, bool &has_mips,
-                                                textures::Filter &filter_out);
+                                                textures::Filter &filter_out,
+                                                bool &pending_out);
 
     // Checks VMA heap budgets (VK_EXT_memory_budget when available) and evicts LRU pack images under pressure.
-    void trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline);
+    // Returns true if any pack textures were evicted (so callers can invalidate cached slot lookups).
+    bool trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline);
 
 private:
     bool upload_image_sync_transfer(const Context &ctx, BindlessDescriptors &desc,

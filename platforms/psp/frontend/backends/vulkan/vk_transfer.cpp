@@ -211,7 +211,9 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
                                             const textures::TextureFacts &facts,
                                             const textures::MemoryReader &reader,
                                             std::uint64_t frame_num, bool &has_mips,
-                                            textures::Filter &filter_out) {
+                                            textures::Filter &filter_out,
+                                            bool &pending_out) {
+    pending_out = false;
     if (!loader_) return 0;
     const textures::Pack *chosen = nullptr;
     textures::Match match{};
@@ -249,8 +251,12 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
     constexpr std::uint32_t kMaxUploadsPerFrame = 2u;
 
     std::shared_ptr<const textures::Image> decoded;
-    if (loader_->get(id, files, decoded) == textures::Loader::State::Ready && decoded) {
-        if (uploads_this_frame_ >= kMaxUploadsPerFrame) return 0;
+    const auto st = loader_->get(id, files, decoded);
+    if (st == textures::Loader::State::Ready && decoded) {
+        if (uploads_this_frame_ >= kMaxUploadsPerFrame) {
+            pending_out = true;
+            return 0;
+        }
         ++uploads_this_frame_;
         PackGpuImage gpu_img{};
         if (upload_image_sync_transfer(ctx, desc, *decoded, gpu_img)) {
@@ -263,12 +269,14 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
             return slot;
         }
         loader_->forget(id);
+    } else if (st == textures::Loader::State::Loading) {
+        pending_out = true;
     }
     return 0;
 }
 
-void PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline) {
-    if (uploaded_.empty()) return;
+bool PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline) {
+    if (uploaded_.empty()) return false;
     std::size_t budget = 1536ull << 20; // 1.5 GB fallback budget
     if (ctx.caps.memory_budget) {
         VmaBudget heaps[VK_MAX_MEMORY_HEAPS]{};
@@ -283,10 +291,11 @@ void PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std:
         }
         if (device_budget > (256ull << 20)) budget = device_budget * 7u / 10u;
     }
-    if (total_vram_bytes_ <= budget) return;
+    if (total_vram_bytes_ <= budget) return false;
     // Wait for all in-flight GPU work before destroying evicted pack images so no command buffer
     // or frame-gen snapshot can sample an unmapped GPUVM page!
     ctx.wait_idle();
+    bool evicted = false;
     while (total_vram_bytes_ > budget && !uploaded_.empty()) {
         auto oldest = uploaded_.begin();
         for (auto it = uploaded_.begin(); it != uploaded_.end(); ++it) {
@@ -297,7 +306,9 @@ void PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std:
         if (oldest->second.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, oldest->second.image, oldest->second.alloc);
         total_vram_bytes_ = total_vram_bytes_ > oldest->second.vram_bytes ? (total_vram_bytes_ - oldest->second.vram_bytes) : 0;
         uploaded_.erase(oldest);
+        evicted = true;
     }
+    return evicted;
 }
 
 } // namespace mhf::psp::vk

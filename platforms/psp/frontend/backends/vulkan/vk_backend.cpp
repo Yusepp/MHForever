@@ -307,6 +307,23 @@ private:
 
     std::unordered_map<std::uint32_t, RenderTarget> targets_;
     std::unordered_map<std::uint64_t, CachedTexture> textures_;
+    struct FrameTexBinding {
+        std::uint32_t tex_slot = 0;
+        bool texture_mips = false;
+        bool linear_override = false;
+        float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
+    };
+    struct PackCacheEntry {
+        std::uint32_t slot = 0;
+        bool has_mips = false;
+        bool linear_override = false;
+        bool pending = false;
+        std::uint64_t last_try_frame = 0;
+    };
+    // Per-frame fast texture-parameter cache (eliminates redundant full-texture hashing when many monsters
+    // share textures across hundreds of skinned draw calls) + persistent pack-lookup cache keyed by content hash.
+    std::unordered_map<std::uint64_t, FrameTexBinding> frame_tex_cache_;
+    std::unordered_map<std::uint64_t, PackCacheEntry> pack_cache_;
     std::deque<RetiredImage> retired_images_;
 
     VkImageResource cpu_display_tex_;
@@ -768,9 +785,6 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
             cur_light_in_.has_psp_fog = true;
         }
-        if ((ge.reg(kTextureMapEnable) & 1u) != 0 && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
-            lighting_.note_texture_hash(ge.texture_hash());
-        }
     }
 
     if (textured) {
@@ -833,97 +847,144 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
         }
 
         if (!rtt_hit && info.width > 0 && info.height > 0) {
-            // Phase 3: check texture pack (and builtin HD text) before decoding original PSP texture.
-            std::uint32_t pack_slot = 0;
-            if (pack_streamer_.active() && live_->texture_pack.load(std::memory_order_relaxed)) {
-                textures::TextureFacts facts{};
-                facts.address = info.address;
-                facts.buffer_width = info.stride;
-                facts.format = info.format;
-                facts.width = info.width;
-                facts.height = info.height;
-                facts.dimension = static_cast<std::uint16_t>(ge.reg(kTexSize0) & 0xFFFFu);
-                facts.clut_format_word = (kClutFormat << 24u) | (ge.reg(kClutFormat) & 0xFFFFFFu);
-                facts.clut = ge.clut_bytes();
-                facts.clut_last_bytes = ge.clut_last_bytes();
-                facts.clut_max_bytes = ge.clut_max_bytes();
-                textures::Filter pfilter = textures::Filter::Auto;
-                bool has_mips = false;
-                pack_slot = pack_streamer_.lookup_or_queue(
-                    ctx_, descriptors_, facts,
-                    [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
-                    frame_number_, has_mips, pfilter);
-                if (pack_slot != 0) {
-                    setup_.tex_slot = pack_slot;
-                    setup_.texture_mips = has_mips;
-                    setup_.linear_override = (pfilter == textures::Filter::Linear);
-                }
+            // Fast per-frame parameter cache: avoids re-hashing the same monster/terrain texture bytes
+            // hundreds of times per frame across skinned multi-part draw calls!
+            const bool indexed = info.format >= 4u && info.format <= 7u;
+            std::uint64_t param_key = static_cast<std::uint64_t>(info.address) * 1315423911ull ^
+                                      (static_cast<std::uint64_t>(info.format) << 40u) ^
+                                      (static_cast<std::uint64_t>(info.width) << 20u) ^
+                                      static_cast<std::uint64_t>(info.height) ^
+                                      (static_cast<std::uint64_t>(info.stride) << 48u) ^
+                                      (info.swizzled ? 0x8000000000000000ull : 0u);
+            if (indexed) {
+                param_key ^= (static_cast<std::uint64_t>(ge.reg(kClutFormat)) * 0x9E3779B97F4A7C15ull) ^
+                             (ge.clut_generation() * 0xBF58476D1CE4E5B9ull);
             }
-            if (pack_slot == 0) {
+            if (const auto fit = frame_tex_cache_.find(param_key); fit != frame_tex_cache_.end()) {
+                setup_.tex_slot = fit->second.tex_slot;
+                setup_.texture_mips = fit->second.texture_mips;
+                setup_.linear_override = fit->second.linear_override;
+                std::copy_n(fit->second.uv_xform, 4, setup_.uv_xform);
+            } else {
+                // Compute content hash ONCE per unique texture per frame.
                 const std::uint64_t h = ge.texture_hash();
-                std::uint32_t kc_slot = 0;
-                std::uint32_t kc_ox = 0, kc_oy = 0;
-                const bool kc_candidate = setup_.through && ((info.stride == 512u && info.width >= 32u && info.height >= 16u) ||
-                                                             (info.width >= 480u && info.height >= 256u));
-                if (kc_candidate) {
-                    if (killcam_matched_slot_ != 0 && h == killcam_matched_hash_) {
-                        kc_slot = killcam_matched_slot_;
-                        kc_ox = killcam_matched_ox_;
-                        kc_oy = killcam_matched_oy_;
-                    } else {
-                        kc_slot = match_killcam_hires(info.address, info.stride, info.width, info.height, info.format,
-                                                      nullptr, kc_ox, kc_oy);
+                if (!setup_.through && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
+                    lighting_.note_texture_hash(h);
+                }
+
+                // Phase 3: check texture pack (cached by content hash so XXHash never runs on repeated draws).
+                std::uint32_t pack_slot = 0;
+                const bool want_pack = pack_streamer_.active() && live_->texture_pack.load(std::memory_order_relaxed);
+                if (want_pack) {
+                    auto pit = pack_cache_.find(h);
+                    const bool need_query = (pit == pack_cache_.end()) ||
+                                            (pit->second.pending && pit->second.last_try_frame != frame_number_);
+                    if (need_query) {
+                        textures::TextureFacts facts{};
+                        facts.address = info.address;
+                        facts.buffer_width = info.stride;
+                        facts.format = info.format;
+                        facts.width = info.width;
+                        facts.height = info.height;
+                        facts.dimension = static_cast<std::uint16_t>(ge.reg(kTexSize0) & 0xFFFFu);
+                        facts.clut_format_word = (kClutFormat << 24u) | (ge.reg(kClutFormat) & 0xFFFFFFu);
+                        facts.clut = ge.clut_bytes();
+                        facts.clut_last_bytes = ge.clut_last_bytes();
+                        facts.clut_max_bytes = ge.clut_max_bytes();
+                        textures::Filter pfilter = textures::Filter::Auto;
+                        bool has_mips = false;
+                        bool pending = false;
+                        const std::uint32_t slot = pack_streamer_.lookup_or_queue(
+                            ctx_, descriptors_, facts,
+                            [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
+                            frame_number_, has_mips, pfilter, pending);
+                        PackCacheEntry entry{};
+                        entry.slot = slot;
+                        entry.has_mips = has_mips;
+                        entry.linear_override = (pfilter == textures::Filter::Linear);
+                        entry.pending = pending;
+                        entry.last_try_frame = frame_number_;
+                        pack_cache_[h] = entry;
+                        pit = pack_cache_.find(h);
+                    }
+                    if (pit != pack_cache_.end() && pit->second.slot != 0) {
+                        pack_slot = pit->second.slot;
+                        setup_.tex_slot = pack_slot;
+                        setup_.texture_mips = pit->second.has_mips;
+                        setup_.linear_override = pit->second.linear_override;
                     }
                 }
-                if (kc_slot != 0) {
-                    setup_.tex_slot = kc_slot;
-                    setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
-                    setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
-                    setup_.uv_xform[2] = static_cast<float>(kc_ox) / 480.0f;
-                    setup_.uv_xform[3] = static_cast<float>(kc_oy) / 272.0f;
-                    setup_.linear_override = true;
-                } else {
-                    auto it = textures_.find(h);
-                    if (it == textures_.end()) {
-                        if (textures_.size() >= kMaxCachedTextures) {
-                            auto oldest = textures_.begin();
-                            for (auto cur = textures_.begin(); cur != textures_.end(); ++cur) {
-                                if (cur->second.last_used < oldest->second.last_used) oldest = cur;
-                            }
-                            retire_image(oldest->second.image);
-                            textures_.erase(oldest);
-                        }
-                        decode_buf_.resize(static_cast<std::size_t>(info.width) * info.height);
-                        ge.decode_texture(decode_buf_.data());
-                        if (kc_candidate) {
-                            kc_slot = match_killcam_hires(info.address, info.stride, info.width, info.height, info.format,
-                                                          decode_buf_.data(), kc_ox, kc_oy);
-                        }
-                        if (kc_slot != 0) {
-                            killcam_matched_hash_ = h;
-                            killcam_matched_slot_ = kc_slot;
-                            killcam_matched_ox_ = kc_ox;
-                            killcam_matched_oy_ = kc_oy;
-                            setup_.tex_slot = kc_slot;
-                            setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
-                            setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
-                            setup_.uv_xform[2] = static_cast<float>(kc_ox) / 480.0f;
-                            setup_.uv_xform[3] = static_cast<float>(kc_oy) / 272.0f;
-                            setup_.linear_override = true;
+                if (pack_slot == 0) {
+                    std::uint32_t kc_slot = 0;
+                    std::uint32_t kc_ox = 0, kc_oy = 0;
+                    const bool kc_candidate = setup_.through && ((info.stride == 512u && info.width >= 32u && info.height >= 16u) ||
+                                                                 (info.width >= 480u && info.height >= 256u));
+                    if (kc_candidate) {
+                        if (killcam_matched_slot_ != 0 && h == killcam_matched_hash_) {
+                            kc_slot = killcam_matched_slot_;
+                            kc_ox = killcam_matched_ox_;
+                            kc_oy = killcam_matched_oy_;
                         } else {
-                            CachedTexture ct{};
-                            ct.width = info.width;
-                            ct.height = info.height;
-                            ct.last_used = frame_number_;
-                            upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
-                            it = textures_.emplace(h, std::move(ct)).first;
+                            kc_slot = match_killcam_hires(info.address, info.stride, info.width, info.height, info.format,
+                                                          nullptr, kc_ox, kc_oy);
+                        }
+                    }
+                    if (kc_slot != 0) {
+                        setup_.tex_slot = kc_slot;
+                        setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
+                        setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
+                        setup_.uv_xform[2] = static_cast<float>(kc_ox) / 480.0f;
+                        setup_.uv_xform[3] = static_cast<float>(kc_oy) / 272.0f;
+                        setup_.linear_override = true;
+                    } else {
+                        auto it = textures_.find(h);
+                        if (it == textures_.end()) {
+                            if (textures_.size() >= kMaxCachedTextures) {
+                                auto oldest = textures_.begin();
+                                for (auto cur = textures_.begin(); cur != textures_.end(); ++cur) {
+                                    if (cur->second.last_used < oldest->second.last_used) oldest = cur;
+                                }
+                                retire_image(oldest->second.image);
+                                textures_.erase(oldest);
+                            }
+                            decode_buf_.resize(static_cast<std::size_t>(info.width) * info.height);
+                            ge.decode_texture(decode_buf_.data());
+                            if (kc_candidate) {
+                                kc_slot = match_killcam_hires(info.address, info.stride, info.width, info.height, info.format,
+                                                              decode_buf_.data(), kc_ox, kc_oy);
+                            }
+                            if (kc_slot != 0) {
+                                killcam_matched_hash_ = h;
+                                killcam_matched_slot_ = kc_slot;
+                                killcam_matched_ox_ = kc_ox;
+                                killcam_matched_oy_ = kc_oy;
+                                setup_.tex_slot = kc_slot;
+                                setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
+                                setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
+                                setup_.uv_xform[2] = static_cast<float>(kc_ox) / 480.0f;
+                                setup_.uv_xform[3] = static_cast<float>(kc_oy) / 272.0f;
+                                setup_.linear_override = true;
+                            } else {
+                                CachedTexture ct{};
+                                ct.width = info.width;
+                                ct.height = info.height;
+                                ct.last_used = frame_number_;
+                                upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
+                                it = textures_.emplace(h, std::move(ct)).first;
+                                setup_.tex_slot = it->second.image.bindless_slot;
+                            }
+                        } else {
+                            it->second.last_used = frame_number_;
                             setup_.tex_slot = it->second.image.bindless_slot;
                         }
-                    } else {
-                        it->second.last_used = frame_number_;
-                        setup_.tex_slot = it->second.image.bindless_slot;
                     }
                 }
+                FrameTexBinding bind{};
+                bind.tex_slot = setup_.tex_slot;
+                bind.texture_mips = setup_.texture_mips;
+                bind.linear_override = setup_.linear_override;
+                std::copy_n(setup_.uv_xform, 4, bind.uv_xform);
+                frame_tex_cache_.emplace(param_key, bind);
             }
         }
     }
@@ -2674,9 +2735,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     captured_clean_3d_ = false;
     lit_3d_this_frame_ = false;
     cur_light_in_ = vk::LightingFrameInput{};
+    frame_tex_cache_.clear();
     if ((frame_number_ % 60u) == 0u) {
         const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
-        pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + margin);
+        if (pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + margin)) {
+            pack_cache_.clear();
+        }
     }
     apply_live_scale();
     apply_live_fps();
