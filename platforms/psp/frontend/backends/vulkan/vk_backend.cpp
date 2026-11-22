@@ -227,6 +227,7 @@ private:
     void draw_batch();
     void upload_texture_2d(VkImageResource &dst, std::uint32_t w, std::uint32_t h, const void *rgba_pixels);
     void upload_overlay_if_needed();
+    void submit_recorded_without_present();
     void show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter);
     void submit_and_present(std::uint32_t swap_img_idx);
     void apply_live_scale();
@@ -301,6 +302,7 @@ private:
     std::uint64_t frame_number_ = 1;
     bool recording_ = false;
     bool in_render_pass_ = false;
+    bool swapchain_dirty_ = false;
     std::uint32_t active_target_addr_ = UINT32_MAX;
 
     std::unordered_map<std::uint32_t, RenderTarget> targets_;
@@ -702,7 +704,14 @@ void VkBackend::upload_texture_2d(VkImageResource &dst, std::uint32_t w, std::ui
 
     const std::size_t bytes = static_cast<std::size_t>(w) * h * 4u;
     auto slice = frames_[frame_slot_].staging.allocate(bytes, 16);
-    if (!slice.ptr) return; // staging ring full for this frame; skips gracefully
+    if (!slice.ptr) {
+        // Never leave a newly created image in UNDEFINED layout while bound to a bindless slot.
+        if (dst.layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+            transition_resource(dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
+        return;
+    }
     std::memcpy(slice.ptr, rgba_pixels, bytes);
 
     transition_resource(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1845,20 +1854,50 @@ void VkBackend::build_menu_blur(std::uint32_t src_slot, float uv_max_x, float uv
     blur_src_slot_ = blur_b_.bindless_slot;
 }
 
+void VkBackend::submit_recorded_without_present() {
+    if (!recording_) return;
+    end_render_pass();
+    FrameSlice &f = frames_[frame_slot_];
+    vkEndCommandBuffer(f.cmd);
+    recording_ = false;
+
+    const std::uint64_t sig = ++ctx_.graphics_timeline_value;
+    f.timeline_value = sig;
+
+    VkCommandBufferSubmitInfo cmd_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, f.cmd, 0};
+    VkSemaphoreSubmitInfo sig_info{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, ctx_.graphics_timeline, sig,
+                                   VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cmd_info, 1, &sig_info};
+    {
+        std::lock_guard lock(ctx_.graphics_queue_mutex);
+        vkQueueSubmit2(ctx_.graphics_queue, 1, &si, VK_NULL_HANDLE);
+    }
+    frame_slot_ = (frame_slot_ + 1) % kFramesInFlight;
+}
+
 void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter) {
     ensure_recording();
     end_render_pass();
 
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(window_, &pw, &ph);
-    if (pw <= 0 || ph <= 0) return;
+    if (pw <= 0 || ph <= 0) {
+        submit_recorded_without_present();
+        return;
+    }
 
-    if (static_cast<std::uint32_t>(pw) != swapchain_.extent.width ||
+    if (swapchain_dirty_ ||
+        static_cast<std::uint32_t>(pw) != swapchain_.extent.width ||
         static_cast<std::uint32_t>(ph) != swapchain_.extent.height) {
-        vkEndCommandBuffer(frames_[frame_slot_].cmd);
-        recording_ = false;
-        swapchain_.recreate(ctx_, pw, ph);
-        pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
+        // Submit already-recorded 3D work & layout transitions before recreating the swapchain
+        // so tracked VkImageResource::layout values stay 100% synchronized with GPU state!
+        submit_recorded_without_present();
+        if (swapchain_.recreate(ctx_, pw, ph)) {
+            pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
+            swapchain_dirty_ = false;
+        } else {
+            return;
+        }
         ensure_recording();
     }
 
@@ -1877,13 +1916,19 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
     VkResult acq = vkAcquireNextImageKHR(ctx_.device, swapchain_.handle, UINT64_MAX,
                                          frames_[frame_slot_].image_available, VK_NULL_HANDLE, &img_idx);
     if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
-        vkEndCommandBuffer(frames_[frame_slot_].cmd);
-        recording_ = false;
-        swapchain_.recreate(ctx_, pw, ph);
-        pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
+        submit_recorded_without_present();
+        if (swapchain_.recreate(ctx_, pw, ph)) {
+            pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
+            swapchain_dirty_ = false;
+        }
         return;
     }
-    if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) return;
+    if (acq == VK_SUBOPTIMAL_KHR) {
+        swapchain_dirty_ = true;
+    } else if (acq != VK_SUCCESS) {
+        submit_recorded_without_present();
+        return;
+    }
 
     VkCommandBuffer cmd = frames_[frame_slot_].cmd;
     VkImage swap_img = swapchain_.images[img_idx];
@@ -2002,10 +2047,14 @@ void VkBackend::submit_and_present(std::uint32_t swap_img_idx) {
         pi.pNext = &present_id_info;
     }
 #endif
+    VkResult pres = VK_SUCCESS;
     {
         std::lock_guard lock(ctx_.graphics_queue_mutex);
         vkQueueSubmit2(ctx_.graphics_queue, 1, &si, VK_NULL_HANDLE);
-        vkQueuePresentKHR(ctx_.graphics_queue, &pi);
+        pres = vkQueuePresentKHR(ctx_.graphics_queue, &pi);
+    }
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
+        swapchain_dirty_ = true;
     }
 
 #ifdef VK_KHR_PRESENT_WAIT_EXTENSION_NAME
@@ -2022,6 +2071,13 @@ void VkBackend::apply_live_scale() {
     const int req = live_->scale.exchange(0, std::memory_order_relaxed);
     if (req >= 1 && req <= 10 && req != scale_) {
         scale_ = req;
+        interp_active_ = false;
+        interp_can_blend_ = false;
+        have_newer_snap_ = false;
+        cur_snap_ = InterpSnapshot{};
+        blend_older_ = InterpSnapshot{};
+        blend_newer_ = InterpSnapshot{};
+        cur_raw_batch_start_ = 0;
         for (auto &[addr, rt] : targets_) {
             retire_image(rt.color);
             retire_image(rt.depth);
