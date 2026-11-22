@@ -121,7 +121,7 @@ std::optional<GatheringArt> decode_game_gathering_art(Bytes hud, Bytes items, co
         return item_image ? crop(*item_image, x, y, 24) : crop(*actions, x, y, 24);
     };
     return GatheringArt{hud_crop(220, 224, 32), hud_crop(0, 0, 16), item_crop(24, 48), item_crop(144, 24),
-                        item_crop(48, 96)};
+                        item_crop(48, 96), item_crop(120, 0)};
 }
 std::optional<GatheringArt> load_game_gathering_art(const std::filesystem::path &iso_path,
                                                     const std::filesystem::path &executable, std::uint32_t hud_file,

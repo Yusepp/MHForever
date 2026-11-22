@@ -45,8 +45,8 @@ int main() {
     auto art = decode_game_gathering_art(hud, items);
     MHF_CHECK(art.has_value());
     if (art) {
-        constexpr int sizes[] = {32, 16, 24, 24, 24}, xs[] = {220, 0, 24, 144, 48}, ys[] = {224, 0, 48, 24, 96};
-        for (unsigned i = 0; i < 5; ++i) {
+        constexpr int sizes[] = {32, 16, 24, 24, 24, 24}, xs[] = {220, 0, 24, 144, 48, 120}, ys[] = {224, 0, 48, 24, 96, 0};
+        for (unsigned i = 0; i < 6; ++i) {
             MHF_CHECK((*art)[i].size == sizes[i]);
             for (int y = 0; y < sizes[i]; ++y)
                 for (int x = 0; x < sizes[i]; ++x) {

@@ -34,6 +34,8 @@ int main() {
     }
     auto carve = gathering_sprites(art, GatheringKind::carve, 255, true);
     MHF_CHECK(carve.size() == 3 && carve[1].pixels == art[4].pixels);
+    auto fish = gathering_sprites(art, GatheringKind::fishing, 255, true);
+    MHF_CHECK(fish.size() == 3 && fish[1].pixels == art[5].pixels);
     auto faded = gathering_sprites(art, GatheringKind::bugs, 15, true);
     MHF_CHECK(faded.size() == 1);
     if (faded.size() == 1) MHF_CHECK(faded[0].alpha == 15.0f / 255.0f);
