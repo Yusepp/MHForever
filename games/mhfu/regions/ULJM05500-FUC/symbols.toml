@@ -87,6 +87,7 @@ mh_pad_input             = 0x08A5DD34 # Pad*: this frame's buttons and sticks as
 mh_draw_done             = 0x08A5DD15 # u8: set when the game's drawing for the frame is done (mh_draw_wait waits for it)
 # Dynamic Guild quest scaling: active quest header (+0x4C) and per-species scaling group (+0x14F).
 mh_enemy_species_table   = 0x09BB3C20 # EnemySpecies[N] in game_task.ovl (stride 0x1D0, s8 scale_group at +0x14F)
+mh_enemy_manager         = 0x09C0D430 # EnemyManager* in game_task.ovl (Enemy*[20] at +0x1220)
 
 [offsets]
 system_active_overlays  = 0x00F7A3C0 # u16[6] inside System, active DATA.BIN file id per group (0xFFFF = none)
