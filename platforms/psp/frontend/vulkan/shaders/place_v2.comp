@@ -2,9 +2,12 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-// Phase 5 GPU Compute Frame Interpolation (place_v2 on GPU):
-// Processes 1 triangle (3 vertices) per thread so triangles behind the near plane (w <= 0) are culled cleanly
-// without exploding across the screen.
+// Next-Gen GPU Compute Frame Interpolation (place_v2.comp):
+// - Dual-stream per-vertex interpolation for skinned/deforming meshes (hunters, monsters, cloth, particles)
+//   in blended eye space so camera/rigid arc motion is factored out and local skeletal motion runs at 120/180 FPS.
+// - Smooth UV scroll interpolation (respecting kMaxScrollStep = 0.1 so flipbooks don't smear), plus vertex color/fog.
+// - Full Sutherland-Hodgman near-plane clipping (w >= 1e-4) emitting 2 deterministic triangles (6 vertices) per
+//   input triangle — zero foreground ground/fence popping, zero atomics!
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -19,9 +22,12 @@ struct RawGpuVertex {
 };
 
 struct DrawTransform {
-    mat4 mvp;       // proj * blended_eye * inverse(older_world)
-    vec4 vp_scale;  // x_scale, y_scale, z_scale, unused
-    vec4 vp_center; // x_center - off_x, y_center - off_y, z_center, overlay_stretch
+    vec4 mv_old[3];   // 3x4 affine: eye_blend * inverse(older_world)
+    vec4 mv_new[3];   // 3x4 affine: eye_blend * inverse(newer_world)
+    mat4 proj;        // projection matrix
+    vec4 vp_scale;    // x_scale, y_scale, z_scale, unused
+    vec4 vp_center;   // x_center - off_x, y_center - off_y, z_center, overlay_stretch
+    uvec4 pair_info;  // x = older_raw_start, y = newer_raw_start, z = flags, w = floatBitsToUint(max_deform_dist)
 };
 
 struct GpuVertexOut {
@@ -45,57 +51,191 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer Ou
 };
 
 layout(push_constant) uniform PlacePush {
-    RawVertexBuf raw_verts;
+    RawVertexBuf raw_verts_old;
+    RawVertexBuf raw_verts_new;
     TransformBuf transforms;
     OutVertexBuf out_verts;
     uint vertex_count;
+    float phase;
 } pc;
+
+const float kNearW = 1e-4;
+const float kMaxUvScroll = 0.1;
+
+vec3 mul_3x4(vec4 m[3], vec3 p) {
+    vec4 p4 = vec4(p, 1.0);
+    return vec3(dot(m[0], p4), dot(m[1], p4), dot(m[2], p4));
+}
+
+vec4 unpack_u8x4(uint c) {
+    return vec4(float(c & 0xFFu), float((c >> 8u) & 0xFFu), float((c >> 16u) & 0xFFu), float((c >> 24u) & 0xFFu));
+}
+
+uint pack_u8x4(vec4 v) {
+    uvec4 u = uvec4(clamp(v + 0.5, 0.0, 255.0));
+    return (u.x & 0xFFu) | ((u.y & 0xFFu) << 8u) | ((u.z & 0xFFu) << 16u) | ((u.w & 0xFFu) << 24u);
+}
+
+struct ClipVert {
+    vec4 clip;
+    vec2 uv;
+    vec4 col;
+    vec4 spec;
+    float fog;
+};
+
+ClipVert mix_clip_vert(ClipVert a, ClipVert b, float t) {
+    ClipVert o;
+    o.clip = mix(a.clip, b.clip, t);
+    o.uv = mix(a.uv, b.uv, t);
+    o.col = mix(a.col, b.col, t);
+    o.spec = mix(a.spec, b.spec, t);
+    o.fog = mix(a.fog, b.fog, t);
+    return o;
+}
+
+GpuVertexOut project_vert(ClipVert cv, DrawTransform tr) {
+    float inv_w = 1.0 / max(cv.clip.w, kNearW);
+    float sx = cv.clip.x * inv_w * tr.vp_scale.x + tr.vp_center.x;
+    float sy = cv.clip.y * inv_w * tr.vp_scale.y + tr.vp_center.y;
+    float sz = clamp(cv.clip.z * inv_w * tr.vp_scale.z + tr.vp_center.z, 0.0, 65535.0);
+    if (tr.vp_center.w > 1.0) {
+        sx = 240.0 + (sx - 240.0) * tr.vp_center.w;
+    }
+    GpuVertexOut o;
+    o.x = sx;
+    o.y = sy;
+    o.z = sz;
+    o.inv_w = inv_w;
+    o.u = cv.uv.x;
+    o.v = cv.uv.y;
+    o.color_rgba = pack_u8x4(cv.col);
+    o.spec_rgba = pack_u8x4(cv.spec);
+    o.fog = cv.fog;
+    return o;
+}
+
+GpuVertexOut degenerate_vert() {
+    GpuVertexOut deg;
+    deg.x = 0.0; deg.y = 0.0; deg.z = 0.0; deg.inv_w = 1.0;
+    deg.u = 0.0; deg.v = 0.0; deg.color_rgba = 0u; deg.spec_rgba = 0u; deg.fog = 1.0;
+    return deg;
+}
 
 void main() {
     uint tri = gl_GlobalInvocationID.x;
     uint base = tri * 3u;
     if (base + 2u >= pc.vertex_count) return;
 
-    RawGpuVertex rv0 = pc.raw_verts.items[base + 0u];
-    RawGpuVertex rv1 = pc.raw_verts.items[base + 1u];
-    RawGpuVertex rv2 = pc.raw_verts.items[base + 2u];
-    DrawTransform tr = pc.transforms.items[rv0.draw_idx];
+    uint out_base = tri * 6u;
+    RawGpuVertex rvs[3];
+    rvs[0] = pc.raw_verts_old.items[base + 0u];
+    rvs[1] = pc.raw_verts_old.items[base + 1u];
+    rvs[2] = pc.raw_verts_old.items[base + 2u];
+    DrawTransform tr = pc.transforms.items[rvs[0].draw_idx];
 
-    vec4 c0 = tr.mvp * vec4(rv0.world_pos, 1.0);
-    vec4 c1 = tr.mvp * vec4(rv1.world_pos, 1.0);
-    vec4 c2 = tr.mvp * vec4(rv2.world_pos, 1.0);
+    vec3 eye_old[3];
+    eye_old[0] = mul_3x4(tr.mv_old, rvs[0].world_pos);
+    eye_old[1] = mul_3x4(tr.mv_old, rvs[1].world_pos);
+    eye_old[2] = mul_3x4(tr.mv_old, rvs[2].world_pos);
 
-    // Cull triangles crossing behind the camera (w <= 0) to prevent screen-spanning artifacts.
-    if (c0.w <= 1e-4 || c1.w <= 1e-4 || c2.w <= 1e-4) {
-        GpuVertexOut deg;
-        deg.x = 0.0; deg.y = 0.0; deg.z = 0.0; deg.inv_w = 1.0;
-        deg.u = 0.0; deg.v = 0.0; deg.color_rgba = 0u; deg.spec_rgba = 0u; deg.fog = 1.0;
-        pc.out_verts.items[base + 0u] = deg;
-        pc.out_verts.items[base + 1u] = deg;
-        pc.out_verts.items[base + 2u] = deg;
+    ClipVert cv[3];
+    bool has_pair = (tr.pair_info.z & 1u) != 0u && pc.phase > 0.0;
+    bool use_deform = false;
+    RawGpuVertex nvs[3];
+    vec3 eye_new[3];
+
+    if (has_pair) {
+        uint max_dist_bits = tr.pair_info.w;
+        float max_dist = uintBitsToFloat(max_dist_bits);
+        float max_d2 = max_dist * max_dist;
+        use_deform = true;
+        for (uint k = 0u; k < 3u; ++k) {
+            uint v_in_draw = (base + k) - tr.pair_info.x;
+            nvs[k] = pc.raw_verts_new.items[tr.pair_info.y + v_in_draw];
+            eye_new[k] = mul_3x4(tr.mv_new, nvs[k].world_pos);
+            vec3 delta = eye_new[k] - eye_old[k];
+            if (dot(delta, delta) > max_d2) {
+                use_deform = false;
+                break;
+            }
+        }
+    }
+
+    for (uint k = 0u; k < 3u; ++k) {
+        vec3 eye_p = use_deform ? mix(eye_old[k], eye_new[k], pc.phase) : eye_old[k];
+        cv[k].clip = tr.proj * vec4(eye_p, 1.0);
+        cv[k].uv = rvs[k].uv;
+        cv[k].col = unpack_u8x4(rvs[k].color_rgba);
+        cv[k].spec = unpack_u8x4(rvs[k].spec_rgba);
+        cv[k].fog = rvs[k].fog;
+
+        if (use_deform) {
+            vec2 duv = abs(nvs[k].uv - rvs[k].uv);
+            if (duv.x < kMaxUvScroll) cv[k].uv.x = mix(rvs[k].uv.x, nvs[k].uv.x, pc.phase);
+            if (duv.y < kMaxUvScroll) cv[k].uv.y = mix(rvs[k].uv.y, nvs[k].uv.y, pc.phase);
+            cv[k].col = mix(cv[k].col, unpack_u8x4(nvs[k].color_rgba), pc.phase);
+            cv[k].spec = mix(cv[k].spec, unpack_u8x4(nvs[k].spec_rgba), pc.phase);
+            cv[k].fog = mix(rvs[k].fog, nvs[k].fog, pc.phase);
+        }
+    }
+
+    // Fast path: all 3 vertices in front of near plane.
+    bool in0 = cv[0].clip.w >= kNearW;
+    bool in1 = cv[1].clip.w >= kNearW;
+    bool in2 = cv[2].clip.w >= kNearW;
+    GpuVertexOut deg = degenerate_vert();
+
+    if (in0 && in1 && in2) {
+        pc.out_verts.items[out_base + 0u] = project_vert(cv[0], tr);
+        pc.out_verts.items[out_base + 1u] = project_vert(cv[1], tr);
+        pc.out_verts.items[out_base + 2u] = project_vert(cv[2], tr);
+        pc.out_verts.items[out_base + 3u] = deg;
+        pc.out_verts.items[out_base + 4u] = deg;
+        pc.out_verts.items[out_base + 5u] = deg;
         return;
     }
 
-    RawGpuVertex rvs[3] = RawGpuVertex[3](rv0, rv1, rv2);
-    vec4 cs[3] = vec4[3](c0, c1, c2);
-    for (uint k = 0u; k < 3u; ++k) {
-        float inv_w = 1.0 / cs[k].w;
-        float sx = cs[k].x * inv_w * tr.vp_scale.x + tr.vp_center.x;
-        float sy = cs[k].y * inv_w * tr.vp_scale.y + tr.vp_center.y;
-        float sz = clamp(cs[k].z * inv_w * tr.vp_scale.z + tr.vp_center.z, 0.0, 65535.0);
-        if (tr.vp_center.w > 1.0) {
-            sx = 240.0 + (sx - 240.0) * tr.vp_center.w;
+    if (!in0 && !in1 && !in2) {
+        for (uint k = 0u; k < 6u; ++k) pc.out_verts.items[out_base + k] = deg;
+        return;
+    }
+
+    // Sutherland-Hodgman clip against w = kNearW (produces 3 or 4 polygon vertices).
+    ClipVert poly[4];
+    uint n = 0u;
+    for (uint i = 0u; i < 3u; ++i) {
+        uint j = (i + 1u) % 3u;
+        float da = cv[i].clip.w - kNearW;
+        float db = cv[j].clip.w - kNearW;
+        bool a_in = da >= 0.0;
+        bool b_in = db >= 0.0;
+        if (a_in) {
+            poly[n++] = cv[i];
         }
-        GpuVertexOut o;
-        o.x = sx;
-        o.y = sy;
-        o.z = sz;
-        o.inv_w = inv_w;
-        o.u = rvs[k].uv.x;
-        o.v = rvs[k].uv.y;
-        o.color_rgba = rvs[k].color_rgba;
-        o.spec_rgba = rvs[k].spec_rgba;
-        o.fog = rvs[k].fog;
-        pc.out_verts.items[base + k] = o;
+        if (a_in != b_in) {
+            float t = da / (da - db);
+            poly[n++] = mix_clip_vert(cv[i], cv[j], clamp(t, 0.0, 1.0));
+        }
+    }
+
+    if (n >= 3u) {
+        pc.out_verts.items[out_base + 0u] = project_vert(poly[0], tr);
+        pc.out_verts.items[out_base + 1u] = project_vert(poly[1], tr);
+        pc.out_verts.items[out_base + 2u] = project_vert(poly[2], tr);
+    } else {
+        pc.out_verts.items[out_base + 0u] = deg;
+        pc.out_verts.items[out_base + 1u] = deg;
+        pc.out_verts.items[out_base + 2u] = deg;
+    }
+
+    if (n == 4u) {
+        pc.out_verts.items[out_base + 3u] = project_vert(poly[0], tr);
+        pc.out_verts.items[out_base + 4u] = project_vert(poly[2], tr);
+        pc.out_verts.items[out_base + 5u] = project_vert(poly[3], tr);
+    } else {
+        pc.out_verts.items[out_base + 3u] = deg;
+        pc.out_verts.items[out_base + 4u] = deg;
+        pc.out_verts.items[out_base + 5u] = deg;
     }
 }

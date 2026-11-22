@@ -25,7 +25,8 @@ bool GpuInterpolator::init(const Context &ctx) {
     vkDestroyShaderModule(ctx.device, mod, nullptr);
     if (r != VK_SUCCESS) return false;
 
-    const std::size_t out_bytes = static_cast<std::size_t>(max_vertices_) * sizeof(gpu_common::GpuVertex);
+    // 2x output vertex capacity for deterministic Sutherland-Hodgman near-plane clipping (2 tris per input tri).
+    const std::size_t out_bytes = static_cast<std::size_t>(max_in_vertices_) * 2u * sizeof(gpu_common::GpuVertex);
     VkBufferCreateInfo bci{};
     bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bci.size = out_bytes;
@@ -59,13 +60,15 @@ void GpuInterpolator::shutdown(const Context &ctx) {
     }
 }
 
-void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw_verts_bda,
-                                        VkDeviceAddress transforms_bda, std::uint32_t vertex_count) {
+void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw_verts_old_bda,
+                                        VkDeviceAddress raw_verts_new_bda, VkDeviceAddress transforms_bda,
+                                        std::uint32_t vertex_count, float phase) {
     if (!ready() || vertex_count == 0) return;
-    const std::uint32_t count = vertex_count <= max_vertices_ ? vertex_count : max_vertices_;
+    const std::uint32_t count = vertex_count <= max_in_vertices_ ? vertex_count : max_in_vertices_;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);
-    PlacePush push{raw_verts_bda, transforms_bda, out_addr_, count};
+    PlacePush push{raw_verts_old_bda, raw_verts_new_bda ? raw_verts_new_bda : raw_verts_old_bda,
+                   transforms_bda, out_addr_, count, phase};
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     const std::uint32_t tri_count = count / 3u;
     vkCmdDispatch(cmd, (tri_count + 63u) / 64u, 1u, 1u);
@@ -80,7 +83,7 @@ void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.buffer = out_buf_;
     barrier.offset = 0;
-    barrier.size = static_cast<VkDeviceSize>(count) * sizeof(gpu_common::GpuVertex);
+    barrier.size = static_cast<VkDeviceSize>(count) * 2u * sizeof(gpu_common::GpuVertex);
 
     VkDependencyInfo dep{};
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;

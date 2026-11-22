@@ -243,10 +243,20 @@ private:
         std::uint32_t width = 512, height = 272;
         std::vector<interpolation::DrawSummary> summaries;
         std::vector<std::array<float, 8>> viewports;
+        std::vector<std::uint32_t> draw_raw_start;
+        std::vector<std::uint32_t> draw_raw_count;
         std::vector<vk::RawGpuVertex> raw_verts;
         std::vector<GpuVertex> flat_verts;
         std::vector<RecordedBatch> batches;
     };
+    struct SnapRawBuf {
+        VkBuffer buf = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+        VkDeviceAddress addr = 0;
+        void *mapped = nullptr;
+        std::size_t cap = 0;
+    };
+    bool upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVertex> &verts);
 
     SDL_Window *window_ = nullptr;
     int scale_ = 4;
@@ -324,16 +334,16 @@ private:
     bool cur_draw_eligible_ = false;
     std::uint32_t cur_draw_index_ = 0;
 
-    VkBuffer snap_raw_buf_ = VK_NULL_HANDLE;
-    VmaAllocation snap_raw_alloc_ = VK_NULL_HANDLE;
-    VkDeviceAddress snap_raw_addr_ = 0;
-    std::size_t snap_raw_cap_ = 0;
+    SnapRawBuf snap_raw_old_;
+    SnapRawBuf snap_raw_new_;
 
     RenderTarget interp_rt_;
     bool interp_active_ = false;
     bool interp_can_blend_ = false;
     interpolation::Matching last_matching_{};
     interpolation::RigidMotion last_cam_motion_{};
+    interpolation::RigidMotion prev_cam_motion_{};
+    bool has_prev_cam_ = false;
     int next_subframe_ = 0;
     std::chrono::steady_clock::time_point flip_time_{};
     std::chrono::steady_clock::duration flip_period_{std::chrono::microseconds(33333)};
@@ -406,11 +416,14 @@ void VkBackend::shutdown() {
     blur_b_.destroy_immediate(ctx_, &descriptors_);
     interp_rt_.color.destroy_immediate(ctx_, &descriptors_);
     interp_rt_.depth.destroy_immediate(ctx_, nullptr);
-    if (snap_raw_buf_ != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(ctx_.allocator, snap_raw_buf_, snap_raw_alloc_);
-        snap_raw_buf_ = VK_NULL_HANDLE;
-        snap_raw_alloc_ = VK_NULL_HANDLE;
-    }
+    auto destroy_snap_buf = [&](SnapRawBuf &sb) {
+        if (sb.buf != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx_.allocator, sb.buf, sb.alloc);
+            sb = SnapRawBuf{};
+        }
+    };
+    destroy_snap_buf(snap_raw_old_);
+    destroy_snap_buf(snap_raw_new_);
 
     pack_streamer_.shutdown(ctx_, descriptors_);
     shadow_compute_.shutdown(ctx_, descriptors_);
@@ -1010,6 +1023,8 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
     cur_draw_index_ = static_cast<std::uint32_t>(cur_snap_.summaries.size());
     cur_snap_.summaries.push_back(interpolation::summarize(draw));
     cur_snap_.viewports.push_back(draw.viewport);
+    cur_snap_.draw_raw_start.push_back(static_cast<std::uint32_t>(cur_snap_.raw_verts.size()));
+    cur_snap_.draw_raw_count.push_back(0u);
     cur_draw_eligible_ = !draw.through && !draw.clear && cur_snap_.summaries.back().perspective;
 }
 
@@ -1046,6 +1061,7 @@ void VkBackend::triangle_unclipped(const gpu::Ge &ge, const gpu::Vertex &a, cons
     push_raw(a);
     push_raw(b);
     push_raw(c);
+    cur_snap_.draw_raw_count.back() += 3u;
 }
 
 void VkBackend::triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) {
@@ -1407,11 +1423,26 @@ void VkBackend::submit_and_present(std::uint32_t swap_img_idx) {
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, nullptr,
                         1, &swapchain_.render_finished[swap_img_idx],
                         1, &swapchain_.handle, &swap_img_idx, nullptr};
+#ifdef VK_KHR_PRESENT_ID_EXTENSION_NAME
+    std::uint64_t pid = 0;
+    VkPresentIdKHR present_id_info{VK_STRUCTURE_TYPE_PRESENT_ID_KHR, nullptr, 1, &pid};
+    if (ctx_.caps.present_id) {
+        pid = swapchain_.next_present_id++;
+        pi.pNext = &present_id_info;
+    }
+#endif
     {
         std::lock_guard lock(ctx_.graphics_queue_mutex);
         vkQueueSubmit2(ctx_.graphics_queue, 1, &si, VK_NULL_HANDLE);
         vkQueuePresentKHR(ctx_.graphics_queue, &pi);
     }
+
+#ifdef VK_KHR_PRESENT_WAIT_EXTENSION_NAME
+    // Hardware scanout backpressure (keeps presentation queue depth bounded to 1 without busy-wait).
+    if (ctx_.caps.present_wait && vkWaitForPresentKHR && swapchain_.next_present_id > 3u) {
+        vkWaitForPresentKHR(ctx_.device, swapchain_.handle, swapchain_.next_present_id - 3u, 8'000'000ULL);
+    }
+#endif
 
     frame_slot_ = (frame_slot_ + 1) % kFramesInFlight;
 }
@@ -1447,8 +1478,38 @@ void VkBackend::apply_live_fps() {
     }
 }
 
+bool VkBackend::upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVertex> &verts) {
+    if (verts.empty()) return false;
+    const std::size_t rbytes = verts.size() * sizeof(vk::RawGpuVertex);
+    if (dst.cap < rbytes || dst.buf == VK_NULL_HANDLE) {
+        ctx_.wait_idle();
+        if (dst.buf != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx_.allocator, dst.buf, dst.alloc);
+            dst = SnapRawBuf{};
+        }
+        dst.cap = std::max(rbytes, std::size_t{4u << 20});
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, dst.cap,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+        VmaAllocationCreateInfo vaci{};
+        vaci.usage = VMA_MEMORY_USAGE_AUTO;
+        vaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo rinfo{};
+        if (vmaCreateBuffer(ctx_.allocator, &bci, &vaci, &dst.buf, &dst.alloc, &rinfo) != VK_SUCCESS) {
+            dst = SnapRawBuf{};
+            return false;
+        }
+        VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, dst.buf};
+        dst.addr = vkGetBufferDeviceAddress(ctx_.device, &bdai);
+        dst.mapped = rinfo.pMappedData;
+    }
+    if (!dst.mapped || dst.addr == 0) return false;
+    std::memcpy(dst.mapped, verts.data(), rbytes);
+    return true;
+}
+
 void VkBackend::render_interpolated_subframe(float phase) {
-    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || snap_raw_buf_ == VK_NULL_HANDLE) {
+    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || snap_raw_old_.buf == VK_NULL_HANDLE) {
         // Cut / 2D / movie screen: present latest rendered frame at target cadence so pacing & MangoHUD stay locked.
         if (last_shown_slot_ != 0) {
             show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
@@ -1475,6 +1536,23 @@ void VkBackend::render_interpolated_subframe(float phase) {
                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
     }
 
+    // Velocity-matched cubic Hermite camera phase smoothing (zero extra frame latency):
+    // When consecutive camera motion is continuous, ease angular velocity across 30 Hz boundaries.
+    float cam_phase = phase;
+    if (has_prev_cam_ && last_cam_motion_.valid && prev_cam_motion_.valid && phase > 0.0f && phase < 1.0f) {
+        const float a_curr = last_cam_motion_.angle;
+        const float a_prev = prev_cam_motion_.angle;
+        if (a_curr > 1e-4f && a_prev > 1e-4f) {
+            const float ratio = std::clamp(a_prev / a_curr, 0.5f, 1.5f);
+            const float m0 = 0.5f * (ratio + 1.0f);
+            const float t = phase;
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            // Hermite basis from 0 -> 1 with incoming tangent m0 and outgoing tangent 1.0.
+            cam_phase = std::clamp((t3 - 2.0f * t2 + t) * m0 + (-2.0f * t3 + 3.0f * t2) + (t3 - t2), 0.0f, 1.0f);
+        }
+    }
+
     // 1. Build per-draw interpolated DrawTransform array (tiny CPU loop: ~100-300 draws, <0.05 ms).
     FrameSlice &f = frames_[frame_slot_];
     const std::size_t ndraws = blend_older_.summaries.size();
@@ -1483,35 +1561,68 @@ void VkBackend::render_interpolated_subframe(float phase) {
         show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
         return;
     }
+    auto pack_3x4 = [](const interpolation::Matrix &m, float out[12]) {
+        // Column-major 4x4 -> 3 vec4 rows for dot(row, vec4(p, 1.0)).
+        out[0] = m[0]; out[1] = m[4]; out[2] = m[8];  out[3] = m[12];
+        out[4] = m[1]; out[5] = m[5]; out[6] = m[9];  out[7] = m[13];
+        out[8] = m[2]; out[9] = m[6]; out[10] = m[10]; out[11] = m[14];
+    };
     auto *transforms = reinterpret_cast<vk::DrawTransform *>(tslice.ptr);
     for (std::size_t i = 0; i < ndraws; ++i) {
         const auto &older = blend_older_.summaries[i];
         const auto eye_old = interpolation::multiply(older.view, older.world);
         interpolation::Matrix eye_blend = eye_old;
         const std::int32_t partner = (i < last_matching_.newer_of.size()) ? last_matching_.newer_of[i] : interpolation::Matching::kNoPartner;
-        if (partner >= 0 && static_cast<std::size_t>(partner) < blend_newer_.summaries.size()) {
+        const bool has_partner = (partner >= 0 && static_cast<std::size_t>(partner) < blend_newer_.summaries.size());
+        if (has_partner) {
             const auto &newer = blend_newer_.summaries[static_cast<std::size_t>(partner)];
             const auto eye_new = interpolation::multiply(newer.view, newer.world);
             interpolation::RigidMotion rm;
             if (interpolation::rigid_between(eye_old, eye_new, rm)) {
-                eye_blend = interpolation::follow_rigid(eye_old, rm, phase);
+                const float use_t = older.skinned ? phase : cam_phase;
+                eye_blend = interpolation::follow_rigid(eye_old, rm, use_t);
             } else if (last_cam_motion_.valid) {
                 eye_blend = interpolation::blend_eye(eye_old, eye_new, last_cam_motion_, phase);
             } else {
                 eye_blend = interpolation::blend_affine(eye_old, eye_new, phase);
             }
         } else if (partner == interpolation::Matching::kFollowCamera && last_cam_motion_.valid) {
-            eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, phase);
+            eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, cam_phase);
         }
-        // v.world is already in world space (older.world * local_pos), so map world -> interpolated eye via
-        // eye_blend * inverse(older.world), avoiding applying older.world twice!
-        interpolation::Matrix inv_world;
-        interpolation::Matrix world_to_eye = older.view;
-        if (interpolation::affine_inverse(older.world, inv_world)) {
-            world_to_eye = interpolation::multiply(eye_blend, inv_world);
+
+        // Map world -> interpolated eye via eye_blend * inverse(older.world).
+        interpolation::Matrix inv_world_old;
+        interpolation::Matrix world_to_eye_old = older.view;
+        if (interpolation::affine_inverse(older.world, inv_world_old)) {
+            world_to_eye_old = interpolation::multiply(eye_blend, inv_world_old);
         }
-        const auto mvp = interpolation::multiply(older.projection, world_to_eye);
-        std::copy_n(mvp.data(), 16, transforms[i].mvp);
+        pack_3x4(world_to_eye_old, transforms[i].mv_old);
+
+        // Dual-stream per-vertex interpolation for matched draws with matching raw vertex counts
+        // (animates skinned hunters, monsters, wings, tails, cloth, and scrolling UVs at 120/180 FPS!).
+        bool has_vertex_pair = false;
+        std::uint32_t old_start = (i < blend_older_.draw_raw_start.size()) ? blend_older_.draw_raw_start[i] : 0u;
+        std::uint32_t new_start = 0u;
+        if (has_partner && snap_raw_new_.buf != VK_NULL_HANDLE) {
+            const std::size_t pi = static_cast<std::size_t>(partner);
+            const std::uint32_t old_cnt = (i < blend_older_.draw_raw_count.size()) ? blend_older_.draw_raw_count[i] : 0u;
+            const std::uint32_t new_cnt = (pi < blend_newer_.draw_raw_count.size()) ? blend_newer_.draw_raw_count[pi] : 0u;
+            if (old_cnt > 0u && old_cnt == new_cnt) {
+                const auto &newer = blend_newer_.summaries[pi];
+                interpolation::Matrix inv_world_new;
+                if (interpolation::affine_inverse(newer.world, inv_world_new)) {
+                    const auto world_to_eye_new = interpolation::multiply(eye_blend, inv_world_new);
+                    pack_3x4(world_to_eye_new, transforms[i].mv_new);
+                    new_start = blend_newer_.draw_raw_start[pi];
+                    has_vertex_pair = true;
+                }
+            }
+        }
+        if (!has_vertex_pair) {
+            pack_3x4(world_to_eye_old, transforms[i].mv_new);
+        }
+
+        std::copy_n(older.projection.data(), 16, transforms[i].proj);
         const auto &vp = blend_older_.viewports[i];
         transforms[i].vp_scale[0] = vp[0];
         transforms[i].vp_scale[1] = vp[1];
@@ -1521,11 +1632,16 @@ void VkBackend::render_interpolated_subframe(float phase) {
         transforms[i].vp_center[1] = vp[4] - vp[7];
         transforms[i].vp_center[2] = vp[5];
         transforms[i].vp_center[3] = 1.0f;
+        transforms[i].pair_info[0] = old_start;
+        transforms[i].pair_info[1] = new_start;
+        transforms[i].pair_info[2] = has_vertex_pair ? 1u : 0u;
+        const float max_deform = older.skinned ? 90.0f : 45.0f;
+        std::memcpy(&transforms[i].pair_info[3], &max_deform, sizeof(float));
     }
 
-    // 2. GPU Compute: re-project all raw 3D vertices directly into device-local GpuVertex buffer!
+    // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
     const std::uint32_t raw_count = static_cast<std::uint32_t>(blend_older_.raw_verts.size());
-    interpolator_.dispatch_place_v2(f.cmd, snap_raw_addr_, tslice.address, raw_count);
+    interpolator_.dispatch_place_v2(f.cmd, snap_raw_old_.addr, snap_raw_new_.addr, tslice.address, raw_count, phase);
 
     // 3. Render interpolated 3D + 2D batches into interp_rt_ via Dynamic Rendering.
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1566,8 +1682,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
     }
 
     VkDescriptorSet set0 = descriptors_.set();
+    vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
     VkViewport vp_full{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph), 0.0f, 1.0f};
     vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
+    VkPipeline last_pipe = VK_NULL_HANDLE;
 
     for (const auto &rb : blend_older_.batches) {
         if (rb.v_count == 0 || rb.setup.target != blend_older_.shown_addr) continue;
@@ -1646,8 +1764,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
         VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
         if (!pipe) continue;
 
-        vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+        if (pipe != last_pipe) {
+            vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            last_pipe = pipe;
+        }
 
         const std::uint32_t sx1 = R(kScissor1) & 0x3FFu, sy1 = (R(kScissor1) >> 10u) & 0x3FFu;
         const std::uint32_t sx2 = std::min(R(kScissor2) & 0x3FFu, blend_older_.width - 1u);
@@ -1683,10 +1803,13 @@ void VkBackend::render_interpolated_subframe(float phase) {
             vkCmdSetColorWriteMaskEXT(f.cmd, 0, 1, &write_mask);
         }
 
+        std::uint32_t draw_vcount = rb.v_count;
         if (rb.use_gpu_raw) {
             VkBuffer gpu_vb = interpolator_.out_vertex_buffer();
-            const VkDeviceSize off = static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
+            // place_v2.comp emits 2 clipped triangles (6 verts) per input triangle (3 verts).
+            const VkDeviceSize off = static_cast<VkDeviceSize>(rb.v_offset) * 2u * sizeof(GpuVertex);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &off);
+            draw_vcount = rb.v_count * 2u;
         } else {
             const VkDeviceSize off = flat_base_off + static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &off);
@@ -1694,7 +1817,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
         vk::DrawPush push{pslice.address, 0u};
         vkCmdPushConstants(f.cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
-        vkCmdDraw(f.cmd, rb.v_count, 1, 0, 0);
+        vkCmdDraw(f.cmd, draw_vcount, 1, 0, 0);
     }
 
     vkCmdEndRendering(f.cmd);
@@ -1759,8 +1882,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     const auto now = std::chrono::steady_clock::now();
     if (flip_time_.time_since_epoch().count() != 0) {
         const auto dt = now - flip_time_;
-        if (dt >= std::chrono::milliseconds(10) && dt <= std::chrono::milliseconds(100)) {
-            flip_period_ = dt;
+        if (dt >= std::chrono::milliseconds(16) && dt <= std::chrono::milliseconds(60)) {
+            // EMA-smoothed flip period eliminates OS wakeup jitter from subframe cadence.
+            const auto prev_us = std::chrono::duration_cast<std::chrono::microseconds>(flip_period_).count();
+            const auto dt_us = std::chrono::duration_cast<std::chrono::microseconds>(dt).count();
+            const auto ema_us = (prev_us * 85 + dt_us * 15) / 100;
+            flip_period_ = std::chrono::microseconds(std::clamp<long long>(ema_us, 16000, 50000));
         }
     }
     flip_time_ = now;
@@ -1772,6 +1899,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             cur_snap_.height = it->second.height;
         }
         interpolation::mark_eligible(cur_snap_.summaries, off);
+        const bool was_blending = interp_can_blend_ && last_cam_motion_.valid;
+        prev_cam_motion_ = last_cam_motion_;
+        has_prev_cam_ = was_blending;
         interp_can_blend_ = false;
         if (have_newer_snap_) {
             blend_older_ = std::move(blend_newer_);
@@ -1785,32 +1915,14 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                 if (last_matching_.cut == nullptr) {
                     last_cam_motion_ = last_matching_.camera_found ? interpolation::rigid_motion(last_matching_.camera)
                                                                    : interpolation::RigidMotion{};
-                    const std::size_t rbytes = blend_older_.raw_verts.size() * sizeof(vk::RawGpuVertex);
-                    if (snap_raw_cap_ < rbytes) {
-                        ctx_.wait_idle();
-                        if (snap_raw_buf_ != VK_NULL_HANDLE) vmaDestroyBuffer(ctx_.allocator, snap_raw_buf_, snap_raw_alloc_);
-                        snap_raw_cap_ = std::max(rbytes, std::size_t{4u << 20});
-                        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, snap_raw_cap_,
-                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                               VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
-                        VmaAllocationCreateInfo vaci{};
-                        vaci.usage = VMA_MEMORY_USAGE_AUTO;
-                        vaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-                        VmaAllocationInfo rinfo{};
-                        if (vmaCreateBuffer(ctx_.allocator, &bci, &vaci, &snap_raw_buf_, &snap_raw_alloc_, &rinfo) == VK_SUCCESS) {
-                            VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, snap_raw_buf_};
-                            snap_raw_addr_ = vkGetBufferDeviceAddress(ctx_.device, &bdai);
-                        }
-                    }
-                    if (snap_raw_buf_ != VK_NULL_HANDLE) {
-                        void *mapped = nullptr;
-                        if (vmaMapMemory(ctx_.allocator, snap_raw_alloc_, &mapped) == VK_SUCCESS) {
-                            std::memcpy(mapped, blend_older_.raw_verts.data(), rbytes);
-                            vmaUnmapMemory(ctx_.allocator, snap_raw_alloc_);
-                            interp_can_blend_ = true;
-                        }
-                    }
+                    const bool ok_old = upload_snap_raw(snap_raw_old_, blend_older_.raw_verts);
+                    (void)upload_snap_raw(snap_raw_new_, blend_newer_.raw_verts);
+                    interp_can_blend_ = ok_old;
+                } else {
+                    has_prev_cam_ = false;
                 }
+            } else {
+                has_prev_cam_ = false;
             }
         } else {
             blend_newer_ = std::move(cur_snap_);

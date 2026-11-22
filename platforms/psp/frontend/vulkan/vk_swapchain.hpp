@@ -17,6 +17,7 @@ struct Swapchain {
     std::vector<VkImage> images;
     std::vector<VkImageView> views;
     std::vector<VkSemaphore> render_finished; // per swapchain image for safe vkQueuePresentKHR
+    std::uint64_t next_present_id = 1;        // monotonically increasing ID for VK_KHR_present_wait
 
     bool create(const Context &ctx, int width, int height);
     void destroy(const Context &ctx);

@@ -31,14 +31,23 @@ bool Swapchain::create(const Context &ctx, int width, int height) {
     std::vector<VkPresentModeKHR> modes(mode_count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.physical_device, ctx.surface, &mode_count, modes.data());
 
-    // Low-latency pacing: MAILBOX (tear-free) -> IMMEDIATE (matches GL SwapInterval(0)) -> FIFO.
+    // Low-latency tear-free pacing: FIFO_LATEST_READY -> MAILBOX -> IMMEDIATE -> FIFO.
     present_mode = VK_PRESENT_MODE_FIFO_KHR;
-    for (VkPresentModeKHR want : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) {
+    std::vector<VkPresentModeKHR> preferred;
+#ifdef VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME
+    if (ctx.caps.present_fifo_latest_ready) {
+        preferred.push_back(VK_PRESENT_MODE_FIFO_LATEST_READY_EXT);
+    }
+#endif
+    preferred.push_back(VK_PRESENT_MODE_MAILBOX_KHR);
+    preferred.push_back(VK_PRESENT_MODE_IMMEDIATE_KHR);
+    for (VkPresentModeKHR want : preferred) {
         if (std::find(modes.begin(), modes.end(), want) != modes.end()) {
             present_mode = want;
             break;
         }
     }
+    next_present_id = 1;
 
     if (caps.currentExtent.width != UINT32_MAX && caps.currentExtent.width > 0 && caps.currentExtent.height > 0) {
         extent = caps.currentExtent;

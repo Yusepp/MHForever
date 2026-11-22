@@ -34,6 +34,9 @@ struct Capabilities {
     bool memory_budget = false;
     bool dynamic_rendering_local_read = false;
     bool bc_compression = false;
+    bool present_fifo_latest_ready = false;
+    bool present_id = false;
+    bool present_wait = false;
     std::string device_name;
     std::uint32_t vendor_id = 0;
     std::uint32_t device_id = 0;

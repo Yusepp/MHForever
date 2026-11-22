@@ -285,8 +285,56 @@ bool Context::init(SDL_Window *win) {
         }
     }
 
-    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-                                         caps.extended_dynamic_state3 ? static_cast<void *>(&eds3_enable) : nullptr};
+    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, nullptr};
+    void **pnext_tail = &f13.pNext;
+    if (caps.extended_dynamic_state3) {
+        *pnext_tail = &eds3_enable;
+        pnext_tail = &eds3_enable.pNext;
+    }
+
+#ifdef VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME
+    VkPhysicalDevicePresentModeFifoLatestReadyFeaturesEXT fifo_lr_query{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_EXT, nullptr};
+    VkPhysicalDevicePresentModeFifoLatestReadyFeaturesEXT fifo_lr_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_EXT, nullptr};
+    if (has_extension(dexts, VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 qf2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &fifo_lr_query};
+        vkGetPhysicalDeviceFeatures2(physical_device, &qf2);
+        if (fifo_lr_query.presentModeFifoLatestReady) {
+            dev_exts.push_back(VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME);
+            caps.present_fifo_latest_ready = true;
+            fifo_lr_enable.presentModeFifoLatestReady = VK_TRUE;
+            *pnext_tail = &fifo_lr_enable;
+            pnext_tail = &fifo_lr_enable.pNext;
+        }
+    }
+#endif
+
+#if defined(VK_KHR_PRESENT_ID_EXTENSION_NAME) && defined(VK_KHR_PRESENT_WAIT_EXTENSION_NAME)
+    VkPhysicalDevicePresentIdFeaturesKHR present_id_query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, nullptr};
+    VkPhysicalDevicePresentWaitFeaturesKHR present_wait_query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+                                                              &present_id_query};
+    VkPhysicalDevicePresentIdFeaturesKHR present_id_enable{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, nullptr};
+    VkPhysicalDevicePresentWaitFeaturesKHR present_wait_enable{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, nullptr};
+    if (has_extension(dexts, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+        has_extension(dexts, VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 qf2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &present_wait_query};
+        vkGetPhysicalDeviceFeatures2(physical_device, &qf2);
+        if (present_id_query.presentId && present_wait_query.presentWait) {
+            dev_exts.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+            dev_exts.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+            caps.present_id = true;
+            caps.present_wait = true;
+            present_id_enable.presentId = VK_TRUE;
+            present_wait_enable.presentWait = VK_TRUE;
+            *pnext_tail = &present_id_enable;
+            pnext_tail = &present_id_enable.pNext;
+            *pnext_tail = &present_wait_enable;
+            pnext_tail = &present_wait_enable.pNext;
+        }
+    }
+#endif
+
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
 
@@ -387,7 +435,9 @@ bool Context::init(SDL_Window *win) {
                                    cache_bytes.size(), cache_bytes.empty() ? nullptr : cache_bytes.data()};
     vkCreatePipelineCache(device, &pcci, nullptr, &pipeline_cache);
 
-    std::fprintf(stderr, "[vk] %s (Vulkan %u.%u.%u, EDS3=%s, BC=%s, MemBudget=%s, DedicatedTransfer=%s, AsyncCompute=%s)\n",
+    std::fprintf(stderr,
+                 "[vk] %s (Vulkan %u.%u.%u, EDS3=%s, BC=%s, MemBudget=%s, DedicatedTransfer=%s, AsyncCompute=%s, "
+                 "FifoLatestReady=%s, PresentWait=%s)\n",
                  caps.device_name.c_str(),
                  VK_API_VERSION_MAJOR(caps.api_version), VK_API_VERSION_MINOR(caps.api_version),
                  VK_API_VERSION_PATCH(caps.api_version),
@@ -395,7 +445,9 @@ bool Context::init(SDL_Window *win) {
                  caps.bc_compression ? "yes" : "no",
                  caps.memory_budget ? "yes" : "no",
                  families.has_dedicated_transfer() ? "yes" : "no",
-                 families.has_dedicated_compute() ? "yes" : "no");
+                 families.has_dedicated_compute() ? "yes" : "no",
+                 caps.present_fifo_latest_ready ? "yes" : "no",
+                 caps.present_wait ? "yes" : "no");
     return true;
 }
 
