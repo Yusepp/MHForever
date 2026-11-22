@@ -235,6 +235,7 @@ private:
     void prepare_interp_draws();
     void render_interpolated_subframe(float phase);
     void apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in);
+    void snapshot_soft_depth(RenderTarget &rt);
     void read_back();
     void capture_clean_3d_snapshot(RenderTarget &rt);
     void copy_shown_to_vram(RenderTarget *shown);
@@ -329,7 +330,9 @@ private:
 
     VkImageResource cpu_display_tex_;
     VkImageResource copy_tex_;
+    VkImageResource soft_depth_copy_;
     VkImageResource overlay_tex_;
+    bool main_depth_snapped_ = false;
     std::uint64_t overlay_gen_ = 0;
     std::uint64_t overlay_shown_at_ms_ = 0;
     bool overlay_visible_ = false;
@@ -539,6 +542,7 @@ void VkBackend::shutdown() {
 
     cpu_display_tex_.destroy_immediate(ctx_, &descriptors_);
     copy_tex_.destroy_immediate(ctx_, &descriptors_);
+    soft_depth_copy_.destroy_immediate(ctx_, &descriptors_);
     overlay_tex_.destroy_immediate(ctx_, &descriptors_);
     blur_a_.destroy_immediate(ctx_, &descriptors_);
     blur_b_.destroy_immediate(ctx_, &descriptors_);
@@ -707,7 +711,7 @@ RenderTarget &VkBackend::ensure_target(std::uint32_t address, std::uint32_t stri
                         VK_IMAGE_ASPECT_COLOR_BIT);
         rt.depth.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_D32_SFLOAT,
                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                            VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                         VK_IMAGE_ASPECT_DEPTH_BIT);
     } else {
         rt.stride = w;
@@ -1102,6 +1106,15 @@ void VkBackend::draw_batch() {
         }
     }
 
+    const bool is_soft_particle = !clear && !setup_.through && is_shown_target(setup_.target) &&
+                                  (R(kAlphaBlendEnable) & 1u) != 0 && (R(kZTestEnable) & 1u) != 0 &&
+                                  (R(kZWriteDisable) & 1u) != 0 &&
+                                  live_->enhanced_lighting.load(std::memory_order_relaxed);
+    if (is_soft_particle && !main_depth_snapped_) {
+        snapshot_soft_depth(rt);
+        main_depth_snapped_ = true;
+    }
+
     begin_target_pass(rt);
 
     // Quest HUD detection, HUD scaling, and widescreen 2D aspect preservation (single tight pass).
@@ -1192,6 +1205,12 @@ void VkBackend::draw_batch() {
     const std::uint32_t func = R(kTexFunc);
     dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
                        (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
+    if (is_soft_particle && soft_depth_copy_.bindless_slot != 0) {
+        const std::uint32_t bmode = R(kBlendMode);
+        const bool is_additive_one = ((bmode & 0xFu) == 10u && ((bmode >> 4u) & 0xFu) == 10u && ((bmode >> 8u) & 0xFu) == 0u);
+        dp.tex_func_bits |= (soft_depth_copy_.bindless_slot << 12u) | (is_additive_one ? 512u : 0u);
+        dp.zmax_pad[1] = 0.0014f;
+    }
     if (alpha_test) {
         dp.alpha_bits = R(kAlphaTest) & 0xFFFFFFu;
     } else {
@@ -2273,6 +2292,7 @@ void VkBackend::apply_live_scale() {
         retire_image(interp_rt_.color);
         retire_image(interp_rt_.depth);
         retire_image(copy_tex_);
+        retire_image(soft_depth_copy_);
         retire_image(killcam_clean_);
     }
 }
@@ -2324,6 +2344,36 @@ bool VkBackend::upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVer
     if (!dst.mapped || dst.addr == 0) return false;
     std::memcpy(dst.mapped, verts.data(), rbytes);
     return true;
+}
+
+void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
+    if (rt.depth.image == VK_NULL_HANDLE) return;
+    ensure_recording();
+    end_render_pass();
+    if (soft_depth_copy_.image == VK_NULL_HANDLE ||
+        soft_depth_copy_.width != rt.depth.width || soft_depth_copy_.height != rt.depth.height) {
+        retire_image(soft_depth_copy_);
+        if (!soft_depth_copy_.create(ctx_, &descriptors_, rt.depth.width, rt.depth.height, VK_FORMAT_D32_SFLOAT,
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            return;
+        }
+    }
+    transition_resource(rt.depth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    transition_resource(soft_depth_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy cp{};
+    cp.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    cp.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    cp.extent = {rt.depth.width, rt.depth.height, 1};
+    vkCmdCopyImage(frames_[frame_slot_].cmd, rt.depth.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   soft_depth_copy_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    transition_resource(soft_depth_copy_, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    transition_resource(rt.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 }
 
 void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in) {
@@ -2454,7 +2504,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
                                     VK_IMAGE_USAGE_STORAGE_BIT,
                                 VK_IMAGE_ASPECT_COLOR_BIT);
         interp_rt_.depth.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_D32_SFLOAT,
-                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                 VK_IMAGE_ASPECT_DEPTH_BIT);
     }
 
@@ -2609,11 +2660,29 @@ void VkBackend::render_interpolated_subframe(float phase) {
     VkPipeline last_pipe = VK_NULL_HANDLE;
     bool interp_saw_3d = false;
     bool interp_lit = false;
+    bool interp_depth_snapped = false;
 
     for (const auto &rb : blend_older_.batches) {
         if (rb.v_count == 0 || rb.setup.target != blend_older_.shown_addr) continue;
         const auto R = [&](std::uint32_t reg) { return key_reg(rb.setup.key, reg); };
         const bool clear = (R(kClearMode) & 1u) != 0;
+
+        // Snapshot opaque 3D depth once before depth-tested non-depth-writing blended particles (Soft Particles!).
+        const bool is_soft_particle = !clear && !rb.setup.through &&
+                                      (R(kAlphaBlendEnable) & 1u) != 0 && (R(kZTestEnable) & 1u) != 0 &&
+                                      (R(kZWriteDisable) & 1u) != 0 &&
+                                      live_->enhanced_lighting.load(std::memory_order_relaxed);
+        if (is_soft_particle && !interp_depth_snapped) {
+            vkCmdEndRendering(f.cmd);
+            snapshot_soft_depth(interp_rt_);
+            interp_depth_snapped = true;
+            color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            vkCmdBeginRendering(f.cmd, &ri);
+            vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+            vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
+            last_pipe = VK_NULL_HANDLE;
+        }
 
         // Run enhanced Vulkan lighting strictly after 3D draws and before 2D HUD draws on 120/180 Hz subframes too!
         if (!clear) {
@@ -2665,6 +2734,12 @@ void VkBackend::render_interpolated_subframe(float phase) {
         const std::uint32_t func = R(kTexFunc);
         dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
                            (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
+        if (is_soft_particle && soft_depth_copy_.bindless_slot != 0) {
+            const std::uint32_t bmode = R(kBlendMode);
+            const bool is_additive_one = ((bmode & 0xFu) == 10u && ((bmode >> 4u) & 0xFu) == 10u && ((bmode >> 8u) & 0xFu) == 0u);
+            dp.tex_func_bits |= (soft_depth_copy_.bindless_slot << 12u) | (is_additive_one ? 512u : 0u);
+            dp.zmax_pad[1] = 0.0014f;
+        }
         dp.alpha_bits = alpha_test ? (R(kAlphaTest) & 0xFFFFFFu) : 1u;
         std::memcpy(pslice.ptr, &dp, sizeof(dp));
 
@@ -2938,6 +3013,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     frame_had_3d_ = false;
     captured_clean_3d_ = false;
     lit_3d_this_frame_ = false;
+    main_depth_snapped_ = false;
     cur_light_in_ = vk::LightingFrameInput{};
     frame_tex_cache_.clear();
     if ((frame_number_ % 60u) == 0u) {

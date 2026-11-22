@@ -2,6 +2,7 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
 
 layout(set = 0, binding = 0) uniform texture2D u_textures[];
 layout(set = 0, binding = 1) uniform sampler u_samplers[];
@@ -83,6 +84,26 @@ void main() {
         if ((bits & 0x100u) != 0u) {
             float z = gl_FragCoord.z * 65535.0;
             if (z < p.fog_and_zmin.w || z > p.zmax_pad.x + 0.5) discard;
+        }
+        // Soft 3D Particles: smoothly fade depth-tested non-depth-writing blended billboards
+        // (smoke, snow puffs, dust, fireballs, flames) near solid geometry intersections!
+        uint soft_depth_slot = bits >> 12u;
+        if (soft_depth_slot != 0u && p.zmax_pad.y > 0.0) {
+            ivec2 dsize = textureSize(u_textures[nonuniformEXT(soft_depth_slot)], 0);
+            ivec2 dip = clamp(ivec2(gl_FragCoord.xy), ivec2(0), dsize - ivec2(1));
+            float scene_d = texelFetch(u_textures[nonuniformEXT(soft_depth_slot)], dip, 0).r;
+            if (scene_d < 0.99992) {
+                // Perspective depth delta scales with (1 - d)^2; scale fade smoothly across view distance.
+                float inv_z = max(1.0 - gl_FragCoord.z, 0.002);
+                float fade_range = p.zmax_pad.y * inv_z;
+                float diff = scene_d - gl_FragCoord.z;
+                float soft_fade = clamp(diff / max(fade_range, 1e-6), 0.0, 1.0);
+                soft_fade = soft_fade * soft_fade * (3.0 - 2.0 * soft_fade);
+                if ((bits & 0x200u) != 0u) {
+                    c.rgb *= soft_fade; // additive (ONE+ONE) fire/sparks
+                }
+                c.a *= soft_fade;
+            }
         }
     }
     o_color = clamp(c, 0.0, 1.0);
