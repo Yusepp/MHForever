@@ -39,46 +39,41 @@ constexpr const char *kSelectGlyphs[6][5] = {
     {"111", "010", "010", "010", "010"}, // T
 };
 
-// Renders a Monster Hunter / PSP-styled [SELECT] pill with an amber-gold fill bar as the button is held.
+// Renders a Monster Hunter / PSP-styled [SELECT] pill inside a 36x36 square sprite with hold progress fill.
 std::shared_ptr<const std::vector<std::uint32_t>> make_select_pill_sprite(float progress) {
-    constexpr int w = 36, h = 14;
-    auto px = std::make_shared<std::vector<std::uint32_t>>(static_cast<std::size_t>(w * h), 0u);
-    const int fill_x = 2 + static_cast<int>(std::lround(std::clamp(progress, 0.0f, 1.0f) * static_cast<float>(w - 4)));
+    constexpr int s = 36, h = 14, y_off = (s - h) / 2;
+    auto px = std::make_shared<std::vector<std::uint32_t>>(static_cast<std::size_t>(s * s), 0u);
+    const int fill_x = 2 + static_cast<int>(std::lround(std::clamp(progress, 0.0f, 1.0f) * static_cast<float>(s - 4)));
 
     for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            // Rounded pill SDF
-            const int rx = x < 5 ? 5 - x : (x >= w - 5 ? x - (w - 6) : 0);
+        for (int x = 0; x < s; ++x) {
+            const int rx = x < 5 ? 5 - x : (x >= s - 5 ? x - (s - 6) : 0);
             const int ry = y < 5 ? 5 - y : (y >= h - 5 ? y - (h - 6) : 0);
             const float d = std::sqrt(static_cast<float>(rx * rx + ry * ry));
             if (d > 5.4f) continue;
 
             std::uint32_t color = 0u;
             if (d >= 4.2f) {
-                // Warm antique-gold MH border
                 color = progress > 0.01f ? premul(255, 212, 96, 245) : premul(204, 174, 108, 235);
             } else if (x < fill_x && progress > 0.01f) {
-                // Holding fill: warm MH quest-clear amber
                 color = premul(215, 148, 36, 225);
             } else {
-                // Deep charcoal PSP button interior with subtle top highlight
                 const std::uint8_t shade = y <= 4 ? 46 : 26;
                 color = premul(shade, static_cast<std::uint8_t>(shade - 2), static_cast<std::uint8_t>(shade - 6), 220);
             }
-            (*px)[static_cast<std::size_t>(y * w + x)] = color;
+            (*px)[static_cast<std::size_t>((y + y_off) * s + x)] = color;
         }
     }
 
-    // Draw crisp "SELECT" lettering centered inside the pill
     const int start_x = 7;
-    const int start_y = 5;
+    const int start_y = y_off + 5;
     for (int ch = 0; ch < 6; ++ch) {
         for (int row = 0; row < 5; ++row) {
             for (int col = 0; col < 3; ++col) {
                 if (kSelectGlyphs[ch][row][col] == '1') {
                     const int x = start_x + ch * 4 + col;
                     const int y = start_y + row;
-                    (*px)[static_cast<std::size_t>(y * w + x)] = premul(248, 244, 230, 250);
+                    (*px)[static_cast<std::size_t>(y * s + x)] = premul(248, 244, 230, 250);
                 }
             }
         }
@@ -124,13 +119,12 @@ std::string QuestTimerSkip::hint(int language) const {
 std::vector<mhf::overlay::HintSprite> QuestTimerSkip::sprites() const {
     if (!can_skip_ || triggered_) return {};
     mhf::overlay::HintSprite pill;
+    pill.x = 432.0f;
+    pill.y = 236.0f;
+    pill.size = 36.0f;
+    pill.alpha = 1.0f;
+    pill.source_size = 36;
     pill.pixels = make_select_pill_sprite(hold_progress_);
-    pill.width = 36;
-    pill.height = 14;
-    pill.x_px = 416;
-    pill.y_px = 248;
-    pill.draw_width = 36;
-    pill.draw_height = 14;
     return {std::move(pill)};
 }
 

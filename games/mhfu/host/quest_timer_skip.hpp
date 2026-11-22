@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mhf/psp/host.hpp"
-#include "overlay/hud_bar.hpp"
+#include "overlay/song_panel.hpp"
 #include "psprecomp/guest_memory.hpp"
 
 #include <cstdint>
