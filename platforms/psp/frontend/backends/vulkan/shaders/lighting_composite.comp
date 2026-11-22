@@ -150,12 +150,19 @@ void main() {
             col += p.scatter_color.rgb * (fresnel * sun_align * p.bloom_rim.z * sun_vis);
         }
 
-        // 4. Quarter-res Screen-Space Indirect Bounce (SSGI-lite: lava, campfires, fireballs, lightning).
+        // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash (explosions/fireballs/lightning).
         if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
             vec3 ssgi = texture(sampler2D(u_textures[nonuniformEXT(p.ext_slots.x)],
                                           u_samplers[nonuniformEXT(p.aux_slots.y)]),
                                 uv).rgb;
             col += ssgi * (0.35 + 0.65 * col) * (p.world_up_view.w * (0.45 + 0.55 * ao));
+        }
+        if (p.ext_slots.y != 0u) {
+            vec3 flash = texture(sampler2D(u_textures[nonuniformEXT(p.ext_slots.y)],
+                                           u_samplers[nonuniformEXT(p.aux_slots.y)]),
+                                 uv).rgb;
+            // Subtle room-wide colored illumination during bright explosions, fireballs & thunderbolts.
+            col += flash * (0.25 + 0.75 * col) * (0.32 * (0.45 + 0.55 * ao));
         }
     }
 

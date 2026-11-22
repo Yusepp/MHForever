@@ -95,7 +95,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    constexpr std::uint32_t kTotalSets = 8u + static_cast<std::uint32_t>(kSceneSetCount);
+    constexpr std::uint32_t kTotalSets = 9u + static_cast<std::uint32_t>(kSceneSetCount);
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
@@ -112,9 +112,10 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     bloom_blur_set_ = sets[4];
     ssgi_set_ = sets[5];
     ssgi_blur_set_ = sets[6];
-    lit_tmp_set_ = sets[7];
+    flash_set_ = sets[7];
+    lit_tmp_set_ = sets[8];
     for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        scene_sets_[i] = sets[8 + i];
+        scene_sets_[i] = sets[9 + i];
     }
     scene_set_cursor_ = 0;
 
@@ -142,6 +143,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     bloom_pipe_ = make_pipe(shaders::kBloomExtractCompSpv);
     ssgi_pipe_ = make_pipe(shaders::kSsgiBounceCompSpv);
     glow_blur_pipe_ = make_pipe(shaders::kGlowBlurCompSpv);
+    flash_pipe_ = make_pipe(shaders::kEmissiveFlashCompSpv);
     comp_pipe_ = make_pipe(shaders::kLightingCompositeCompSpv);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
 
@@ -187,6 +189,7 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     bloom_blur_tex_.destroy(ctx, desc);
     ssgi_tex_.destroy(ctx, desc);
     ssgi_blur_tex_.destroy(ctx, desc);
+    flash_tex_.destroy(ctx, desc);
     lit_tmp_tex_.destroy(ctx, desc);
     auto kill_pipe = [&](VkPipeline &p) {
         if (p != VK_NULL_HANDLE) {
@@ -200,6 +203,7 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(bloom_pipe_);
     kill_pipe(ssgi_pipe_);
     kill_pipe(glow_blur_pipe_);
+    kill_pipe(flash_pipe_);
     kill_pipe(comp_pipe_);
     kill_pipe(fxaa_pipe_);
     if (pipe_layout_ != VK_NULL_HANDLE) {
@@ -321,6 +325,7 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
            make_target(bloom_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, bloom_blur_set_) &&
            make_target(ssgi_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_set_) &&
            make_target(ssgi_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_blur_set_) &&
+           make_target(flash_tex_, 4u, 2u, VK_FORMAT_R16G16B16A16_SFLOAT, flash_set_) &&
            make_target(lit_tmp_tex_, full_w, full_h, VK_FORMAT_R8G8B8A8_UNORM, lit_tmp_set_);
 }
 
@@ -787,8 +792,9 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     slots[4] = base; slots[4].aux_slots[2] = gtao_blur_tex_.w;  slots[4].aux_slots[3] = gtao_blur_tex_.h;
     slots[5] = base; slots[5].aux_slots[0] = bloom_tex_.slot;   slots[5].aux_slots[2] = bloom_blur_tex_.w; slots[5].aux_slots[3] = bloom_blur_tex_.h;
     slots[6] = base; slots[6].aux_slots[0] = ssgi_tex_.slot;    slots[6].aux_slots[2] = ssgi_blur_tex_.w;  slots[6].aux_slots[3] = ssgi_blur_tex_.h;
-    slots[7] = base; slots[7].aux_slots[2] = scene_w;           slots[7].aux_slots[3] = scene_h;
-    slots[8] = base; slots[8].aux_slots[0] = lit_tmp_tex_.slot; slots[8].aux_slots[2] = scene_w; slots[8].aux_slots[3] = scene_h;
+    slots[7] = base; slots[7].aux_slots[0] = bloom_tex_.slot;   slots[7].aux_slots[2] = 4u; slots[7].aux_slots[3] = 2u;
+    slots[8] = base; slots[8].ext_slots[1] = flash_tex_.slot;   slots[8].aux_slots[2] = scene_w; slots[8].aux_slots[3] = scene_h;
+    slots[9] = base; slots[9].aux_slots[0] = lit_tmp_tex_.slot; slots[9].aux_slots[2] = scene_w; slots[9].aux_slots[3] = scene_h;
 
     // Transition intermediate targets -> GENERAL for compute writes, waiting for any prior
     // composite/denoise pass's sampled reads to finish so back-to-back dispatches never race!
@@ -813,6 +819,7 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     to_general(bloom_blur_tex_.image);
     to_general(ssgi_tex_.image);
     to_general(ssgi_blur_tex_.image);
+    to_general(flash_tex_.image);
     to_general(lit_tmp_tex_.image);
 
     // Stage 1: GTAO+ContactShadows (1/2), Volumetric Fog/Shafts (1/4), Bloom (1/4), SSGI-lite (1/4)
@@ -839,15 +846,17 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, 4);
     run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, 5);
     run_pass(glow_blur_pipe_, ssgi_blur_set_, ssgi_blur_tex_.w, ssgi_blur_tex_.h, 6);
+    run_pass(flash_pipe_, flash_set_, 4u, 2u, 7);
 
-    // Barrier batch: transition smoothed gtao/vol/bloom/ssgi -> SHADER_READ_ONLY (scene_color stays SHADER_READ_ONLY).
+    // Barrier batch: transition smoothed gtao/vol/bloom/ssgi/flash -> SHADER_READ_ONLY (scene_color stays SHADER_READ_ONLY).
     to_read(gtao_blur_tex_.image);
     to_read(vol_tex_.image);
     to_read(bloom_blur_tex_.image);
     to_read(ssgi_blur_tex_.image);
+    to_read(flash_tex_.image);
 
     // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
-    run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, 7);
+    run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, 8);
 
     // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11) reading lit_tmp_tex_ -> writing back to scene_color!
     to_read(lit_tmp_tex_.image);
@@ -855,7 +864,7 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, 8);
+    run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, 9);
 }
 
 } // namespace mhf::psp::vk

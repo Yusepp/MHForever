@@ -85,7 +85,8 @@ public:
         return gtao_pipe_ != VK_NULL_HANDLE && gtao_denoise_pipe_ != VK_NULL_HANDLE &&
                vol_pipe_ != VK_NULL_HANDLE && bloom_pipe_ != VK_NULL_HANDLE &&
                ssgi_pipe_ != VK_NULL_HANDLE && glow_blur_pipe_ != VK_NULL_HANDLE &&
-               comp_pipe_ != VK_NULL_HANDLE && fxaa_pipe_ != VK_NULL_HANDLE;
+               flash_pipe_ != VK_NULL_HANDLE && comp_pipe_ != VK_NULL_HANDLE &&
+               fxaa_pipe_ != VK_NULL_HANDLE;
     }
 
     // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
@@ -107,8 +108,8 @@ public:
                   void *params_cpu_ptr, VkDeviceAddress params_bda);
 
     // Number of LightingComputeParams structs needed per dispatch
-    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, composite, fxaa).
-    static constexpr std::size_t kParamSlotsPerDispatch = 9;
+    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa).
+    static constexpr std::size_t kParamSlotsPerDispatch = 10;
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
@@ -134,6 +135,7 @@ private:
     VkDescriptorSet bloom_blur_set_ = VK_NULL_HANDLE;
     VkDescriptorSet ssgi_set_ = VK_NULL_HANDLE;
     VkDescriptorSet ssgi_blur_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet flash_set_ = VK_NULL_HANDLE;
     VkDescriptorSet lit_tmp_set_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
     std::size_t scene_set_cursor_ = 0;
@@ -145,6 +147,7 @@ private:
     VkPipeline bloom_pipe_ = VK_NULL_HANDLE;
     VkPipeline ssgi_pipe_ = VK_NULL_HANDLE;
     VkPipeline glow_blur_pipe_ = VK_NULL_HANDLE;
+    VkPipeline flash_pipe_ = VK_NULL_HANDLE;
     VkPipeline comp_pipe_ = VK_NULL_HANDLE;
     VkPipeline fxaa_pipe_ = VK_NULL_HANDLE;
 
@@ -155,6 +158,7 @@ private:
     Target2D bloom_blur_tex_; // quarter-res RGBA16F (Kawase-smoothed bloom.rgb)
     Target2D ssgi_tex_;       // quarter-res RGBA16F (colored indirect bounce.rgb)
     Target2D ssgi_blur_tex_;  // quarter-res RGBA16F (Kawase-smoothed indirect bounce.rgb)
+    Target2D flash_tex_;      // 4x2 RGBA16F (coarse dynamic emissive flash light-field)
     Target2D lit_tmp_tex_;    // full-res RGBA8 (composite output -> FXAA input)
 
     // Zone & biome classification tables (populated once from LiveSettings).

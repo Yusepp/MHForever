@@ -1,0 +1,71 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Single-workgroup (4x2 = 8 texels, <0.005 ms!) Dynamic Emissive Flash Reduction:
+// Summarizes bright chromatic emissives (Barrel Bomb+ explosions, Rathalos fireballs,
+// Khezu thunderbolts, Volcano lava, campfires) into a coarse 4x2 light-field so large flashes
+// cast wide, smooth colored illumination across the surrounding room/terrain!
+
+layout(local_size_x = 4, local_size_y = 2, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D u_flash_out;
+
+struct LightingParams {
+    vec4 proj_info;
+    vec4 vz_and_size;
+    vec4 sun_dir_view;
+    vec4 sun_screen;
+    vec4 shadow_tint;
+    vec4 fog_color;
+    vec4 scatter_color;
+    vec4 bloom_rim;
+    vec4 world_up_view;
+    vec4 ground_bounce;
+    vec4 spec_contact;
+    uvec4 tex_slots;
+    uvec4 aux_slots; // x = bloom_src_slot, y = linear_sampler, z = 4, w = 2
+    uvec4 ext_slots;
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+void main() {
+    LightingParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= 4 || gid.y >= 2) return;
+
+    uint src = p.aux_slots.x;
+    uint samp = p.aux_slots.y;
+    vec2 cell_min = vec2(gid) / vec2(4.0, 2.0);
+    vec2 cell_size = vec2(1.0 / 4.0, 1.0 / 2.0);
+
+    vec3 acc = vec3(0.0);
+    const int kN = 5;
+    for (int y = 0; y < kN; ++y) {
+        for (int x = 0; x < kN; ++x) {
+            vec2 uv = cell_min + ((vec2(x, y) + 0.5) / float(kN)) * cell_size;
+            vec3 c = texture(sampler2D(u_textures[nonuniformEXT(src)],
+                                       u_samplers[nonuniformEXT(samp)]),
+                             clamp(uv, vec2(0.002), vec2(0.998))).rgb;
+            // Weight strongly toward chromatic emissive bursts (fire, explosions, lightning).
+            float cmax = max(c.r, max(c.g, c.b));
+            float cmin = min(c.r, min(c.g, c.b));
+            float sat = (cmax - cmin) / max(cmax, 1e-4);
+            acc += c * (0.25 + 1.35 * sat);
+        }
+    }
+    vec3 avg = acc / float(kN * kN);
+    // Softly cap so huge explosions look dramatic without blowing out the screen.
+    avg = avg / (1.0 + avg * 1.5);
+    imageStore(u_flash_out, gid, vec4(avg, 1.0));
+}

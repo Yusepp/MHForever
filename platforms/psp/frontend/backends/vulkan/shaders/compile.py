@@ -31,6 +31,7 @@ SHADERS = [
     ("kBloomExtractCompSpv", "bloom_extract.comp"),
     ("kSsgiBounceCompSpv", "ssgi_bounce.comp"),
     ("kGlowBlurCompSpv", "glow_blur.comp"),
+    ("kEmissiveFlashCompSpv", "emissive_flash.comp"),
     ("kLightingCompositeCompSpv", "lighting_composite.comp"),
     ("kFxaaPrehudCompSpv", "fxaa_prehud.comp"),
 ]
