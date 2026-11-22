@@ -173,6 +173,15 @@ Json default_settings() {
     s["hornSongs"] = false; // the hunting horn's songs over the quest HUD
     s["hornSongsPlace"] = "next-to-sheet"; // and where: a place's name, or "custom:X,Y" (overlay/song_panel.hpp)
     s["guildQuestScaling"] = false; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
+    s["targetLockCamera"] = false; // R3 monster target lock-on camera
+    s["skipQuestClearTimer"] = false; // hold Select after Quest Clear to fast-forward 60s timer
+    s["itemPouchLoadouts"] = false; // save/load Item & Armor Sets from Item Box in Village/Hall
+    s["capturableIndicator"] = false; // cyan minimap dot when monster is capturable
+    s["questStartTracker"] = false; // reveal large monsters on the map for the first 60s of each quest
+    s["infiniteWhetstone"] = false; // sharpen without consuming Whetstones
+    s["damageNumbers"] = false; // World/Rise/Wilds-style floating damage numbers
+    s["comboBooksFromBox"] = false; // 100% combine rate once all 5 Books of Combos are owned
+    s["infinitePaintballs"] = false; // throw Paintballs without consuming them
     s["copyImage"] = false; // keep a copy of the disc image in the data directory
     s["checkUpdates"] = true; // ask GitHub for a newer release when the launcher starts
     s["musicVolume"] = 100;
@@ -1039,6 +1048,8 @@ void Launcher::import_game_controls() {
                 // What the game's in-game menu changes while playing: switches ("true", "false") and percentages, under
                 // the launcher's own names. Only these settings; apply_settings checks each value.
                 static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
+                                                                    "targetLockCamera", "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator",
+                                                                    "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality", "enhancedLighting",
@@ -1152,7 +1163,9 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting",
                             "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
                             "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
-                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
+                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
+                            "targetLockCamera", "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
+                            "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
         if (partial[key].is_bool()) s[key] = partial[key];
@@ -1597,6 +1610,17 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
     if (std::string_view(entry->game) == "mhfu" && s["invulnerableCarveQuest"].as_bool()) plan.args.push_back("--invulnerable-carve-quest");
     if (std::string_view(entry->game) == "mhfu" && s["keyQuestMarkers"].as_bool()) plan.args.push_back("--key-quest-markers");
     if (std::string_view(entry->game) == "mhfu" && s["betterSharpness"].as_bool()) plan.args.push_back("--better-sharpness");
+    if (std::string_view(entry->game) == "mhfu") {
+        if (s["targetLockCamera"].as_bool()) plan.args.push_back("--target-lock-camera");
+        if (s["skipQuestClearTimer"].as_bool()) plan.args.push_back("--skip-quest-clear-timer");
+        if (s["itemPouchLoadouts"].as_bool()) plan.args.push_back("--item-pouch-loadouts");
+        if (s["capturableIndicator"].as_bool()) plan.args.push_back("--capturable-indicator");
+        if (s["questStartTracker"].as_bool()) plan.args.push_back("--quest-start-tracker");
+        if (s["infiniteWhetstone"].as_bool()) plan.args.push_back("--infinite-whetstone");
+        if (s["damageNumbers"].as_bool()) plan.args.push_back("--damage-numbers");
+        if (s["comboBooksFromBox"].as_bool()) plan.args.push_back("--combo-books-from-box");
+        if (s["infinitePaintballs"].as_bool()) plan.args.push_back("--infinite-paintballs");
+    }
     if (s["hornSongs"].as_bool()) plan.args.push_back("--horn-songs");
     if (s["hornSongsPlace"].is_string()) { // even with the songs off: the in-game menu can turn them on while playing
         plan.args.push_back("--horn-songs-place");

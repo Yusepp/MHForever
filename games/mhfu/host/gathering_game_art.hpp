@@ -18,4 +18,7 @@ std::optional<GatheringArt> load_game_gathering_art(const std::filesystem::path 
                                                     const std::filesystem::path &executable, std::uint32_t hud_file,
                                                     std::uint32_t items_file, const psp::textures::Pack *pack = nullptr,
                                                     unsigned *replaced = nullptr);
+// Master localized text archive (item, weapon, and armor names) read from the player's own DATA.BIN.
+std::vector<std::uint8_t> load_game_text_archive(const std::filesystem::path &iso,
+                                                 const std::filesystem::path &executable);
 } // namespace mhf::mhfu

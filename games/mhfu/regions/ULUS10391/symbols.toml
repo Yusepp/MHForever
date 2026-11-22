@@ -99,6 +99,7 @@ mh_pad_input             = 0x08A62D84 # Pad*: this frame's buttons and sticks as
 mh_draw_done             = 0x08A62D65 # u8: set when the game's drawing for the frame is done (mh_draw_wait waits for it)
 # Dynamic Guild quest scaling: active quest header (+0x4C) and per-species scaling group (+0x14F).
 mh_enemy_species_table   = 0x09BB8AB0 # EnemySpecies[N] in game_task.ovl (stride 0x1D0, s8 scale_group at +0x14F)
+mh_enemy_manager         = 0x09C122B0 # EnemyManager* in game_task.ovl (Enemy*[20] at +0x1220)
 
 [offsets]
 system_active_overlays  = 0x00F7A580 # u16[6] inside System, active DATA.BIN file id per group (0xFFFF = none); built by the same instructions as in EU
@@ -158,3 +159,6 @@ mh_enemy_stagger_store = "game_task.ovl 0x09AD3D50 call" # before sh v1, 0x580(a
 # Call patches registered by --invulnerable-carve-quest: Player::process_damage and Player::process_roar_wind_tremor in Player::update.
 mh_carve_invuln_damage    = "game_task.ovl 0x09A666E4 call" # jal Player::process_damage (a0 is Player*)
 mh_carve_invuln_roar_wind = "game_task.ovl 0x09A667D4 call" # jal Player::process_roar_wind_tremor (a0 is Player*)
+mh_combine_rate_done      = "executable 0x0885C0D0 call" # epilogue of combine rate calc (v0 holds 0..100 or -1)
+mh_enemy_damage_apply     = "game_task.ovl 0x09AC7AC4 call" # Enemy::process_damage before subtracting sp+62 damage from Enemy+0x2E4 (s5=Enemy*)
+mh_item_box_update        = "lobby_task.ovl 0x09ADCCD0 call" # House & Guild Hall Item Box menu per-frame update

@@ -51,6 +51,7 @@ struct ControllerState {
     // up, 0 centred, 1 full right or down.
     float right_stick_x{};
     float right_stick_y{};
+    bool right_stick_click{}; // host-only R3 / right-stick press (not mapped to PSP buttons)
     // The host's mouse, while it is held for mouse look: its motion added up (pointer units, right and down positive).
     // Host hooks take the difference between two reads.
     double mouse_x{};

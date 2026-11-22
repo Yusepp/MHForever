@@ -168,7 +168,9 @@ struct Frontend::Impl {
     std::optional<overlay::SongSpot> song_spot; // where the player wants them (std::nullopt: the songs are off)
     bool songs_offered{}; // offer_songs: the Game tab turns them on and off
     bool songs_on{true};  // and they are on
-    std::vector<Frontend::GameOption> game_options; // add_game_option: the Game tab's options of the game
+    std::vector<Frontend::GameOption> game_options; // add_game_option: the QoL tab's options of the game
+    std::vector<Frontend::GameAction> game_actions; // add_game_action: interactive rows in the QoL tab
+    std::string qol_note;                           // transient feedback line shown in the QoL tab subtitle
     std::function<bool()> mouse_look;               // set_mouse_look
     bool hud_size_changed{}; // the Video tab changed the HUD's size: the controls file keeps it
     bool widescreen_known{}; // widescreen came from the launcher or the Video tab changed it: the controls file keeps it
@@ -198,10 +200,106 @@ struct Frontend::Impl {
     // Whose picture the overlay holds (written with overlay.mutex held): the songs give way to everything else and only
     // ever take down their own picture.
     std::shared_ptr<const std::vector<std::uint32_t>> game_image, game_image_shown;
+    int game_image_w = 480, game_image_h = 272;
+    std::vector<std::uint32_t> songs_pixels; // protected by overlay.mutex
+    int songs_w = 0, songs_h = 0;
+    float songs_aspect = 0.0f;
+    bool songs_active = false;
+    std::atomic<bool> game_input_suppressed{false};
+    std::atomic<std::uint32_t> raw_buttons{0};
     using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
     bool dialog_stop{};
     std::filesystem::path font_directory;
+
+    // Premultiplied-alpha Porter-Duff src-over composite of `src` onto `dst` (centered 16:9 if sizes differ).
+    static void composite_over(std::vector<std::uint32_t> &dst, int dw, int dh,
+                               const std::vector<std::uint32_t> &src, int sw, int sh) {
+        if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+        auto blend_px = [](std::uint32_t &d, std::uint32_t s) {
+            if (s == 0u) return;
+            const std::uint32_t sa = s >> 24u;
+            if (sa == 255u || d == 0u) {
+                d = s;
+                return;
+            }
+            const std::uint32_t inv = 255u - sa;
+            const std::uint32_t dr = d & 0xFFu, dg = (d >> 8u) & 0xFFu, db = (d >> 16u) & 0xFFu, da = d >> 24u;
+            const std::uint32_t sr = s & 0xFFu, sg = (s >> 8u) & 0xFFu, sb = (s >> 16u) & 0xFFu;
+            const std::uint32_t r = std::min<std::uint32_t>(255u, sr + (dr * inv + 127u) / 255u);
+            const std::uint32_t g = std::min<std::uint32_t>(255u, sg + (dg * inv + 127u) / 255u);
+            const std::uint32_t b = std::min<std::uint32_t>(255u, sb + (db * inv + 127u) / 255u);
+            const std::uint32_t a = std::min<std::uint32_t>(255u, sa + (da * inv + 127u) / 255u);
+            d = r | (g << 8u) | (b << 16u) | (a << 24u);
+        };
+        if (dw == sw && dh == sh) {
+            const std::size_t n = std::min(dst.size(), src.size());
+            for (std::size_t i = 0; i < n; ++i) blend_px(dst[i], src[i]);
+            return;
+        }
+        // Fit 480:272 source centered inside destination (handles widescreen overlays cleanly).
+        const int fit_w = std::min(dw, dh * 480 / 272);
+        const int fit_h = std::max(1, fit_w * 272 / 480);
+        const int ox = (dw - fit_w) / 2;
+        const int oy = (dh - fit_h) / 2;
+        for (int y = 0; y < fit_h; ++y) {
+            const int sy = std::min(sh - 1, (y * sh) / fit_h);
+            const int dy = oy + y;
+            if (dy < 0 || dy >= dh) continue;
+            const std::size_t srow = static_cast<std::size_t>(sy) * static_cast<std::size_t>(sw);
+            const std::size_t drow = static_cast<std::size_t>(dy) * static_cast<std::size_t>(dw);
+            for (int x = 0; x < fit_w; ++x) {
+                const int sx = std::min(sw - 1, (x * sw) / fit_w);
+                const std::uint32_t s = src[srow + static_cast<std::size_t>(sx)];
+                if (s == 0u) continue;
+                const int dx = ox + x;
+                if (dx >= 0 && dx < dw) blend_px(dst[drow + static_cast<std::size_t>(dx)], s);
+            }
+        }
+    }
+
+    // Publishes the combined songs/HUD-bar + game_image overlay; caller holds overlay.mutex.
+    void publish_quest_and_game_locked() {
+        const bool have_game = game_image != nullptr && !song_placing;
+        if (songs_active && have_game) {
+            overlay.pixels = songs_pixels;
+            composite_over(overlay.pixels, songs_w, songs_h, *game_image, game_image_w, game_image_h);
+            overlay.width = songs_w;
+            overlay.height = songs_h;
+            overlay.aspect = songs_aspect;
+            overlay.visible = true;
+            overlay_owner = OverlayOwner::songs;
+            game_image_shown = game_image;
+            ++overlay.generation;
+        } else if (songs_active) {
+            overlay.pixels = songs_pixels;
+            overlay.width = songs_w;
+            overlay.height = songs_h;
+            overlay.aspect = songs_aspect;
+            overlay.visible = true;
+            overlay_owner = OverlayOwner::songs;
+            game_image_shown.reset();
+            ++overlay.generation;
+        } else if (have_game) {
+            overlay.pixels = *game_image;
+            overlay.width = game_image_w;
+            overlay.height = game_image_h;
+            overlay.aspect = 0.0f;
+            overlay.visible = true;
+            overlay_owner = OverlayOwner::game;
+            game_image_shown = game_image;
+            ++overlay.generation;
+        } else {
+            overlay.pixels.clear();
+            overlay.width = 0;
+            overlay.height = 0;
+            overlay.aspect = 0.0f;
+            overlay.visible = false;
+            overlay_owner = OverlayOwner::none;
+            game_image_shown.reset();
+            ++overlay.generation;
+        }
+    }
 
     void dialog_worker() {
         for (;;) {
@@ -243,7 +341,8 @@ struct Frontend::Impl {
                     const std::optional<SongsView> songs_view = std::move(*songs_pending);
                     songs_pending.reset();
                     lock.unlock();
-                    if (overlay_owner != OverlayOwner::none && overlay_owner != OverlayOwner::songs) continue; // not its turn
+                    if (overlay_owner != OverlayOwner::none && overlay_owner != OverlayOwner::songs &&
+                        overlay_owner != OverlayOwner::game) continue; // not its turn
                     std::vector<std::uint32_t> pixels;
                     if (songs_view) {
                         if (!menu_renderer) menu_renderer = std::make_unique<overlay::MenuRenderer>(font_directory);
@@ -260,16 +359,16 @@ struct Frontend::Impl {
                                                          static_cast<float>(songs_view->hud_size) / 100.0f);
                     }
                     std::lock_guard overlay_lock(overlay.mutex);
-                    const bool free = overlay_owner == OverlayOwner::none || overlay_owner == OverlayOwner::songs;
+                    songs_pixels = std::move(pixels);
+                    songs_w = songs_view ? songs_view->width : 0;
+                    songs_h = songs_view ? songs_view->height : 0;
+                    songs_aspect = songs_view ? songs_view->aspect : 0.0f;
+                    songs_active = songs_view.has_value();
+                    hud_bar_published = songs_view && songs_view->bar.has_value();
+                    const bool free = overlay_owner == OverlayOwner::none || overlay_owner == OverlayOwner::songs ||
+                                      overlay_owner == OverlayOwner::game;
                     if (!menu_open && !dialog_visible && free) {
-                        overlay.pixels = std::move(pixels);
-                        overlay.width = songs_view ? songs_view->width : 0;
-                        overlay.aspect = songs_view ? songs_view->aspect : 0.0f;
-                        overlay.height = songs_view ? songs_view->height : 0;
-                        overlay.visible = songs_view.has_value();
-                        hud_bar_published = songs_view && songs_view->bar.has_value();
-                        overlay_owner = songs_view ? OverlayOwner::songs : OverlayOwner::none;
-                        ++overlay.generation;
+                        publish_quest_and_game_locked();
                     }
                     continue;
                 }
@@ -434,6 +533,7 @@ void Frontend::offer_songs(bool on, overlay::SongSpot spot) {
 }
 
 void Frontend::add_game_option(GameOption option) { impl_->game_options.push_back(std::move(option)); }
+void Frontend::add_game_action(GameAction action) { impl_->game_actions.push_back(std::move(action)); }
 
 void Frontend::set_mouse_look(std::function<bool()> wanted) { impl_->mouse_look = std::move(wanted); }
 
@@ -456,25 +556,52 @@ void Frontend::set_game_hint(std::string hint, std::vector<overlay::HintSprite> 
     impl_->game_hint_sprites = std::move(sprites);
 }
 
-void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image) {
-    if (image && image->size() != 480u * 272u) image.reset();
+void Frontend::set_game_input_suppressed(bool suppressed) {
+    impl_->game_input_suppressed.store(suppressed, std::memory_order_relaxed);
+}
+
+std::uint32_t Frontend::raw_buttons() const {
+    return impl_->raw_buttons.load(std::memory_order_relaxed);
+}
+
+std::pair<int, int> Frontend::overlay_size() const {
+    if (impl_->gpu_state != 1) return {480, 272};
+    int w = 0, h = 0;
+    impl_->host.window_pixel_size(w, h);
+    if (w <= 0 || h <= 0) return {480 * std::max(1, impl_->render_scale), 272 * std::max(1, impl_->render_scale)};
+    // Match the 480:272 aspect at native window pixel resolution (up to 4x = 1920x1088 for crisp fast Painter redraws).
+    const int fit_w = std::min(w, h * 480 / 272);
+    const int target_w = std::clamp(fit_w, 480, 1920);
+    const int target_h = std::max(272, target_w * 272 / 480);
+    return {target_w, target_h};
+}
+
+void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image, int width, int height) {
+    if (width <= 0 || height <= 0 || (image && image->size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height))) {
+        image.reset();
+    }
     Impl &impl = *impl_;
-    impl.game_image = image;
-    if (impl.gpu_state != 1) return;
+    if (impl.gpu_state != 1) {
+        impl.game_image = std::move(image);
+        impl.game_image_w = width;
+        impl.game_image_h = height;
+        return;
+    }
     std::lock_guard lock(impl.overlay.mutex);
+    const bool unchanged = (image == impl.game_image_shown && width == impl.game_image_w && height == impl.game_image_h);
+    impl.game_image = std::move(image);
+    impl.game_image_w = width;
+    impl.game_image_h = height;
     const auto owner = impl.overlay_owner.load();
-    const auto action = game_overlay_action(owner, image != nullptr, impl.menu_open || impl.dialog_visible || impl.song_placing);
-    if (action == GameOverlayAction::keep) return;
-    if (action == GameOverlayAction::hide) image.reset();
-    if (image == impl.game_image_shown && owner == Impl::OverlayOwner::game && image) return;
-    impl.overlay.pixels = image ? *image : std::vector<std::uint32_t>{};
-    impl.overlay.width = image ? 480 : 0;
-    impl.overlay.height = image ? 272 : 0;
-    impl.overlay.aspect = 0.0f;
-    impl.overlay.visible = image != nullptr;
-    impl.overlay_owner = image ? Impl::OverlayOwner::game : Impl::OverlayOwner::none;
-    impl.game_image_shown = std::move(image);
-    ++impl.overlay.generation;
+    if (impl.menu_open || impl.dialog_visible || impl.song_placing ||
+        owner == Impl::OverlayOwner::menu || owner == Impl::OverlayOwner::dialog || owner == Impl::OverlayOwner::notice) {
+        return;
+    }
+    if (unchanged && ((impl.game_image && (owner == Impl::OverlayOwner::game || owner == Impl::OverlayOwner::songs)) ||
+                      (!impl.game_image && (owner == Impl::OverlayOwner::none || (owner == Impl::OverlayOwner::songs && impl.songs_active))))) {
+        return;
+    }
+    impl.publish_quest_and_game_locked();
 }
 
 void Frontend::set_song_panel(std::optional<overlay::SongPanel> panel) {
@@ -741,7 +868,8 @@ enum MenuId {
     kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen,
     kVkEnhancedLighting, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
 };
-constexpr int kGameOptionBase = 3000; // the Game tab's options of the game: kGameOptionBase + an index into Impl::game_options
+constexpr int kGameOptionBase = 3000; // the QoL tab's options of the game: kGameOptionBase + an index into Impl::game_options
+constexpr int kGameActionBase = 4000; // the QoL tab's interactive actions: kGameActionBase + an index into Impl::game_actions
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
 
 // The ad hoc servers the Online section offers: the launcher's list (launcher/ui/src/servers.ts, keep the two alike).
@@ -995,8 +1123,10 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     quit.detail = "Return to the launcher. Unsaved progress will be lost.";
     quit.danger = true;
     overlay::MenuTab game{"Game", {resume, quit}, v.subtitle, {}};
-    // The game's options that change while playing (add_game_option); a row shown with a switch only while it is on.
-    if (!impl.game_options.empty()) game.items.push_back(menu_item(Kind::Heading, 0, "Enhancements"));
+
+    // Dedicated Gameplay QoL tab (mirrors the Vulkan tab layout with category headings).
+    overlay::MenuTab qol{"QoL", {}, impl.qol_note.empty() ? "Changes apply immediately." : impl.qol_note, {}};
+    std::string last_category;
     for (std::size_t i = 0; i < impl.game_options.size(); ++i) {
         const Frontend::GameOption &o = impl.game_options[i];
         // Shown while its switch is on, and that switch's own switch (the mouse's sensitivity needs the mouse camera,
@@ -1009,6 +1139,10 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             with_setting = &with->shown_with;
         }
         if (!shown) continue;
+        if (!o.category.empty() && o.category != last_category) {
+            qol.items.push_back(menu_item(Kind::Heading, 0, o.category));
+            last_category = o.category;
+        }
         overlay::MenuItem row = menu_item(o.slider ? Kind::Slider : Kind::Toggle, kGameOptionBase + static_cast<int>(i), o.label, o.value);
         row.detail = o.detail;
         if (o.slider) {
@@ -1016,27 +1150,44 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             row.max = o.max;
             row.step = o.step;
         }
-        game.items.push_back(row);
+        qol.items.push_back(row);
+    }
+    for (std::size_t i = 0; i < impl.game_actions.size(); ++i) {
+        const Frontend::GameAction &a = impl.game_actions[i];
+        if (!a.shown_with.empty()) {
+            const auto with = std::ranges::find(impl.game_options, a.shown_with, &Frontend::GameOption::setting);
+            if (with != impl.game_options.end() && with->value == 0) continue;
+        }
+        if (!a.category.empty() && a.category != last_category) {
+            qol.items.push_back(menu_item(Kind::Heading, 0, a.category));
+            last_category = a.category;
+        }
+        overlay::MenuItem row = menu_item(a.choices.empty() ? Kind::Button : Kind::Choice,
+                                          kGameActionBase + static_cast<int>(i), a.label, a.value);
+        row.detail = a.detail;
+        row.options = a.choices;
+        row.enabled = !a.enabled || a.enabled();
+        qol.items.push_back(std::move(row));
     }
     if (impl.song_spot && impl.songs_offered) { // the songs can be shown: the player turns them on and off here
-        game.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
+        qol.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
         overlay::MenuItem on = menu_item(Kind::Toggle, kSongsOn, "Show hunting horn songs", impl.songs_on ? 1 : 0);
         on.detail = "Shows the horn's songs, the song being played and active effects during quests.";
-        game.items.push_back(on);
+        qol.items.push_back(on);
     }
     if (impl.song_spot && impl.songs_on) { // the hunting horn's songs are on (the launcher's setting, or the switch above)
-        if (!impl.songs_offered) game.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
+        if (!impl.songs_offered) qol.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
         // A spot of the player's own selects none of the places.
         const bool own = impl.song_spot->place == overlay::SongPlace::custom;
         overlay::MenuItem place = menu_item(Kind::Choice, kSongPlace, "Position", own ? -1 : static_cast<int>(impl.song_spot->place));
         for (const std::string_view label : overlay::kSongPlaceLabels) place.options.emplace_back(label);
         place.detail = own ? "Custom position." : "Position of the song list during quests.";
-        game.items.push_back(place);
+        qol.items.push_back(place);
         overlay::MenuItem move = menu_item(Kind::Button, kSongMove, "Move them anywhere");
         move.detail = impl.songs_seen ? "Drag with the mouse, or use the arrow keys or the D-pad."
                                       : "Available after a quest with a hunting horn.";
-        move.enabled = impl.songs_seen.has_value() && impl.gpu_state == 1; // only the OpenGL renderer shows them
-        game.items.push_back(move);
+        move.enabled = impl.songs_seen.has_value() && impl.gpu_state == 1; // only the GPU renderer shows them
+        qol.items.push_back(move);
     }
 
     overlay::MenuTab audio{"Audio", {menu_item(Kind::Slider, kMusic, "Music", impl.music_volume),
@@ -1127,7 +1278,10 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     }
     controls.items.push_back(stick);
     controls.items.push_back(menu_item(Kind::Button, kRestorePad, "Restore controller defaults"));
-    v.tabs = {game, audio, video};
+    v.tabs = {game};
+    if (!qol.items.empty()) v.tabs.push_back(std::move(qol));
+    v.tabs.push_back(audio);
+    v.tabs.push_back(video);
     if (impl.backend == GraphicsBackend::Vulkan && impl.gpu_state == 1) {
         const bool lit_on = impl.live.enhanced_lighting.load(std::memory_order_relaxed);
         const std::uint32_t mask = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
@@ -1502,6 +1656,12 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
                 if (row != rows.end() && e.action < static_cast<int>(row->actions.size())) {
                     friend_pressed(impl, rt, static_cast<std::size_t>(e.id - kFriendBase), row->actions[static_cast<std::size_t>(e.action)]);
                 }
+            } else if (e.id >= kGameActionBase && e.id < kGameActionBase + static_cast<int>(impl.game_actions.size())) {
+                Frontend::GameAction &a = impl.game_actions[static_cast<std::size_t>(e.id - kGameActionBase)];
+                if (a.choices.empty() && (!a.enabled || a.enabled()) && a.triggered) {
+                    impl.qol_note = a.triggered(a.value);
+                    refresh_menu(impl);
+                }
             } else if (e.id >= kKeyBase && e.id < kPadBase + static_cast<int>(kPadButtons)) { // a Controls row: wait for the new key or button
                 const bool same = impl.capture_id == e.id;
                 impl.capture_id = same ? 0 : e.id;
@@ -1520,6 +1680,15 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
         refresh_menu(impl);
         return true;
     case overlay::Menu::Event::Kind::Changed:
+        if (e.id >= kGameActionBase && e.id < kGameActionBase + static_cast<int>(impl.game_actions.size())) {
+            Frontend::GameAction &a = impl.game_actions[static_cast<std::size_t>(e.id - kGameActionBase)];
+            if (!a.choices.empty()) {
+                a.value = std::clamp(e.value, 0, static_cast<int>(a.choices.size()) - 1);
+                if (a.triggered) impl.qol_note = a.triggered(a.value);
+                refresh_menu(impl);
+            }
+            return true;
+        }
         if (e.id >= kGameOptionBase && e.id < kGameOptionBase + static_cast<int>(impl.game_options.size())) {
             Frontend::GameOption &o = impl.game_options[static_cast<std::size_t>(e.id - kGameOptionBase)];
             o.value = o.slider ? std::clamp(e.value, o.min, o.max) : (e.value != 0 ? 1 : 0);
@@ -2035,6 +2204,7 @@ ControllerState map_input(const host::GamepadState &g) {
     s.ly = axis(g.left_y);
     s.right_stick_x = std::clamp(g.right_x, -1.0f, 1.0f);
     s.right_stick_y = std::clamp(g.right_y, -1.0f, 1.0f);
+    s.right_stick_click = g.right_stick_click;
     return s;
 }
 
@@ -2110,10 +2280,11 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                 show_songs(*impl, *runtime);
             } else {
                 ControllerState state = map_input(pad);
+                impl->raw_buttons.store(state.buttons, std::memory_order_relaxed);
                 // A held Circle that closed the menu belongs to the menu until released.
                 if (impl->game_hint_input_latched) state.buttons &= ~buttons::kCircle;
                 impl->host.mouse_motion(state.mouse_x, state.mouse_y);
-                set_controller_state(*runtime, state);
+                set_controller_state(*runtime, impl->game_input_suppressed.load(std::memory_order_relaxed) ? idle : state);
                 update_dialogs(*impl, *runtime);
                 watch_friends(*impl, *runtime);
                 show_songs(*impl, *runtime);

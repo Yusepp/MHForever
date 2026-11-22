@@ -153,4 +153,38 @@ std::optional<GatheringArt> load_game_gathering_art(const std::filesystem::path 
         return {}; // Unsupported/missing input keeps the text fallback.
     }
 }
+
+std::vector<std::uint8_t> load_game_text_archive(const std::filesystem::path &iso_path,
+                                                 const std::filesystem::path &executable) {
+    try {
+        std::ifstream file(executable, std::ios::binary | std::ios::ate);
+        if (!file || file.tellg() <= 0 || file.tellg() > 16 * 1024 * 1024) return {};
+        std::vector<std::uint8_t> exe(static_cast<std::size_t>(file.tellg()));
+        file.seekg(0);
+        if (!file.read(reinterpret_cast<char *>(exe.data()), static_cast<std::streamsize>(exe.size()))) return {};
+        psp::IsoImage iso(iso_path);
+        const auto entry = iso.find("/PSP_GAME/USRDIR/DATA.BIN");
+        if (!entry) return {};
+        const auto data = DataBin::open(
+            [&](std::uint64_t offset, std::size_t size) {
+                if (size > 2 * 1024 * 1024) throw std::runtime_error("text archive read exceeds limit");
+                return iso.read_file(*entry, offset, size);
+            },
+            entry->size, find_substitution_table_candidates(exe));
+        if (!data) return {};
+        // Master text archive lives at file 15 on JP/FUComplete (and nearby in EU/US); validate header & size.
+        for (std::uint32_t id = 15; id <= 25 && id < data->files().size(); ++id) {
+            const auto sz = data->files()[id].size;
+            if (sz < 65536u || sz > 2 * 1024 * 1024) continue;
+            auto bytes = data->read(id);
+            if (bytes.size() < 72u) continue;
+            const std::uint32_t num_groups = word(bytes, 0);
+            const std::uint32_t table_off = word(bytes, 4);
+            if (num_groups >= 16u && num_groups <= 40u && table_off == 8u) return bytes;
+        }
+        return {};
+    } catch (const std::exception &) {
+        return {};
+    }
+}
 } // namespace mhf::mhfu

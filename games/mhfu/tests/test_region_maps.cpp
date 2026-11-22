@@ -124,12 +124,20 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_sharpness_")) {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             sharpness_patches.insert(p.patch.name);
+        } else if (p.patch.name == "mh_combine_rate_done") {
+            MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+        } else if (p.patch.name == "mh_enemy_damage_apply") {
+            MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+        } else if (p.patch.name == "mh_item_box_update") {
+            MHF_CHECK(p.module == "lobby_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
         } else if (p.patch.name.starts_with("mh_enemy_")) {
             MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             guild_scaling_patches.insert(p.patch.name);
         } else if (p.patch.name.starts_with("mh_quest_markers_")) {
             MHF_CHECK(p.module == "lobby_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             quest_patches.insert(p.patch.name);
+        } else if (p.patch.name == "mh_minimap_enemy_color") {
+            MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
         } else {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             (p.patch.name.starts_with("mh_camera_aspect_") ? aspect_patches : camera_patches).insert(p.patch.name);
@@ -156,7 +164,8 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
               std::set<std::string>({"mh_enemy_hp_begin", "mh_enemy_hp_computed", "mh_enemy_stagger_store"}));
     for (const char *table : {"mh_smithy_panel_layout", "mh_smithy_side_layout", "mh_smithy_question_box",
                               "mh_smithy_skill_info_hint", "mh_smithy_model_scissor", "mh_smithy_panel_draw_entry",
-                              "mh_pad_input", "mh_draw_done", "mh_quest_manager", "mh_enemy_species_table"}) {
+                              "mh_pad_input", "mh_draw_done", "mh_quest_manager", "mh_enemy_species_table",
+                              "mh_enemy_manager"}) {
         MHF_CHECK(entries.contains(table) && entries.at(table).has_value());
     }
     MHF_CHECK(entries.contains("mh_smithy_create_info_setup") && entries.at("mh_smithy_create_info_setup").has_value());

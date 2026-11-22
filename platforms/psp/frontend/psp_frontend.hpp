@@ -105,8 +105,20 @@ public:
         int value = 0, min = 0, max = 1, step = 1;
         std::string shown_with; // the setting of a switch that must be on for this row to show ("analogCamera")
         std::function<void(int)> changed; // runs on the game's thread when the player changes it
+        std::string category; // optional section heading inside the QoL tab
     };
     void add_game_option(GameOption option);
+    // An interactive action or choice row in the QoL tab (e.g. Item Pouch Loadouts in Village/Hall).
+    struct GameAction {
+        std::string label, detail;
+        std::string shown_with; // optional GameOption::setting that must be on
+        std::string category;
+        std::vector<std::string> choices; // non-empty: Choice row; empty: Button row
+        int value = 0;
+        std::function<bool()> enabled;     // optional predicate (default: always enabled)
+        std::function<std::string(int)> triggered; // runs on game thread; optional status note returned
+    };
+    void add_game_action(GameAction action);
     // The hunting horn's songs (overlay/song_panel.hpp), from the `extra` poll: shown at their place while the game draws
     // its quest HUD and no menu, system dialog or notice is up; std::nullopt (no horn, not in a quest) hides them. Only
     // the OpenGL renderer finds the quest HUD, so the software renderer never shows them.
@@ -118,9 +130,15 @@ public:
     // A short game-provided action prompt; hidden with the quest HUD and while menus are open.
     void set_game_hint(std::string hint, std::vector<overlay::HintSprite> sprites = {});
     [[nodiscard]] bool game_input_blocked() const;
-    // A game's own transparent 480x272 image, in premultiplied RGBA. A null image hides it. Reuse the same shared
-    // image until its pixels change; the frontend uploads it only on a change and gives menus and dialogs priority.
-    void set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image);
+    // Suppresses guest PSP controller input (e.g. while an in-game QoL modal panel is open) while keeping
+    // raw host buttons readable via raw_buttons().
+    void set_game_input_suppressed(bool suppressed);
+    [[nodiscard]] std::uint32_t raw_buttons() const;
+    // Native pixel size of the 16:9 overlay canvas (matches window/internal resolution, capped at 1920x1088).
+    [[nodiscard]] std::pair<int, int> overlay_size() const;
+    // A game's own transparent premultiplied RGBA image (default 480x272, or native HD width x height).
+    // A null image hides it. Reuse the same shared image until its pixels change.
+    void set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image, int width = 480, int height = 272);
 
     // Mouse look: while `wanted` says so and the game has the input (no menu, system dialog or song placing), the mouse
     // is held in the window and its motion reaches the game's hooks (ControllerState::mouse_x and mouse_y). Asked on the

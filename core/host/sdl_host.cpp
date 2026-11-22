@@ -374,6 +374,7 @@ GamepadState SdlHost::input() const {
     s.right = held(k.right);
     s.left_x = (held(k.stick_right) ? 1.0f : 0.0f) - (held(k.stick_left) ? 1.0f : 0.0f);
     s.left_y = (held(k.stick_down) ? 1.0f : 0.0f) - (held(k.stick_up) ? 1.0f : 0.0f);
+    s.right_stick_click = down[SDL_SCANCODE_TAB] || (mouse & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) != 0;
     for (auto *g : impl_->gamepads) {
         const PadMapping &p = impl_->pad; // the player's bindings, in the order of kPadActions
         s.south |= pad_pressed(g, p.buttons[0]);
@@ -385,6 +386,7 @@ GamepadState SdlHost::input() const {
         s.start |= pad_pressed(g, p.buttons[6]);
         s.select |= pad_pressed(g, p.buttons[7]);
         s.guide |= SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_GUIDE);
+        s.right_stick_click |= SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
         s.up |= pad_pressed(g, p.buttons[8]);
         s.down |= pad_pressed(g, p.buttons[9]);
         s.left |= pad_pressed(g, p.buttons[10]);
