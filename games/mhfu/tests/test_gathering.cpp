@@ -70,5 +70,20 @@ int main() {
     MHF_CHECK(carve.kind == GatheringKind::carve && carve.available && !carve.tool_slot);
     in.exhausted = true;
     MHF_CHECK(!decide_gathering(in).available);
+    // Base camp Blue Supply Box and Red Delivery Box decisions.
+    GatheringInput box{};
+    box.supply_box = true;
+    auto sup = decide_gathering(box);
+    MHF_CHECK(sup.kind == GatheringKind::supply_box && sup.available);
+    box.exhausted = true;
+    MHF_CHECK(!decide_gathering(box).available);
+    box = {};
+    box.delivery_box = true;
+    box.has_deliverable = false;
+    auto del_no = decide_gathering(box);
+    MHF_CHECK(del_no.kind == GatheringKind::delivery_box && !del_no.available);
+    box.has_deliverable = true;
+    auto del_ok = decide_gathering(box);
+    MHF_CHECK(del_ok.kind == GatheringKind::delivery_box && del_ok.available);
     return mhf::test::finish("test_gathering");
 }
