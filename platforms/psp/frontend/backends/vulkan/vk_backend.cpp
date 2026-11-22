@@ -426,9 +426,38 @@ private:
     std::chrono::steady_clock::time_point flip_time_{};
     std::chrono::steady_clock::duration flip_period_{std::chrono::microseconds(33333)};
     std::chrono::steady_clock::time_point next_subframe_at_{};
+
+    // Optional per-stage profiler enabled via MHF_VK_PROFILE=1 (zero overhead when off).
+    struct ProfStats {
+        bool enabled = false;
+        std::uint64_t frames = 0;
+        std::uint64_t draws = 0;
+        std::uint64_t batches = 0;
+        std::uint64_t raw_verts = 0;
+        std::uint64_t flat_verts = 0;
+        std::uint64_t tex_hits = 0;
+        std::uint64_t tex_misses = 0;
+        std::uint64_t pack_queries = 0;
+        std::uint64_t interp_calls = 0;
+        std::uint64_t apply_ns = 0;
+        std::uint64_t batch_ns = 0;
+        std::uint64_t draw_start_ns = 0;
+        std::uint64_t match_ns = 0;
+        std::uint64_t up_raw_ns = 0;
+        std::uint64_t interp_ns = 0;
+        std::uint64_t light_ns = 0;
+        std::uint64_t wait_gpu_ns = 0;
+        std::uint64_t acq_ns = 0;
+        std::uint64_t pres_ns = 0;
+        std::chrono::steady_clock::time_point window_start{};
+    } prof_{};
 };
 
 bool VkBackend::init() {
+    if (const char *v = std::getenv("MHF_VK_PROFILE"); v != nullptr && v[0] == '1') {
+        prof_.enabled = true;
+        prof_.window_start = std::chrono::steady_clock::now();
+    }
     if (!ctx_.init(window_)) return false;
 
     int pw = 0, ph = 0;
@@ -573,7 +602,12 @@ void VkBackend::collect_retired(std::uint64_t completed) {
 void VkBackend::ensure_recording() {
     if (recording_) return;
     FrameSlice &f = frames_[frame_slot_];
+    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     ctx_.wait_timeline(ctx_.graphics_timeline, f.timeline_value);
+    if (prof_.enabled) {
+        prof_.wait_gpu_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    }
     collect_retired(ctx_.query_timeline(ctx_.graphics_timeline));
 
     vkResetCommandPool(ctx_.device, f.pool, 0);
@@ -753,6 +787,17 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 
     if (have_state_ && key == state_key_) return;
     draw_batch();
+    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    struct ApplyScope {
+        ProfStats &p;
+        std::chrono::steady_clock::time_point start;
+        ~ApplyScope() {
+            if (p.enabled) {
+                p.apply_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    } prof_scope{prof_, t0};
 
     state_key_ = key;
     have_state_ = true;
@@ -861,11 +906,13 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                              (ge.clut_generation() * 0xBF58476D1CE4E5B9ull);
             }
             if (const auto fit = frame_tex_cache_.find(param_key); fit != frame_tex_cache_.end()) {
+                if (prof_.enabled) ++prof_.tex_hits;
                 setup_.tex_slot = fit->second.tex_slot;
                 setup_.texture_mips = fit->second.texture_mips;
                 setup_.linear_override = fit->second.linear_override;
                 std::copy_n(fit->second.uv_xform, 4, setup_.uv_xform);
             } else {
+                if (prof_.enabled) ++prof_.tex_misses;
                 // Compute content hash ONCE per unique texture per frame.
                 const std::uint64_t h = ge.texture_hash();
                 if (!setup_.through && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
@@ -880,6 +927,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                     const bool need_query = (pit == pack_cache_.end()) ||
                                             (pit->second.pending && pit->second.last_try_frame != frame_number_);
                     if (need_query) {
+                        if (prof_.enabled) ++prof_.pack_queries;
                         textures::TextureFacts facts{};
                         facts.address = info.address;
                         facts.buffer_width = info.stride;
@@ -992,6 +1040,18 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 
 void VkBackend::draw_batch() {
     if (batch_.empty()) return;
+    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (prof_.enabled) ++prof_.batches;
+    struct BatchScope {
+        ProfStats &p;
+        std::chrono::steady_clock::time_point start;
+        ~BatchScope() {
+            if (p.enabled) {
+                p.batch_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    } prof_scope{prof_, t0};
     auto rt_it = targets_.find(setup_.target);
     if (rt_it == targets_.end()) {
         batch_.clear();
@@ -1250,6 +1310,18 @@ void VkBackend::draw_batch() {
 }
 
 void VkBackend::draw_started(const gpu::DrawInfo &draw) {
+    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (prof_.enabled) ++prof_.draws;
+    struct DrawStartScope {
+        ProfStats &p;
+        std::chrono::steady_clock::time_point start;
+        ~DrawStartScope() {
+            if (p.enabled) {
+                p.draw_start_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    } prof_scope{prof_, t0};
     cur_layer_ = draw.layer;
     const auto sum = (!draw.through && !draw.clear) || subframes_ > 1 ? interpolation::summarize(draw)
                                                                       : interpolation::DrawSummary{};
@@ -1974,8 +2046,13 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
     }
 
     std::uint32_t img_idx = 0;
+    const auto acq_t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     VkResult acq = vkAcquireNextImageKHR(ctx_.device, swapchain_.handle, UINT64_MAX,
                                          frames_[frame_slot_].image_available, VK_NULL_HANDLE, &img_idx);
+    if (prof_.enabled) {
+        prof_.acq_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acq_t0).count());
+    }
     if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
         submit_recorded_without_present();
         if (swapchain_.recreate(ctx_, pw, ph)) {
@@ -2121,7 +2198,12 @@ void VkBackend::submit_and_present(std::uint32_t swap_img_idx) {
 #ifdef VK_KHR_PRESENT_WAIT_EXTENSION_NAME
     // Hardware scanout backpressure (keeps presentation queue depth bounded to 1 without busy-wait).
     if (ctx_.caps.present_wait && vkWaitForPresentKHR && swapchain_.next_present_id > 3u) {
+        const auto pw_t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         vkWaitForPresentKHR(ctx_.device, swapchain_.handle, swapchain_.next_present_id - 3u, 8'000'000ULL);
+        if (prof_.enabled) {
+            prof_.pres_ns += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - pw_t0).count());
+        }
     }
 #endif
 
@@ -2203,6 +2285,17 @@ bool VkBackend::upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVer
 void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in) {
     if (!lighting_.ready() || !live_->enhanced_lighting.load(std::memory_order_relaxed)) return;
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE || rt.depth.bindless_slot == 0) return;
+    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    struct LightScope {
+        ProfStats &p;
+        std::chrono::steady_clock::time_point start;
+        ~LightScope() {
+            if (p.enabled) {
+                p.light_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    } prof_scope{prof_, t0};
 
     const std::uint32_t w = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
     const std::uint32_t h = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
@@ -2228,6 +2321,18 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
 }
 
 void VkBackend::render_interpolated_subframe(float phase) {
+    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (prof_.enabled) ++prof_.interp_calls;
+    struct InterpScope {
+        ProfStats &p;
+        std::chrono::steady_clock::time_point start;
+        ~InterpScope() {
+            if (p.enabled) {
+                p.interp_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    } prof_scope{prof_, t0};
     SnapRawBuf &cur_old_buf = snap_raw_old_[snap_buf_idx_];
     SnapRawBuf &cur_new_buf = snap_raw_new_[snap_buf_idx_];
     if (!interp_can_blend_ || blend_older_.raw_verts.empty() || cur_old_buf.buf == VK_NULL_HANDLE) {
@@ -2693,13 +2798,25 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             if (have_gpu_frame && !blend_older_.unblendable && !blend_newer_.unblendable &&
                 !blend_older_.raw_verts.empty() && interpolator_.ready()) {
                 interpolation::CutThresholds thr{};
+                const auto mt0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 last_matching_ = interpolator_.matcher().match(blend_older_.summaries, blend_newer_.summaries, thr);
+                if (prof_.enabled) {
+                    prof_.match_ns += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - mt0).count());
+                }
                 if (last_matching_.cut == nullptr) {
                     last_cam_motion_ = last_matching_.camera_found ? interpolation::rigid_motion(last_matching_.camera)
                                                                    : interpolation::RigidMotion{};
+                    const auto ut0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                     snap_buf_idx_ = 1 - snap_buf_idx_;
                     const bool ok_old = upload_snap_raw(snap_raw_old_[snap_buf_idx_], blend_older_.raw_verts);
                     (void)upload_snap_raw(snap_raw_new_[snap_buf_idx_], blend_newer_.raw_verts);
+                    if (prof_.enabled) {
+                        prof_.up_raw_ns += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ut0).count());
+                        prof_.raw_verts += blend_older_.raw_verts.size();
+                        prof_.flat_verts += blend_older_.flat_verts.size();
+                    }
                     interp_can_blend_ = ok_old;
                 } else {
                     interpolator_.matcher().forget_motion();
@@ -2744,6 +2861,42 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     }
     apply_live_scale();
     apply_live_fps();
+
+    if (prof_.enabled) {
+        ++prof_.frames;
+        if (prof_.frames >= 30u) {
+            const auto pnow = std::chrono::steady_clock::now();
+            const double sec = std::chrono::duration<double>(pnow - prof_.window_start).count();
+            const double inv_f = 1.0 / static_cast<double>(prof_.frames);
+            const double ms = 1e-6 * inv_f;
+            std::fprintf(stderr,
+                "[vk][prof] gameFPS=%.1f draws=%.0f batches=%.0f rawV=%.0f flatV=%.0f texHit=%.0f texMiss=%.0f packQ=%.0f | "
+                "apply=%.2fms batch=%.2fms drawStart=%.2fms match=%.2fms upRaw=%.2fms interp=%.2fms(%.1fx) light=%.2fms waitGPU=%.2fms acq=%.2fms pres=%.2fms\n",
+                sec > 0.0 ? static_cast<double>(prof_.frames) / sec : 0.0,
+                static_cast<double>(prof_.draws) * inv_f,
+                static_cast<double>(prof_.batches) * inv_f,
+                static_cast<double>(prof_.raw_verts) * inv_f,
+                static_cast<double>(prof_.flat_verts) * inv_f,
+                static_cast<double>(prof_.tex_hits) * inv_f,
+                static_cast<double>(prof_.tex_misses) * inv_f,
+                static_cast<double>(prof_.pack_queries) * inv_f,
+                static_cast<double>(prof_.apply_ns) * ms,
+                static_cast<double>(prof_.batch_ns) * ms,
+                static_cast<double>(prof_.draw_start_ns) * ms,
+                static_cast<double>(prof_.match_ns) * ms,
+                static_cast<double>(prof_.up_raw_ns) * ms,
+                static_cast<double>(prof_.interp_ns) * ms,
+                static_cast<double>(prof_.interp_calls) * inv_f,
+                static_cast<double>(prof_.light_ns) * ms,
+                static_cast<double>(prof_.wait_gpu_ns) * ms,
+                static_cast<double>(prof_.acq_ns) * ms,
+                static_cast<double>(prof_.pres_ns) * ms);
+            std::fflush(stderr);
+            prof_ = ProfStats{};
+            prof_.enabled = true;
+            prof_.window_start = pnow;
+        }
+    }
 }
 
 std::optional<std::chrono::steady_clock::time_point> VkBackend::next_wakeup() const {
