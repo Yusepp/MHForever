@@ -49,6 +49,11 @@ vec3 multi_bounce_ao(float ao, vec3 albedo) {
     return max(vec3(ao), ((ao * a + b) * ao + c) * ao);
 }
 
+// Triangular IGN dither for 8-bit debanding (eliminates banding in fog, skies & dark cave ceilings).
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
 // Gentle highlight-preserving filmic shoulder: exact identity below 0.85 so bright snow & midtones
 // stay faithful to MHFU art, with C1-smooth asymptotic rolloff above 0.85 for HDR bloom/shafts.
 vec3 soft_filmic(vec3 x) {
@@ -162,11 +167,21 @@ void main() {
         col = col * vol.a + vol.rgb;
     }
 
-    // 6. Selective emissive bloom (campfires, fireballs, lightning, magma, snow glare).
+    // 6. Selective emissive bloom + subtle rising heat-shimmer on warm fire/lava halos (100% race-free).
     if (p.aux_slots.x != 0u && p.bloom_rim.y > 0.001) {
         vec3 bloom = texture(sampler2D(u_textures[nonuniformEXT(p.aux_slots.x)],
                                        u_samplers[nonuniformEXT(p.aux_slots.y)]),
                              uv).rgb;
+        float warm_fire = clamp((bloom.r - bloom.b * 1.35) * 3.0, 0.0, 1.0);
+        if (warm_fire > 0.05) {
+            float phase = p.sun_screen.w * 0.22;
+            vec2 heat_off = vec2(sin(uv.y * 55.0 + phase) * 0.0014,
+                                 -abs(cos(uv.x * 42.0 - phase * 0.8)) * 0.0018) * warm_fire;
+            vec3 bloom_haze = texture(sampler2D(u_textures[nonuniformEXT(p.aux_slots.x)],
+                                                u_samplers[nonuniformEXT(p.aux_slots.y)]),
+                                      clamp(uv + heat_off, vec2(0.001), vec2(0.999))).rgb;
+            bloom = mix(bloom, bloom_haze, 0.55);
+        }
         col += bloom * p.bloom_rim.y;
     }
 
@@ -180,7 +195,9 @@ void main() {
         col = mix(vec3(luma), col, 1.0 + vib);
     }
 
-    // 8. Gentle C1-smooth highlight rolloff so bright snow stays crisp white while HDR blooms never clip.
-    col = clamp(soft_filmic(col), vec3(0.0), vec3(1.0));
+    // 8. Gentle C1-smooth highlight rolloff + triangular IGN debanding before RGBA8 store.
+    col = soft_filmic(col);
+    float dither = (ign(vec2(ip)) + ign(vec2(ip) + vec2(17.0, 31.0)) - 1.0) / 255.0;
+    col = clamp(col + vec3(dither), vec3(0.0), vec3(1.0));
     imageStore(u_scene_color, ip, vec4(col, scene.a));
 }
