@@ -200,6 +200,9 @@ struct Frontend::Impl {
     // Whose picture the overlay holds (written with overlay.mutex held): the songs give way to everything else and only
     // ever take down their own picture.
     std::shared_ptr<const std::vector<std::uint32_t>> game_image, game_image_shown;
+    int game_image_w = 480, game_image_h = 272;
+    std::atomic<bool> game_input_suppressed{false};
+    std::atomic<std::uint32_t> raw_buttons{0};
     using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
     bool dialog_stop{};
@@ -459,10 +462,34 @@ void Frontend::set_game_hint(std::string hint, std::vector<overlay::HintSprite> 
     impl_->game_hint_sprites = std::move(sprites);
 }
 
-void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image) {
-    if (image && image->size() != 480u * 272u) image.reset();
+void Frontend::set_game_input_suppressed(bool suppressed) {
+    impl_->game_input_suppressed.store(suppressed, std::memory_order_relaxed);
+}
+
+std::uint32_t Frontend::raw_buttons() const {
+    return impl_->raw_buttons.load(std::memory_order_relaxed);
+}
+
+std::pair<int, int> Frontend::overlay_size() const {
+    if (impl_->gpu_state != 1) return {480, 272};
+    int w = 0, h = 0;
+    impl_->host.window_pixel_size(w, h);
+    if (w <= 0 || h <= 0) return {480 * std::max(1, impl_->render_scale), 272 * std::max(1, impl_->render_scale)};
+    // Match the 480:272 aspect at native window pixel resolution (up to 4x = 1920x1088 for crisp fast Painter redraws).
+    const int fit_w = std::min(w, h * 480 / 272);
+    const int target_w = std::clamp(fit_w, 480, 1920);
+    const int target_h = std::max(272, target_w * 272 / 480);
+    return {target_w, target_h};
+}
+
+void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>> image, int width, int height) {
+    if (width <= 0 || height <= 0 || (image && image->size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height))) {
+        image.reset();
+    }
     Impl &impl = *impl_;
     impl.game_image = image;
+    impl.game_image_w = width;
+    impl.game_image_h = height;
     if (impl.gpu_state != 1) return;
     std::lock_guard lock(impl.overlay.mutex);
     const auto owner = impl.overlay_owner.load();
@@ -471,8 +498,8 @@ void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>
     if (action == GameOverlayAction::hide) image.reset();
     if (image == impl.game_image_shown && owner == Impl::OverlayOwner::game && image) return;
     impl.overlay.pixels = image ? *image : std::vector<std::uint32_t>{};
-    impl.overlay.width = image ? 480 : 0;
-    impl.overlay.height = image ? 272 : 0;
+    impl.overlay.width = image ? width : 0;
+    impl.overlay.height = image ? height : 0;
     impl.overlay.aspect = 0.0f;
     impl.overlay.visible = image != nullptr;
     impl.overlay_owner = image ? Impl::OverlayOwner::game : Impl::OverlayOwner::none;
@@ -2156,10 +2183,11 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                 show_songs(*impl, *runtime);
             } else {
                 ControllerState state = map_input(pad);
+                impl->raw_buttons.store(state.buttons, std::memory_order_relaxed);
                 // A held Circle that closed the menu belongs to the menu until released.
                 if (impl->game_hint_input_latched) state.buttons &= ~buttons::kCircle;
                 impl->host.mouse_motion(state.mouse_x, state.mouse_y);
-                set_controller_state(*runtime, state);
+                set_controller_state(*runtime, impl->game_input_suppressed.load(std::memory_order_relaxed) ? idle : state);
                 update_dialogs(*impl, *runtime);
                 watch_friends(*impl, *runtime);
                 show_songs(*impl, *runtime);
