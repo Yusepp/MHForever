@@ -1629,9 +1629,6 @@ std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32
         killcam_ram_addr_ = addr;
         killcam_ram_bpp_ = bpp;
         killcam_ram_slot_ = best_idx;
-        std::fprintf(stderr, "[vk][killcam] matched hi-res %ux%u snapshot for %ux%u (stride=%u, fmt=%u, err=%u)\n",
-                     killcam_slots_[best_idx].image.width, killcam_slots_[best_idx].image.height,
-                     tex_w, tex_h, tex_stride, tex_fmt, best_err / 48u);
         return killcam_slots_[best_idx].image.bindless_slot;
     }
     return 0u;
