@@ -57,6 +57,9 @@ private:
 
     VkCommandPool transfer_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer transfer_cmd_ = VK_NULL_HANDLE;
+    VkFence upload_fence_ = VK_NULL_HANDLE;
+    std::uint64_t last_upload_frame_ = UINT64_MAX;
+    std::uint32_t uploads_this_frame_ = 0;
 
     std::unordered_map<std::string, PackGpuImage> uploaded_;
     std::size_t total_vram_bytes_ = 0;

@@ -43,7 +43,7 @@ constexpr int kFramesInFlight = 2;
 constexpr std::size_t kVertexRingBytes = 32u * 1024u * 1024u;
 constexpr std::size_t kParamsRingBytes = 8u * 1024u * 1024u;
 constexpr std::size_t kStagingRingBytes = 32u * 1024u * 1024u;
-constexpr std::size_t kMaxCachedTextures = 4096u;
+constexpr std::size_t kMaxCachedTextures = 8192u;
 
 VkBlendFactor psp_blend_factor(std::uint32_t f, bool is_src, std::uint32_t fix, bool &uses_constant) noexcept {
     switch (f) {
@@ -768,7 +768,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
             cur_light_in_.has_psp_fog = true;
         }
-        if ((ge.reg(kTextureMapEnable) & 1u) != 0) {
+        if ((ge.reg(kTextureMapEnable) & 1u) != 0 && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
             lighting_.note_texture_hash(ge.texture_hash());
         }
     }

@@ -37,7 +37,9 @@ bool PackStreamer::init(const Context &ctx, const std::string &pack_folder, cons
     if (vkCreateCommandPool(ctx.device, &cpci, nullptr, &transfer_pool_) != VK_SUCCESS) return false;
     VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr,
                                      transfer_pool_, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-    return vkAllocateCommandBuffers(ctx.device, &cbai, &transfer_cmd_) == VK_SUCCESS;
+    if (vkAllocateCommandBuffers(ctx.device, &cbai, &transfer_cmd_) != VK_SUCCESS) return false;
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
+    return vkCreateFence(ctx.device, &fci, nullptr, &upload_fence_) == VK_SUCCESS;
 }
 
 void PackStreamer::shutdown(const Context &ctx, BindlessDescriptors &desc) {
@@ -51,6 +53,10 @@ void PackStreamer::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     }
     uploaded_.clear();
     total_vram_bytes_ = 0;
+    if (upload_fence_ != VK_NULL_HANDLE) {
+        vkDestroyFence(ctx.device, upload_fence_, nullptr);
+        upload_fence_ = VK_NULL_HANDLE;
+    }
     if (transfer_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(ctx.device, transfer_pool_, nullptr);
         transfer_pool_ = VK_NULL_HANDLE;
@@ -173,16 +179,13 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
     vkEndCommandBuffer(transfer_cmd_);
 
     VkCommandBufferSubmitInfo cbsi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, transfer_cmd_, 0};
-    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
-    VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(ctx.device, &fci, nullptr, &fence);
     VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cbsi, 0, nullptr};
+    vkResetFences(ctx.device, 1, &upload_fence_);
     {
         std::lock_guard lock(const_cast<Context &>(ctx).graphics_queue_mutex);
-        vkQueueSubmit2(ctx.graphics_queue, 1, &si, fence);
+        vkQueueSubmit2(ctx.graphics_queue, 1, &si, upload_fence_);
     }
-    vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(ctx.device, fence, nullptr);
+    vkWaitForFences(ctx.device, 1, &upload_fence_, VK_TRUE, UINT64_MAX);
     vmaDestroyBuffer(ctx.allocator, staging, staging_alloc);
 
     VkImageViewCreateInfo ivci{};
@@ -237,8 +240,18 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
     files.reserve(match.entry->levels.size());
     for (const auto &[lvl, name] : match.entry->levels) files.push_back(chosen->path_of(name));
 
+    // Budget synchronous GPU texture uploads to at most 2 per frame so entering a new zone
+    // with a large HD texture pack never stalls frame pacing (native PSP textures display seamlessly meanwhile).
+    if (frame_num != last_upload_frame_) {
+        last_upload_frame_ = frame_num;
+        uploads_this_frame_ = 0;
+    }
+    constexpr std::uint32_t kMaxUploadsPerFrame = 2u;
+
     std::shared_ptr<const textures::Image> decoded;
     if (loader_->get(id, files, decoded) == textures::Loader::State::Ready && decoded) {
+        if (uploads_this_frame_ >= kMaxUploadsPerFrame) return 0;
+        ++uploads_this_frame_;
         PackGpuImage gpu_img{};
         if (upload_image_sync_transfer(ctx, desc, *decoded, gpu_img)) {
             gpu_img.last_used = frame_num;
