@@ -166,6 +166,7 @@ Json default_settings() {
     s["mouseCameraSpeed"] = 100;  // its sensitivity in percent: 25..300 in steps of 25
     s["gatheringAssistance"] = false; // nearby indicators and automatic pickaxe/bug-net/bait selection
     s["infiniteGatheringTools"] = false; // temporary high-tier pickaxe, bug net, and bait without carrying them
+    s["questBoxIcons"] = false; // contextual icons near base camp Blue Supply Box and Red Delivery Box
     s["modernCarving"] = false; // holding Circle repeats gathering, carving, mining, and bug-catching
     s["invulnerableCarveQuest"] = false; // ignores hits, roars and wind while carving after Quest Clear
     s["betterSharpness"] = false; // segmented gauge next to the sharpness icon
@@ -173,7 +174,6 @@ Json default_settings() {
     s["hornSongs"] = false; // the hunting horn's songs over the quest HUD
     s["hornSongsPlace"] = "next-to-sheet"; // and where: a place's name, or "custom:X,Y" (overlay/song_panel.hpp)
     s["guildQuestScaling"] = false; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
-    s["targetLockCamera"] = false; // R3 monster target lock-on camera
     s["skipQuestClearTimer"] = false; // hold Select after Quest Clear to fast-forward 60s timer
     s["itemPouchLoadouts"] = false; // save/load Item & Armor Sets from Item Box in Village/Hall
     s["capturableIndicator"] = false; // cyan minimap dot when monster is capturable
@@ -1047,8 +1047,8 @@ void Launcher::import_game_controls() {
             } else if (name == "horn-songs" || name == "hud-size" || name.starts_with("option.")) {
                 // What the game's in-game menu changes while playing: switches ("true", "false") and percentages, under
                 // the launcher's own names. Only these settings; apply_settings checks each value.
-                static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
-                                                                    "targetLockCamera", "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator",
+                static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "infiniteGatheringTools", "questBoxIcons", "modernCarving", "invulnerableCarveQuest", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
+                                                                    "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator",
                                                                     "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
@@ -1163,8 +1163,8 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting",
                             "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
                             "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
-                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
-                            "targetLockCamera", "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
+                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "questBoxIcons", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
+                            "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                             "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
@@ -1606,12 +1606,13 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
     }
     if (std::string_view(entry->game) == "mhfu" && s["infiniteGatheringTools"].as_bool())
         plan.args.push_back("--infinite-gathering-tools");
+    if (std::string_view(entry->game) == "mhfu" && s["questBoxIcons"].as_bool())
+        plan.args.push_back("--quest-box-icons");
     if (std::string_view(entry->game) == "mhfu" && s["modernCarving"].as_bool()) plan.args.push_back("--modern-carving");
     if (std::string_view(entry->game) == "mhfu" && s["invulnerableCarveQuest"].as_bool()) plan.args.push_back("--invulnerable-carve-quest");
     if (std::string_view(entry->game) == "mhfu" && s["keyQuestMarkers"].as_bool()) plan.args.push_back("--key-quest-markers");
     if (std::string_view(entry->game) == "mhfu" && s["betterSharpness"].as_bool()) plan.args.push_back("--better-sharpness");
     if (std::string_view(entry->game) == "mhfu") {
-        if (s["targetLockCamera"].as_bool()) plan.args.push_back("--target-lock-camera");
         if (s["skipQuestClearTimer"].as_bool()) plan.args.push_back("--skip-quest-clear-timer");
         if (s["itemPouchLoadouts"].as_bool()) plan.args.push_back("--item-pouch-loadouts");
         if (s["capturableIndicator"].as_bool()) plan.args.push_back("--capturable-indicator");

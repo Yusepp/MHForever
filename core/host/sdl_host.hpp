@@ -22,7 +22,6 @@ struct GamepadState {
     bool up{}, down{}, left{}, right{};
     float left_x{}, left_y{};                   // -1..1
     float right_x{}, right_y{};
-    bool right_stick_click{};                   // R3 / right-stick press (host-only, e.g. target lock-on)
 };
 
 // Keyboard input for text and menus (dialogs drawn by the platform), in the order it happened.

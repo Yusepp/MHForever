@@ -25,6 +25,16 @@ std::uint16_t virtual_tool_for(GatheringKind kind) noexcept {
 
 GatheringDecision decide_gathering(const GatheringInput &in) {
     GatheringDecision out;
+    if (in.supply_box) {
+        out.kind = GatheringKind::supply_box;
+        out.available = !in.exhausted;
+        return out;
+    }
+    if (in.delivery_box) {
+        out.kind = GatheringKind::delivery_box;
+        out.available = in.has_deliverable;
+        return out;
+    }
     if (!in.fishing && in.node_index >= 0xffff) return out;
     out.kind = in.fishing          ? GatheringKind::fishing
                : in.carving        ? GatheringKind::carve

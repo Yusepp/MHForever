@@ -12,7 +12,8 @@ namespace mhf::mhfu {
 // RAM.
 class Gathering {
 public:
-    bool indicators = false, automatic_tools = false, modern_carving = false, infinite_tools = false;
+    bool indicators = false, automatic_tools = false, modern_carving = false, infinite_tools = false,
+         quest_box_icons = false;
     int language = 1; // PSP system language: Japanese, English, French, Spanish, German, Italian
     std::function<bool()> input_blocked; // frontend menu/dialog input and its release latch
     void update(psp::Runtime &rt, psp::Context &ctx);

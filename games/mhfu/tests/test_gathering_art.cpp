@@ -36,6 +36,15 @@ int main() {
     MHF_CHECK(carve.size() == 3 && carve[1].pixels == art[4].pixels);
     auto fish = gathering_sprites(art, GatheringKind::fishing, 255, true);
     MHF_CHECK(fish.size() == 3 && fish[1].pixels == art[5].pixels);
+    auto supply = gathering_sprites(art, GatheringKind::supply_box, 255, true, false);
+    MHF_CHECK(supply.size() == 3 && supply[1].size == 24 && supply[1].pixels->size() == 32u * 32u &&
+              supply[2].pixels == art[1].pixels);
+    auto delivery_ok = gathering_sprites(art, GatheringKind::delivery_box, 255, true, false);
+    MHF_CHECK(delivery_ok.size() == 3 && delivery_ok[1].pixels != supply[1].pixels &&
+              delivery_ok[2].pixels == art[1].pixels);
+    auto delivery_no = gathering_sprites(art, GatheringKind::delivery_box, 255, false, true);
+    MHF_CHECK(delivery_no.size() == 3 && delivery_no[1].pixels == delivery_ok[1].pixels &&
+              delivery_no[2].pixels != art[1].pixels); // red X overlay when no deliverable item
     auto faded = gathering_sprites(art, GatheringKind::bugs, 15, true);
     MHF_CHECK(faded.size() == 1);
     if (faded.size() == 1) MHF_CHECK(faded[0].alpha == 15.0f / 255.0f);

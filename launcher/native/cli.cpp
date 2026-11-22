@@ -24,8 +24,8 @@ namespace {
 // The settings `--set` changes (the others, such as the controls, are changed in the game's own menu).
 constexpr const char *kBoolSettings[] = {"fullscreen", "smoothTextures", "packMipmaps", "trueWeaponValues", "fastSupplyBox",
                                          "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout", "analogCamera", "mouseCamera",
-                                         "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
-                                         "targetLockCamera", "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
+                                         "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "questBoxIcons", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
+                                         "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                                          "projectedShadows", "wholeMapShadows", "enhancedLighting",
                                          "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof", "widescreen"};
 constexpr const char *kNumberSettings[] = {"scale", "fps", "hudSize", "musicVolume", "sfxVolume",

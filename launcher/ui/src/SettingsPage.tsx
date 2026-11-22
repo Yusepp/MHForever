@@ -682,6 +682,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.infiniteGatheringTools ?? false} onToggle={() => onChange({ infiniteGatheringTools: !(s.infiniteGatheringTools ?? false) })} label="Infinite gathering tools" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Quest camp box icons</b><span>Shows contextual gathering-style icons near the camp Blue Supply Box and Red Delivery Box (red X when carrying nothing to deliver).</span></div>
+          <Toggle on={s.questBoxIcons ?? false} onToggle={() => onChange({ questBoxIcons: !(s.questBoxIcons ?? false) })} label="Quest camp box icons" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat gathering, carving, mining, and bug-catching at the same spot.</span></div>
           <Toggle on={s.modernCarving ?? false} onToggle={() => onChange({ modernCarving: !(s.modernCarving ?? false) })} label="Modern carving" />
         </div>
@@ -696,10 +700,6 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
         <div className="srow">
           <div className="slabel"><b>Better sharpness gauge</b><span>Shows how much of each sharpness tier is left during a quest.</span></div>
           <Toggle on={s.betterSharpness ?? false} onToggle={() => onChange({ betterSharpness: !(s.betterSharpness ?? false) })} label="Better sharpness gauge" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Target lock-on camera (R3)</b><span>Press R3 (or Tab / Middle-Click) to lock onto or cycle large monsters in your area.</span></div>
-          <Toggle on={s.targetLockCamera ?? false} onToggle={() => onChange({ targetLockCamera: !(s.targetLockCamera ?? false) })} label="Target lock-on camera (R3)" />
         </div>
         <div className="srow">
           <div className="slabel"><b>Floating damage numbers</b><span>Displays World/Rise/Wilds-style floating damage numbers when hitting monsters.</span></div>

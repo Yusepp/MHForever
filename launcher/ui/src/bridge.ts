@@ -47,7 +47,6 @@ export interface Settings {
   hornSongs?: boolean; // the hunting horn's songs over the quest HUD
   hornSongsPlace?: string; // and where: 'next-to-sheet', 'top-middle', 'under-names', 'bottom-left', or 'custom:X,Y' (moved in the game)
   guildQuestScaling?: boolean; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
-  targetLockCamera?: boolean; // R3 monster target lock-on camera
   skipQuestClearTimer?: boolean; // hold Select after Quest Clear to fast-forward 60s timer
   itemPouchLoadouts?: boolean; // save/load item pouch presets in Village/Hall
   capturableIndicator?: boolean; // blue skull icon when large monster is capturable
@@ -55,7 +54,8 @@ export interface Settings {
   infiniteWhetstone?: boolean; // sharpen without consuming Whetstones
   damageNumbers?: boolean; // World/Rise/Wilds-style floating damage numbers
   comboBooksFromBox?: boolean; // 100% combine rate once all 5 Books of Combos are owned
-  infinitePaintballs?: boolean; // carrying >= 1 Paintball gives unlimited throws
+  infinitePaintballs?: boolean; // throw Paintballs without consuming them
+  questBoxIcons?: boolean; // contextual icons near camp Blue Supply Box and Red Delivery Box
   // The language the game speaks and reads: 'en', 'fr', 'de', 'es', 'it'; '' keeps the game's own language screen.
   language: string;
   // FUComplete's own options, for FUComplete copies (launcher/native/fuc_config.hpp); its true raw display follows

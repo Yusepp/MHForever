@@ -16,24 +16,26 @@ constexpr std::uint32_t kGameSysPlayerSlot = 0x28, kGameSysMenu = 0x10;
 constexpr std::uint32_t kPlayerManagerPlayers = 0x0C, kPlayerSlots = 6;
 constexpr std::uint32_t kCockpitMenu = 0x604, kCockpitWindow = 0x52F;
 constexpr std::uint32_t kPlayerPosition = 0x200, kPlayerArea = 0x29A, kPlayerReady = 0x325;
-constexpr std::uint32_t kPlayerAction = 0x299, kPlayerSelectedItem = 0x648;
+constexpr std::uint32_t kPlayerAction = 0x299, kPlayerTransportFlags = 0x614, kPlayerSelectedItem = 0x648;
+constexpr std::uint32_t kQuestObjectives = 0x728, kObjectiveStride = 8, kMaxObjectives = 2;
+constexpr std::uint32_t kObjectiveDelivery = 0x02, kObjectiveActive = 0x10, kObjectiveCleared = 0x20;
 constexpr std::uint32_t kNodeId = 16, kNodeRemaining = 18, kNodeType = 20;
 constexpr std::uint32_t kDynamicNodes = 20, kDynamicNodeSize = 32, kStaticNodeSize = 24;
 constexpr std::uint32_t kInventorySlots = 25, kCircle = 0x2000;
 constexpr std::uint8_t kGatherAction = 0x47, kCarveAction = 0x4a, kFishingAction = 0x4f, kMiningAction = 0x51, kBugAction = 0x52;
-constexpr std::uint16_t kFishingSpotKind = 23;
+constexpr std::uint16_t kFishingSpotKind = 23, kSupplyBoxKind = 24, kDeliveryBoxKind = 33;
 constexpr std::uint64_t kHintLifetimeUs = 150'000;
 
 struct HintText {
-    const char *mine, *bugs, *fish, *gather, *carve, *depleted, *no_tool;
+    const char *mine, *bugs, *fish, *gather, *carve, *supply_box, *delivery_box, *depleted, *no_tool, *no_deliverable;
 };
 constexpr std::array<HintText, 6> kHints{{
-    {"採掘", "虫捕り", "釣り", "採集", "剥ぎ取り", "採集済み", "道具なし"},
-    {"Mine", "Catch bugs", "Fish", "Gather", "Carve", "Depleted", "No tool"},
-    {"Miner", "Attraper des insectes", "Pêcher", "Ramasser", "Dépecer", "Épuisé", "Sans outil"},
-    {"Minar", "Atrapar insectos", "Pescar", "Recoger", "Tallar", "Agotado", "Sin herramienta"},
-    {"Abbauen", "Käfer fangen", "Angeln", "Sammeln", "Ausweiden", "Erschöpft", "Kein Werkzeug"},
-    {"Estrai", "Cattura insetti", "Pesca", "Raccogli", "Scuoia", "Esaurito", "Nessun attrezzo"},
+    {"採掘", "虫捕り", "釣り", "採集", "剥ぎ取り", "支給品BOX", "納品BOX", "採集済み", "道具なし", "納品物なし"},
+    {"Mine", "Catch bugs", "Fish", "Gather", "Carve", "Supply Box", "Delivery Box", "Depleted", "No tool", "Nothing to deliver"},
+    {"Miner", "Attraper des insectes", "Pêcher", "Ramasser", "Dépecer", "Boîte de fournitures", "Boîte de livraison", "Épuisé", "Sans outil", "Rien à livrer"},
+    {"Minar", "Atrapar insectos", "Pescar", "Recoger", "Tallar", "Caja de suministros", "Caja de entregas", "Agotado", "Sin herramienta", "Nada que entregar"},
+    {"Abbauen", "Käfer fangen", "Angeln", "Sammeln", "Ausweiden", "Vorratsbox", "Lieferbox", "Erschöpft", "Kein Werkzeug", "Nichts abzugeben"},
+    {"Estrai", "Cattura insetti", "Pesca", "Raccogli", "Scuoia", "Cassa scorte", "Cassa consegne", "Esaurito", "Nessun attrezzo", "Nulla da consegnare"},
 }};
 
 struct Target {
@@ -41,7 +43,33 @@ struct Target {
     std::uint16_t type, remaining;
     bool carving;
     bool fishing;
+    bool supply_box;
+    bool delivery_box;
 };
+
+bool has_deliverable_item(const psprecomp::GuestMemory &m, std::uint32_t player,
+                          std::span<const GatheringItem> items) noexcept {
+    // Carrying a transport item (egg, powderstone, etc.) can always be delivered at the Red Box.
+    if ((m.load32(player + kPlayerTransportFlags) & 1u) != 0u) return true;
+    if constexpr (region::mh_quest_manager) {
+        const std::uint32_t qm = m.load32(*region::mh_quest_manager);
+        if (qm != 0u && (qm & 3u) == 0u && m.contains(qm, kQuestObjectives + kMaxObjectives * kObjectiveStride)) {
+            for (std::uint32_t i = 0; i < kMaxObjectives; ++i) {
+                const std::uint32_t slot = qm + kQuestObjectives + i * kObjectiveStride;
+                const std::uint32_t flags = m.load32(slot);
+                const std::uint16_t target_id = m.load16(slot + 4u);
+                const std::uint16_t remaining = m.load16(slot + 6u);
+                if ((flags & kObjectiveActive) != 0u && (flags & kObjectiveCleared) == 0u &&
+                    (flags & kObjectiveDelivery) != 0u && remaining > 0u && target_id != 0u) {
+                    for (const auto &item : items) {
+                        if (item.id == target_id && item.count > 0u) return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
 
 [[maybe_unused]] std::uint16_t pick_virtual_slot(std::span<const GatheringItem> items) noexcept {
     for (std::size_t i = items.size(); i-- > 0;) {
@@ -97,8 +125,16 @@ std::optional<Target> read_target(psp::Runtime &rt, const psp::Context &ctx, std
                 fish_call.gpr[6] = scratch + 16;
                 fish_call.gpr[7] = scratch + 20;
                 rt.call(fish_call, *region::mh_fishing_probe);
-                if ((fish_call.gpr[2] & 0xffffu) == kFishingSpotKind) {
-                    return Target{0, 0, 1, false, true};
+                const std::uint16_t stage_kind = static_cast<std::uint16_t>(fish_call.gpr[2] & 0xffffu);
+                if (stage_kind == kFishingSpotKind) {
+                    return Target{0, 0, 1, false, true, false, false};
+                }
+                if (stage_kind == kSupplyBoxKind) {
+                    const bool carrying = (m.load32(player + kPlayerTransportFlags) & 1u) != 0u;
+                    return Target{0, 0, static_cast<std::uint16_t>(carrying ? 0u : 1u), false, false, true, false};
+                }
+                if (stage_kind == kDeliveryBoxKind) {
+                    return Target{0, 0, 1, false, false, false, true};
                 }
             }
             return {};
@@ -126,7 +162,7 @@ std::optional<Target> read_target(psp::Runtime &rt, const psp::Context &ctx, std
         }
         if (!found) return {};
     }
-    return Target{index, type, remaining, dynamic && type == 2, false};
+    return Target{index, type, remaining, dynamic && type == 2, false, false, false};
 }
 
 } // namespace
@@ -212,7 +248,7 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             tool_repeat_ = {};
         }
         if (!automatic_tools && !infinite_tools) tool_repeat_ = {};
-        if (!indicators && !automatic_tools && !modern_carving && !infinite_tools) return;
+        if (!indicators && !quest_box_icons && !automatic_tools && !modern_carving && !infinite_tools) return;
         if ((input_blocked && input_blocked()) || psp::current_dialog(rt).kind != psp::DialogView::Kind::None) {
             repeat_ = {};
             tool_repeat_ = {};
@@ -246,7 +282,7 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         const auto action = m.load8(player + kPlayerAction);
         const auto area = m.load16(player + kPlayerArea);
         std::uint8_t repeat_action = 0;
-        if (target && target->remaining != 0 && !target->fishing &&
+        if (target && target->remaining != 0 && !target->fishing && !target->supply_box && !target->delivery_box &&
             (target->carving || (target->type != 3 && target->type != 4)))
             repeat_action = target->carving ? kCarveAction : kGatherAction;
         const bool repeatable = modern_carving && target && target->remaining != 0 && repeat_action != 0;
@@ -276,7 +312,7 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             tool_repeat_ = {};
             return;
         }
-        const auto [index, type, remaining, carving, fishing] = *target;
+        const auto [index, type, remaining, carving, fishing, supply_box, delivery_box] = *target;
         if (repeat_.working && modern_carving) {
             if (repeat_target_ != index) { repeat_target_ = index; repeat_remaining_ = remaining; reward_received_ = false; }
             else if (remaining < repeat_remaining_) {
@@ -294,18 +330,23 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         std::array<GatheringItem, kInventorySlots> items{};
         for (std::uint32_t i = 0; i < kInventorySlots; ++i)
             items[i] = {m.load16(bag + 4u * i), m.load16(bag + 4u * i + 2)};
-        const auto decision = decide_gathering({index, type, items, remaining == 0, carving, fishing, infinite_tools});
+        const bool deliverable = delivery_box && has_deliverable_item(m, player, items);
+        const auto decision = decide_gathering(
+            {index, type, items, remaining == 0, carving, fishing, infinite_tools, supply_box, delivery_box, deliverable});
+        const bool box_kind = decision.kind == GatheringKind::supply_box || decision.kind == GatheringKind::delivery_box;
         const bool tool_kind = decision.kind == GatheringKind::mining || decision.kind == GatheringKind::bugs ||
                                decision.kind == GatheringKind::fishing;
         const bool allow_tool_circle = automatic_tools || infinite_tools;
         const bool has_usable_tool = decision.tool_slot.has_value() || decision.uses_virtual_tool;
+        const bool show_prompt = box_kind ? quest_box_icons : indicators;
         // Hide the fishing prompt while actively fishing so the screen stays clear for the bobber.
-        visual_active_ = decision.kind != GatheringKind::none && !(fishing && action == kFishingAction);
+        visual_active_ = show_prompt && decision.kind != GatheringKind::none && !(fishing && action == kFishingAction);
         kind_ = decision.kind;
         unavailable_ = !decision.available;
-        button_ = decision.available && ((decision.kind == GatheringKind::gather || decision.kind == GatheringKind::carve) ||
-                                         (tool_kind && allow_tool_circle && has_usable_tool));
-        if (indicators && visual_active_) {
+        button_ = decision.available &&
+                  (box_kind || decision.kind == GatheringKind::gather || decision.kind == GatheringKind::carve ||
+                   (tool_kind && allow_tool_circle && has_usable_tool));
+        if (visual_active_) {
             const auto &text = kHints[language >= 0 && static_cast<std::size_t>(language) < kHints.size()
                                          ? static_cast<std::size_t>(language) : 1u];
             if (decision.kind == GatheringKind::mining)
@@ -318,7 +359,16 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
                 hint_ = text.gather;
             else if (decision.kind == GatheringKind::carve)
                 hint_ = text.carve;
-            if (remaining == 0) {
+            else if (decision.kind == GatheringKind::supply_box)
+                hint_ = text.supply_box;
+            else if (decision.kind == GatheringKind::delivery_box)
+                hint_ = text.delivery_box;
+            if (decision.kind == GatheringKind::delivery_box) {
+                if (!decision.available)
+                    hint_.append(" - ").append(text.no_deliverable);
+                else
+                    hint_ = "○  " + hint_;
+            } else if (remaining == 0) {
                 hint_.append(" - ").append(text.depleted);
             } else if (tool_kind) {
                 if (!has_usable_tool)
@@ -454,10 +504,14 @@ void Gathering::animation_update(psp::Runtime &rt, psp::Context &ctx) {
 }
 
 std::string Gathering::hint(psp::Runtime &rt) const {
-    return indicators && rt.now_us() - updated_ < kHintLifetimeUs ? hint_ : std::string{};
+    const bool is_box = kind_ == GatheringKind::supply_box || kind_ == GatheringKind::delivery_box;
+    const bool enabled = is_box ? quest_box_icons : indicators;
+    return enabled && rt.now_us() - updated_ < kHintLifetimeUs ? hint_ : std::string{};
 }
 std::vector<overlay::HintSprite> Gathering::sprites(psp::Runtime &rt) const {
-    if (!indicators || !visual_active_ || !art_ || rt.now_us() - updated_ >= kHintLifetimeUs)
+    const bool is_box = kind_ == GatheringKind::supply_box || kind_ == GatheringKind::delivery_box;
+    const bool enabled = is_box ? quest_box_icons : indicators;
+    if (!enabled || !visual_active_ || !art_ || rt.now_us() - updated_ >= kHintLifetimeUs)
         return {};
     return gathering_sprites(*art_, kind_, alpha_, button_, unavailable_);
 }

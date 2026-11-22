@@ -13,6 +13,53 @@ GatheringArtSlot icon_slot_for(GatheringKind kind) noexcept {
     }
 }
 
+// Procedural 32x32 premultiplied-RGBA camp chest icon (blue = Supply Box, red = Delivery Box), no game assets.
+std::shared_ptr<const std::vector<std::uint32_t>> make_chest_icon(bool red) {
+    auto pixels = std::make_shared<std::vector<std::uint32_t>>(32u * 32u, 0u);
+    auto rgba = [](std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a = 255u) -> std::uint32_t {
+        return static_cast<std::uint32_t>(r) | (static_cast<std::uint32_t>(g) << 8u) |
+               (static_cast<std::uint32_t>(b) << 16u) | (static_cast<std::uint32_t>(a) << 24u);
+    };
+    const std::uint32_t outline = rgba(20, 16, 16);
+    const std::uint32_t lid_hi = red ? rgba(238, 86, 76) : rgba(82, 166, 245);
+    const std::uint32_t lid_mid = red ? rgba(208, 48, 42) : rgba(48, 122, 214);
+    const std::uint32_t body = red ? rgba(162, 30, 28) : rgba(30, 86, 172);
+    const std::uint32_t body_lo = red ? rgba(122, 22, 22) : rgba(20, 62, 134);
+    const std::uint32_t strap = rgba(206, 166, 74);
+    const std::uint32_t clasp_hi = rgba(252, 222, 120);
+    const std::uint32_t clasp_lo = rgba(168, 124, 42);
+
+    for (int y = 7; y <= 25; ++y) {
+        for (int x = 4; x <= 27; ++x) {
+            // Chamfered top corners so the chest silhouette reads cleanly inside the circular HUD frame.
+            const bool corner = (y == 7 && (x <= 5 || x >= 26)) || (y == 8 && (x == 4 || x == 27)) ||
+                                (y == 25 && (x == 4 || x == 27));
+            if (corner) continue;
+            const bool border = y == 7 || y == 25 || x == 4 || x == 27 ||
+                                (y == 8 && (x == 5 || x == 26)) || (y == 14);
+            std::uint32_t c = outline;
+            if (!border) {
+                if (y <= 10) c = lid_hi;
+                else if (y < 14) c = lid_mid;
+                else if (y <= 22) c = body;
+                else c = body_lo;
+                if (x == 9 || x == 10 || x == 21 || x == 22) c = strap;
+            }
+            (*pixels)[static_cast<std::size_t>(y * 32 + x)] = c;
+        }
+    }
+    // Center antique-gold clasp & keyhole
+    for (int y = 12; y <= 17; ++y) {
+        for (int x = 13; x <= 18; ++x) {
+            const bool edge = y == 12 || y == 17 || x == 13 || x == 18;
+            const bool keyhole = (x == 15 || x == 16) && (y == 14 || y == 15);
+            (*pixels)[static_cast<std::size_t>(y * 32 + x)] =
+                edge ? outline : (keyhole ? clasp_lo : (y == 13 ? clasp_hi : strap));
+        }
+    }
+    return pixels;
+}
+
 } // namespace
 
 std::uint8_t gathering_alpha(std::uint8_t previous, bool active) {
@@ -29,7 +76,13 @@ std::vector<overlay::HintSprite> gathering_sprites(const GatheringArt &art, Gath
     };
     add(GatheringArtSlot::frame, 225, 80, 32, float(alpha) / 255.0f);
     if (alpha == 255 && kind != GatheringKind::none) {
-        add(icon_slot_for(kind), 229, 84, 24, 1);
+        if (kind == GatheringKind::supply_box || kind == GatheringKind::delivery_box) {
+            static const auto blue_chest = make_chest_icon(false);
+            static const auto red_chest = make_chest_icon(true);
+            sprites.push_back({229, 84, 24, 1, 32, kind == GatheringKind::delivery_box ? red_chest : blue_chest});
+        } else {
+            add(icon_slot_for(kind), 229, 84, 24, 1);
+        }
         if (unavailable) {
             // Premultiplied sprite: a red X with a dark edge, generated without game
             // assets.
