@@ -108,6 +108,17 @@ public:
         std::string category; // optional section heading inside the QoL tab
     };
     void add_game_option(GameOption option);
+    // An interactive action or choice row in the QoL tab (e.g. Item Pouch Loadouts in Village/Hall).
+    struct GameAction {
+        std::string label, detail;
+        std::string shown_with; // optional GameOption::setting that must be on
+        std::string category;
+        std::vector<std::string> choices; // non-empty: Choice row; empty: Button row
+        int value = 0;
+        std::function<bool()> enabled;     // optional predicate (default: always enabled)
+        std::function<std::string(int)> triggered; // runs on game thread; optional status note returned
+    };
+    void add_game_action(GameAction action);
     // The hunting horn's songs (overlay/song_panel.hpp), from the `extra` poll: shown at their place while the game draws
     // its quest HUD and no menu, system dialog or notice is up; std::nullopt (no horn, not in a quest) hides them. Only
     // the OpenGL renderer finds the quest HUD, so the software renderer never shows them.

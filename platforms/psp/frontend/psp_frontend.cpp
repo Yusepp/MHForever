@@ -168,7 +168,9 @@ struct Frontend::Impl {
     std::optional<overlay::SongSpot> song_spot; // where the player wants them (std::nullopt: the songs are off)
     bool songs_offered{}; // offer_songs: the Game tab turns them on and off
     bool songs_on{true};  // and they are on
-    std::vector<Frontend::GameOption> game_options; // add_game_option: the Game tab's options of the game
+    std::vector<Frontend::GameOption> game_options; // add_game_option: the QoL tab's options of the game
+    std::vector<Frontend::GameAction> game_actions; // add_game_action: interactive rows in the QoL tab
+    std::string qol_note;                           // transient feedback line shown in the QoL tab subtitle
     std::function<bool()> mouse_look;               // set_mouse_look
     bool hud_size_changed{}; // the Video tab changed the HUD's size: the controls file keeps it
     bool widescreen_known{}; // widescreen came from the launcher or the Video tab changed it: the controls file keeps it
@@ -434,6 +436,7 @@ void Frontend::offer_songs(bool on, overlay::SongSpot spot) {
 }
 
 void Frontend::add_game_option(GameOption option) { impl_->game_options.push_back(std::move(option)); }
+void Frontend::add_game_action(GameAction action) { impl_->game_actions.push_back(std::move(action)); }
 
 void Frontend::set_mouse_look(std::function<bool()> wanted) { impl_->mouse_look = std::move(wanted); }
 
@@ -741,7 +744,8 @@ enum MenuId {
     kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen,
     kVkEnhancedLighting, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
 };
-constexpr int kGameOptionBase = 3000; // the Game tab's options of the game: kGameOptionBase + an index into Impl::game_options
+constexpr int kGameOptionBase = 3000; // the QoL tab's options of the game: kGameOptionBase + an index into Impl::game_options
+constexpr int kGameActionBase = 4000; // the QoL tab's interactive actions: kGameActionBase + an index into Impl::game_actions
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
 
 // The ad hoc servers the Online section offers: the launcher's list (launcher/ui/src/servers.ts, keep the two alike).
@@ -997,7 +1001,7 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     overlay::MenuTab game{"Game", {resume, quit}, v.subtitle, {}};
 
     // Dedicated Gameplay QoL tab (mirrors the Vulkan tab layout with category headings).
-    overlay::MenuTab qol{"QoL", {}, "Changes apply immediately.", {}};
+    overlay::MenuTab qol{"QoL", {}, impl.qol_note.empty() ? "Changes apply immediately." : impl.qol_note, {}};
     std::string last_category;
     for (std::size_t i = 0; i < impl.game_options.size(); ++i) {
         const Frontend::GameOption &o = impl.game_options[i];
@@ -1023,6 +1027,23 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             row.step = o.step;
         }
         qol.items.push_back(row);
+    }
+    for (std::size_t i = 0; i < impl.game_actions.size(); ++i) {
+        const Frontend::GameAction &a = impl.game_actions[i];
+        if (!a.shown_with.empty()) {
+            const auto with = std::ranges::find(impl.game_options, a.shown_with, &Frontend::GameOption::setting);
+            if (with != impl.game_options.end() && with->value == 0) continue;
+        }
+        if (!a.category.empty() && a.category != last_category) {
+            qol.items.push_back(menu_item(Kind::Heading, 0, a.category));
+            last_category = a.category;
+        }
+        overlay::MenuItem row = menu_item(a.choices.empty() ? Kind::Button : Kind::Choice,
+                                          kGameActionBase + static_cast<int>(i), a.label, a.value);
+        row.detail = a.detail;
+        row.options = a.choices;
+        row.enabled = !a.enabled || a.enabled();
+        qol.items.push_back(std::move(row));
     }
     if (impl.song_spot && impl.songs_offered) { // the songs can be shown: the player turns them on and off here
         qol.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
@@ -1511,6 +1532,12 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
                 if (row != rows.end() && e.action < static_cast<int>(row->actions.size())) {
                     friend_pressed(impl, rt, static_cast<std::size_t>(e.id - kFriendBase), row->actions[static_cast<std::size_t>(e.action)]);
                 }
+            } else if (e.id >= kGameActionBase && e.id < kGameActionBase + static_cast<int>(impl.game_actions.size())) {
+                Frontend::GameAction &a = impl.game_actions[static_cast<std::size_t>(e.id - kGameActionBase)];
+                if (a.choices.empty() && (!a.enabled || a.enabled()) && a.triggered) {
+                    impl.qol_note = a.triggered(a.value);
+                    refresh_menu(impl);
+                }
             } else if (e.id >= kKeyBase && e.id < kPadBase + static_cast<int>(kPadButtons)) { // a Controls row: wait for the new key or button
                 const bool same = impl.capture_id == e.id;
                 impl.capture_id = same ? 0 : e.id;
@@ -1529,6 +1556,15 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
         refresh_menu(impl);
         return true;
     case overlay::Menu::Event::Kind::Changed:
+        if (e.id >= kGameActionBase && e.id < kGameActionBase + static_cast<int>(impl.game_actions.size())) {
+            Frontend::GameAction &a = impl.game_actions[static_cast<std::size_t>(e.id - kGameActionBase)];
+            if (!a.choices.empty()) {
+                a.value = std::clamp(e.value, 0, static_cast<int>(a.choices.size()) - 1);
+                if (a.triggered) impl.qol_note = a.triggered(a.value);
+                refresh_menu(impl);
+            }
+            return true;
+        }
         if (e.id >= kGameOptionBase && e.id < kGameOptionBase + static_cast<int>(impl.game_options.size())) {
             Frontend::GameOption &o = impl.game_options[static_cast<std::size_t>(e.id - kGameOptionBase)];
             o.value = o.slider ? std::clamp(e.value, o.min, o.max) : (e.value != 0 ? 1 : 0);
