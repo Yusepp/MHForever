@@ -149,6 +149,7 @@ mh_enemy_stagger_store = "game_task.ovl 0x09ACEF18 call" # before sh v1, 0x580(a
 mh_carve_invuln_damage    = "game_task.ovl 0x09A618E4 call" # jal Player::process_damage (a0 is Player*)
 mh_carve_invuln_roar_wind = "game_task.ovl 0x09A619D4 call" # jal Player::process_roar_wind_tremor (a0 is Player*)
 mh_combine_rate_done      = "executable 0x0885C0C8 call" # epilogue of combine rate calc (v0 holds 0..100 or -1)
+mh_enemy_damage_apply     = "game_task.ovl 0x09AC2C94 call" # Enemy::process_damage before subtracting sp+62 damage from Enemy+0x2E4 (s5=Enemy*)
 
 # Words FUComplete's PRELOAD.BIN and MODLOAD.BIN rewrite at run time, according to the options in its CONFIG.BIN. A
 # function that holds one checks it on entry and runs in the interpreter when it changed, so FUComplete's options apply
