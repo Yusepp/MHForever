@@ -174,6 +174,7 @@ struct Frontend::Impl {
     bool widescreen_known{}; // widescreen came from the launcher or the Video tab changed it: the controls file keeps it
     bool pack_filter_changed{}; // the Video tab changed the texture pack's mipmaps or anisotropic filtering: kept too
     bool shadows_known{}; // the shadows' settings came from the launcher or the Video tab changed them: the controls file keeps them
+    bool vulkan_lighting_known{}; // enhanced Vulkan lighting or its per-effect toggles came from the launcher or Vulkan tab
     // The game supports them (it called set_widescreen / set_shadows: camera hooks, zones): only then does the Video tab
     // offer them. A game without them (Freedom) would get a stretched picture, or shadows that cost and show nothing.
     bool widescreen_offered{}, shadows_offered{};
@@ -416,10 +417,12 @@ void Frontend::set_shadows(bool on, bool whole_map, int quality, int darkness) {
 
 void Frontend::set_enhanced_lighting(bool on) {
     impl_->live.enhanced_lighting.store(on, std::memory_order_relaxed);
+    impl_->vulkan_lighting_known = true;
 }
 
 void Frontend::set_vulkan_effects_mask(std::uint32_t mask) {
     impl_->live.vulkan_effects_mask.store(mask & LiveSettings::kVkEffectAll, std::memory_order_relaxed);
+    impl_->vulkan_lighting_known = true;
 }
 
 void Frontend::set_song_spot(overlay::SongSpot spot) { impl_->song_spot = spot; }
@@ -735,7 +738,8 @@ void update_dialogs(Frontend::Impl &impl, Runtime &rt) {
 
 enum MenuId {
     kResume = 1, kQuit, kQuitYes, kQuitNo, kMusic, kSfx, kScale, kFps, kFullscreen, kSmooth, kTexturePack, kHudSize, kSongPlace, kSongMove, kPadStick, kRestoreKeys, kRestorePad,
-    kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen
+    kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen,
+    kVkEnhancedLighting, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
 };
 constexpr int kGameOptionBase = 3000; // the Game tab's options of the game: kGameOptionBase + an index into Impl::game_options
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
@@ -1123,7 +1127,35 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     }
     controls.items.push_back(stick);
     controls.items.push_back(menu_item(Kind::Button, kRestorePad, "Restore controller defaults"));
-    v.tabs = {game, audio, video, controls};
+    v.tabs = {game, audio, video};
+    if (impl.backend == GraphicsBackend::Vulkan && impl.gpu_state == 1) {
+        const bool lit_on = impl.live.enhanced_lighting.load(std::memory_order_relaxed);
+        const std::uint32_t mask = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
+        overlay::MenuTab vk_tab{"Vulkan", {}, "Changes apply immediately.", lit_on ? "On" : "Off"};
+        auto add_toggle = [&](int id, const char *label, const char *detail, bool on) {
+            overlay::MenuItem item = menu_item(Kind::Toggle, id, label, on ? 1 : 0);
+            item.detail = detail;
+            vk_tab.items.push_back(std::move(item));
+        };
+        add_toggle(kVkEnhancedLighting, "Enhanced lighting", "Enables modern Vulkan lighting, shadows, and visual effects.", lit_on);
+        if (lit_on) {
+            vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Lighting & shadows"));
+            add_toggle(kVkAo, "Ambient occlusion", "Multi-bounce horizon shading inside crevices and corners.", (mask & LiveSettings::kVkEffectAo) != 0u);
+            add_toggle(kVkContactShadows, "Contact & sun shadows", "Short-range contact grounding and long projected sun shadows.", (mask & LiveSettings::kVkEffectContactShadows) != 0u);
+            add_toggle(kVkSsgi, "Indirect bounce & flash", "Colored firelight/lava bounce and dynamic explosion flashes.", (mask & LiveSettings::kVkEffectSsgi) != 0u);
+            add_toggle(kVkSpecular, "Specular & sky bounce", "Biome specular sheen, Fresnel rim light, and hemisphere bounce.", (mask & LiveSettings::kVkEffectSpecular) != 0u);
+            vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Atmosphere & effects"));
+            add_toggle(kVkVolumetricFog, "Volumetric fog & shafts", "Biome height fog, outdoor sun shafts, and cave doorway rays.", (mask & LiveSettings::kVkEffectVolumetricFog) != 0u);
+            add_toggle(kVkBloom, "Emissive bloom & shimmer", "Selective glow on fire, lava, and lightning with rising heat haze.", (mask & LiveSettings::kVkEffectBloom) != 0u);
+            add_toggle(kVkSoftParticles, "Soft 3D particles", "Depth-softened smoke, snow, fire, and monster breath.", (mask & LiveSettings::kVkEffectSoftParticles) != 0u);
+            vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Post-processing"));
+            add_toggle(kVkFxaa, "Pre-HUD anti-aliasing", "Smooths 3D edges before the 2D HUD is drawn.", (mask & LiveSettings::kVkEffectFxaa) != 0u);
+            add_toggle(kVkVignette, "Moody vignette", "Subtle edge framing in caves, swamps, volcanoes, and sieges.", (mask & LiveSettings::kVkEffectVignette) != 0u);
+            add_toggle(kVkKillcamDof, "Killcam depth of field", "Peripheral bokeh blur during the monster killcam.", (mask & LiveSettings::kVkEffectKillcamDof) != 0u);
+        }
+        v.tabs.push_back(std::move(vk_tab));
+    }
+    v.tabs.push_back(controls);
     if (impl.online) v.tabs.push_back(menu_online(impl));
     return v;
 }
@@ -1162,6 +1194,20 @@ void save_controls(const Frontend::Impl &impl) {
             out << "option.wholeMapShadows=" << (impl.live.shadow_whole_map ? "true" : "false") << "\n";
             out << "option.shadowQuality=" << impl.live.shadow_quality.load() << "\n";
             out << "option.shadowDarkness=" << static_cast<int>(impl.live.shadow_strength * 100.0f + 0.5f) << "\n";
+        }
+        if (impl.vulkan_lighting_known) {
+            const std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
+            out << "option.enhancedLighting=" << (impl.live.enhanced_lighting ? "true" : "false") << "\n";
+            out << "option.vkAo=" << ((m & LiveSettings::kVkEffectAo) ? "true" : "false") << "\n";
+            out << "option.vkContactShadows=" << ((m & LiveSettings::kVkEffectContactShadows) ? "true" : "false") << "\n";
+            out << "option.vkVolumetricFog=" << ((m & LiveSettings::kVkEffectVolumetricFog) ? "true" : "false") << "\n";
+            out << "option.vkBloom=" << ((m & LiveSettings::kVkEffectBloom) ? "true" : "false") << "\n";
+            out << "option.vkSsgi=" << ((m & LiveSettings::kVkEffectSsgi) ? "true" : "false") << "\n";
+            out << "option.vkSpecular=" << ((m & LiveSettings::kVkEffectSpecular) ? "true" : "false") << "\n";
+            out << "option.vkSoftParticles=" << ((m & LiveSettings::kVkEffectSoftParticles) ? "true" : "false") << "\n";
+            out << "option.vkFxaa=" << ((m & LiveSettings::kVkEffectFxaa) ? "true" : "false") << "\n";
+            out << "option.vkVignette=" << ((m & LiveSettings::kVkEffectVignette) ? "true" : "false") << "\n";
+            out << "option.vkKillcamDof=" << ((m & LiveSettings::kVkEffectKillcamDof) ? "true" : "false") << "\n";
         }
         for (const Frontend::GameOption &o : impl.game_options) {
             out << "option." << o.setting << "=";
@@ -1527,6 +1573,31 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
             impl.shadows_known = true;
             save_controls(impl);
             break;
+        case kVkEnhancedLighting:
+            impl.live.enhanced_lighting.store(e.value != 0, std::memory_order_relaxed);
+            impl.vulkan_lighting_known = true;
+            save_controls(impl);
+            refresh_menu(impl); // per-effect rows unfold under the master switch
+            break;
+        case kVkAo:
+        case kVkContactShadows:
+        case kVkVolumetricFog:
+        case kVkBloom:
+        case kVkSsgi:
+        case kVkSpecular:
+        case kVkSoftParticles:
+        case kVkFxaa:
+        case kVkVignette:
+        case kVkKillcamDof: {
+            const std::uint32_t bit = 1u << static_cast<unsigned>(e.id - kVkAo);
+            std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
+            if (e.value != 0) m |= bit;
+            else m &= ~bit;
+            impl.live.vulkan_effects_mask.store(m & LiveSettings::kVkEffectAll, std::memory_order_relaxed);
+            impl.vulkan_lighting_known = true;
+            save_controls(impl);
+            break;
+        }
         case kWidescreen:
             impl.live.widescreen = e.value != 0;
             impl.widescreen_known = true;
