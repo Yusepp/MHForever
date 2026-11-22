@@ -41,7 +41,14 @@
 #endif
 #include "mhfu_region_data.hpp" // generated from this release's regions/<disc>/symbols.toml [data]
 #include "carve_invulnerability.hpp"
+#include "combo_books.hpp"
+#include "damage_numbers.hpp"
+#include "infinite_consumables.hpp"
+#include "item_loadouts.hpp"
+#include "monster_tracker.hpp"
 #include "quest_autoclear.hpp"
+#include "quest_timer_skip.hpp"
+#include "target_lock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -582,7 +589,40 @@ void on_smithy_panel_draw(Runtime &rt, Context &ctx) {
 // run inside that d-pad code, so the right stick turns and tilts the camera by how far it is pushed exactly where the
 // d-pad works. The offsets are the camera's (s4) and its tilt state's (s0) in that code. With --mouse-camera the mouse
 // turns and tilts it the same way, its motion in a frame standing for a push (kMousePixelsPerPush).
-constexpr int kRegV1 = 3, kRegA0 = 4, kRegA1 = 5, kRegS0 = 16, kRegS4 = 20;
+constexpr int kRegV0 = 2, kRegV1 = 3, kRegA0 = 4, kRegA1 = 5, kRegS0 = 16, kRegS4 = 20, kRegS5 = 21, kRegSp = 29;
+constexpr std::uint32_t kCameraYaw = 0x80;          // s16 in the camera: horizontal yaw angle
+
+// General QoL state (live-toggled from Esc > QoL or enabled from the launcher/CLI).
+std::atomic<bool> g_target_lock_camera{false};
+std::atomic<bool> g_skip_quest_clear_timer{false};
+std::atomic<bool> g_item_pouch_loadouts{false};
+std::atomic<bool> g_capturable_indicator{false};
+std::atomic<bool> g_quest_start_tracker{false};
+std::atomic<bool> g_infinite_whetstone{false};
+std::atomic<bool> g_damage_numbers_enabled{false};
+std::atomic<bool> g_combo_books_from_box{false};
+std::atomic<bool> g_infinite_paintballs{false};
+
+std::atomic<std::uint16_t> g_camera_yaw{0};
+std::atomic<bool> g_camera_yaw_valid{false};
+mhf::mhfu::QuestTimerSkip g_quest_timer_skip{{region::mh_quest_manager, region::mh_game_sys}};
+mhf::mhfu::InfiniteConsumables g_infinite_consumables{{region::mh_game_sys}};
+mhf::mhfu::ItemLoadouts g_item_loadouts{{region::mh_game_sys}};
+mhf::mhfu::MonsterTracker g_monster_tracker{
+    {region::mh_game_sys, region::mh_player_manager, region::mh_enemy_manager, region::mh_enemy_species_table,
+     region::mh_quest_manager}};
+mhf::mhfu::TargetLock g_target_lock;
+mhf::mhfu::DamageNumbers g_damage_numbers;
+
+void on_combine_rate_done(Runtime &rt, Context &ctx) {
+    ctx.gpr[kRegV0] = mhf::mhfu::apply_combo_books_rate(rt.memory(), {region::mh_game_sys}, ctx.gpr[kRegV0],
+                                                        g_combo_books_from_box.load(std::memory_order_relaxed));
+}
+
+void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
+    g_damage_numbers.on_enemy_damage_hook(rt.memory(), ctx.gpr[kRegS5], ctx.gpr[kRegSp], rt.now_us(),
+                                          g_damage_numbers_enabled.load(std::memory_order_relaxed));
+}
 constexpr std::uint32_t kCameraFov = 0x64;          // f32 in the camera: the field of view, set from the tilt level
 constexpr std::uint32_t kCameraPresetTable = 0x6C;  // u32 in the camera: the presets (the area's own, or the default)
 constexpr std::uint32_t kCameraPreset = 0x70;       // u32 in the camera: the preset the camera moves to
@@ -820,6 +860,11 @@ void on_camera_buttons_copied(Runtime &rt, Context &ctx) {
 // Before the camera tests the turn buttons (its button copy is in a1 as well): the stick, or else the mouse, holds Left
 // or Right down.
 void on_camera_turn_buttons_test(Runtime &rt, Context &ctx) {
+    const std::uint32_t cam_ctrl = ctx.gpr[kRegS4];
+    if (rt.memory().contains(cam_ctrl + kCameraYaw, 2u)) {
+        g_camera_yaw.store(rt.memory().load16(cam_ctrl + kCameraYaw), std::memory_order_relaxed);
+        g_camera_yaw_valid.store(true, std::memory_order_relaxed);
+    }
     float x = mhf::psp::controller_state(rt).right_stick_x;
     g_turn_push = g_camera_has_pad ? stick_push(x) * g_turn_speed : 0.0f;
     if (g_turn_push == 0.0f && g_mouse_dx != 0.0f) {
@@ -827,6 +872,12 @@ void on_camera_turn_buttons_test(Runtime &rt, Context &ctx) {
         g_turn_push = std::min(std::abs(g_mouse_dx) / kMousePixelsPerPush * g_mouse_speed, kMouseMostPush);
     } else {
         g_turn_rest = 0.0f;
+    }
+    if (g_target_lock_camera.load(std::memory_order_relaxed) && g_target_lock.locked()) {
+        const bool manual_turn = g_turn_push > 0.25f;
+        if (g_target_lock.steer_camera(rt.memory(), cam_ctrl, g_monster_tracker.player_pos(), manual_turn)) {
+            g_camera_yaw.store(rt.memory().load16(cam_ctrl + kCameraYaw), std::memory_order_relaxed);
+        }
     }
     if (g_turn_push == 0.0f) return;
     const std::uint32_t buttons = ctx.gpr[kRegS4] + kCameraButtons;
@@ -1128,6 +1179,15 @@ int main(int argc, char **argv) {
         else if (a == "--infinite-gathering-tools") g_gathering.infinite_tools = true;
         else if (a == "--modern-carving") g_gathering.modern_carving = true;
         else if (a == "--invulnerable-carve-quest") g_invulnerable_carve_quest = true; // enhancement, off by default
+        else if (a == "--target-lock-camera") g_target_lock_camera = true;
+        else if (a == "--skip-quest-clear-timer") g_skip_quest_clear_timer = true;
+        else if (a == "--item-pouch-loadouts") g_item_pouch_loadouts = true;
+        else if (a == "--capturable-indicator") g_capturable_indicator = true;
+        else if (a == "--quest-start-tracker") g_quest_start_tracker = true;
+        else if (a == "--infinite-whetstone") g_infinite_whetstone = true;
+        else if (a == "--damage-numbers") g_damage_numbers_enabled = true;
+        else if (a == "--combo-books-from-box") g_combo_books_from_box = true;
+        else if (a == "--infinite-paintballs") g_infinite_paintballs = true;
         else if (a == "--better-sharpness") better_sharpness = true;
         else if (a == "--key-quest-markers") g_key_quest_markers = true; // enhancement
         else if (a == "--horn-songs") horn_songs = true; // enhancement
@@ -1291,6 +1351,13 @@ int main(int argc, char **argv) {
             runtime.register_call_filter("mh_carve_invuln_damage", &filter_carve_invuln_damage);
             runtime.register_call_filter("mh_carve_invuln_roar_wind", &filter_carve_invuln_roar_wind);
         }
+        runtime.register_hook("mh_combine_rate_done", &on_combine_rate_done);
+        runtime.register_hook("mh_enemy_damage_apply", &on_enemy_damage_apply);
+        if (!controls_file.empty()) {
+            g_item_loadouts.set_storage_path((std::filesystem::path(controls_file).parent_path() / "item_loadouts.txt").string());
+        } else if (!options.memstick_root.empty()) {
+            g_item_loadouts.set_storage_path((std::filesystem::path(options.memstick_root) / "item_loadouts.txt").string());
+        }
         std::function<void()> extra;
         if (!dump_folder.empty() || seconds > 0 || !script.empty() || language_pick) {
             if (!dump_folder.empty()) std::filesystem::create_directories(dump_folder);
@@ -1434,11 +1501,35 @@ int main(int argc, char **argv) {
             frontend.offer_songs(horn_songs, mhf::overlay::parse_song_spot(horn_songs_place).value_or(mhf::overlay::SongSpot{}));
             extra = [&frontend, rt = &runtime, songs = mhf::mhfu::HornSongs{}, read_at = std::uint64_t{0},
                      previous = std::move(extra)]() mutable {
-                if (const std::uint64_t now = rt->now_us(); now - read_at >= 50'000) {
+                const std::uint64_t now = rt->now_us();
+                const auto &pad = mhf::psp::controller_state(*rt);
+                const bool in_quest_ovl = quest_overlay_at(*rt, region::mh_horn_songs.value_or(0));
+                if (in_quest_ovl) {
+                    g_quest_timer_skip.poll(rt->memory(), pad.buttons, now,
+                                            g_skip_quest_clear_timer.load(std::memory_order_relaxed));
+                    g_infinite_consumables.poll(rt->memory(),
+                                                g_infinite_whetstone.load(std::memory_order_relaxed),
+                                                g_infinite_paintballs.load(std::memory_order_relaxed));
+                    g_monster_tracker.poll(rt->memory(),
+                                           g_quest_start_tracker.load(std::memory_order_relaxed),
+                                           g_capturable_indicator.load(std::memory_order_relaxed));
+                    g_target_lock.update(g_monster_tracker, !frontend.game_input_blocked() && pad.right_stick_click,
+                                         g_target_lock_camera.load(std::memory_order_relaxed));
+                } else {
+                    g_quest_timer_skip.clear();
+                    g_infinite_consumables.clear(&rt->memory());
+                    g_monster_tracker.clear();
+                    g_target_lock.clear();
+                    g_damage_numbers.clear();
+                }
+                if (now - read_at >= 50'000) {
                     read_at = now;
                     frontend.set_song_panel(songs.read(*rt));
                     auto sprites = g_gathering.sprites(*rt);
                     auto text = sprites.empty() ? g_gathering.hint(*rt) : std::string{};
+                    if (sprites.empty() && text.empty() && g_quest_timer_skip.can_skip()) {
+                        text = g_quest_timer_skip.hint();
+                    }
                     frontend.set_game_hint(std::move(text), std::move(sprites));
                 }
                 if (previous) previous();
@@ -1454,6 +1545,21 @@ int main(int argc, char **argv) {
                                           "Shows how much of each sharpness tier is left during a quest.",
                                           false, better_sharpness ? 1 : 0, 0, 1, 1, "",
                                           [](int v) { g_better_sharpness = v != 0; }, "Combat & HUD"});
+                frontend.add_game_option({"damageNumbers", "Floating damage numbers",
+                                          "Shows World/Rise/Wilds-style floating damage numbers when hitting monsters.",
+                                          false, g_damage_numbers_enabled.load() ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) {
+                                              g_damage_numbers_enabled = v != 0;
+                                              if (v == 0) g_damage_numbers.clear();
+                                          }, "Combat & HUD"});
+                frontend.add_game_option({"capturableIndicator", "Capturable monster indicator",
+                                          "Shows a blue skull badge when a large monster in your area is ready to capture.",
+                                          false, g_capturable_indicator.load() ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) { g_capturable_indicator = v != 0; }, "Combat & HUD"});
+                frontend.add_game_option({"questStartTracker", "Quest-start monster tracker (60s)",
+                                          "Reveals large monsters on the map for the first minute of each quest.",
+                                          false, g_quest_start_tracker.load() ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) { g_quest_start_tracker = v != 0; }, "Combat & HUD"});
                 extra = [&frontend, &runtime, last_frame = std::uint64_t{0},
                          shown = std::optional<mhf::mhfu::Sharpness>{}, previous = std::move(extra)]() mutable {
                     if (previous) previous();
@@ -1501,9 +1607,42 @@ int main(int argc, char **argv) {
                     false, g_invulnerable_carve_quest.load() ? 1 : 0, 0, 1, 1, "",
                     [](int v) { g_invulnerable_carve_quest = v != 0; }, "Gathering & Carving"});
             }
-            extra = [&frontend, previous = std::move(extra), shown = std::optional<mhf::mhfu::QuestMarker>{},
-                     image = std::shared_ptr<const std::vector<std::uint32_t>>{}]() mutable {
+            extra = [&frontend, rt = &runtime, previous = std::move(extra),
+                     shown = std::optional<mhf::mhfu::QuestMarker>{},
+                     image = std::shared_ptr<const std::vector<std::uint32_t>>{},
+                     hud_drawn_at = std::uint64_t{0}]() mutable {
                 if (previous) previous();
+                if (g_monster_tracker.in_active_quest()) {
+                    const std::uint64_t now = rt->now_us();
+                    const bool show_cap = g_capturable_indicator.load(std::memory_order_relaxed) && g_monster_tracker.capturable_in_area();
+                    const bool show_lock = g_target_lock_camera.load(std::memory_order_relaxed) && g_target_lock.locked();
+                    const bool show_dmg = g_damage_numbers_enabled.load(std::memory_order_relaxed) && g_damage_numbers.active_count() > 0u;
+                    if (!show_cap && !show_lock && !show_dmg) {
+                        if (image) {
+                            image.reset();
+                            frontend.set_game_overlay(nullptr);
+                        }
+                    } else if (now - hud_drawn_at >= 33'000u) {
+                        hud_drawn_at = now;
+                        auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
+                        const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
+                        if (show_cap) mhf::mhfu::MonsterTracker::draw_capturable_badge(*buf, 456, 26, pulse);
+                        if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 456, show_cap ? 52 : 26, pulse);
+                        if (show_dmg) {
+                            const mhf::mhfu::CameraProjection cam{
+                                g_monster_tracker.player_pos(),
+                                g_camera_yaw.load(std::memory_order_relaxed),
+                                frontend.game_aspect(),
+                                g_camera_yaw_valid.load(std::memory_order_relaxed),
+                            };
+                            g_damage_numbers.render(*buf, cam, now);
+                        }
+                        image = std::move(buf);
+                        frontend.set_game_overlay(image);
+                    }
+                    shown.reset();
+                    return;
+                }
                 const auto marker = g_key_quest_markers ? g_quest_markers.marker() : std::nullopt;
                 if (marker != shown) {
                     shown = marker;
@@ -1542,7 +1681,61 @@ int main(int argc, char **argv) {
                                           false, g_quest_autoclear ? 1 : 0, 0, 1, 1, "",
                                           [](int v) { g_quest_autoclear = v != 0; }, "Quests & Menus"});
             }
+            frontend.add_game_option({"skipQuestClearTimer", "Skip post-quest countdown",
+                                      "Hold Select after Quest Clear to fast-forward the 60-second return timer.",
+                                      false, g_skip_quest_clear_timer.load() ? 1 : 0, 0, 1, 1, "",
+                                      [](int v) { g_skip_quest_clear_timer = v != 0; }, "Quests & Menus"});
+            frontend.add_game_option({"infiniteWhetstone", "Infinite whetstone",
+                                      "Sharpen without consuming Whetstones (supplies a temporary Whetstone if none carried).",
+                                      false, g_infinite_whetstone.load() ? 1 : 0, 0, 1, 1, "",
+                                      [](int v) { g_infinite_whetstone = v != 0; }, "Items & Crafting"});
+            frontend.add_game_option({"infinitePaintballs", "Infinite paintballs",
+                                      "Carrying at least 1 Paintball gives unlimited throws during quests.",
+                                      false, g_infinite_paintballs.load() ? 1 : 0, 0, 1, 1, "",
+                                      [](int v) { g_infinite_paintballs = v != 0; }, "Items & Crafting"});
+            frontend.add_game_option({"comboBooksFromBox", "Combo books from item box",
+                                      "Guarantees 100% combine success once you own all 5 Books of Combos (box or pouch).",
+                                      false, g_combo_books_from_box.load() ? 1 : 0, 0, 1, 1, "",
+                                      [](int v) { g_combo_books_from_box = v != 0; }, "Items & Crafting"});
+            frontend.add_game_option({"itemPouchLoadouts", "Item pouch loadouts",
+                                      "Save and restock up to 5 item pouch presets from your Item Box in Village or Hall.",
+                                      false, g_item_pouch_loadouts.load() ? 1 : 0, 0, 1, 1, "",
+                                      [](int v) { g_item_pouch_loadouts = v != 0; }, "Items & Crafting"});
             {
+                auto selected_slot = std::make_shared<std::size_t>(0u);
+                frontend.add_game_action({"Loadout slot", "Choose which item pouch preset slot (1-5) to save or load.",
+                                          "itemPouchLoadouts", "Item Pouch Loadouts",
+                                          {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5"}, 0, {},
+                                          [selected_slot](int v) -> std::string {
+                                              *selected_slot = static_cast<std::size_t>(std::clamp(v, 0, 4));
+                                              return g_item_loadouts.has_preset(*selected_slot)
+                                                         ? "Slot " + std::to_string(*selected_slot + 1) + " is saved."
+                                                         : "Slot " + std::to_string(*selected_slot + 1) + " is empty.";
+                                          }});
+                frontend.add_game_action({"Save current pouch", "Stores your current pouch layout into the selected slot (Village/Hall only).",
+                                          "itemPouchLoadouts", "Item Pouch Loadouts", {}, 0,
+                                          [rt = &runtime]() { return g_item_loadouts.can_use_loadouts(rt->memory()); },
+                                          [rt = &runtime, selected_slot](int) -> std::string {
+                                              return g_item_loadouts.save_preset(rt->memory(), *selected_slot).message;
+                                          }});
+                frontend.add_game_action({"Load from item box", "Deposits current pouch to box and withdraws the saved preset (Village/Hall only).",
+                                          "itemPouchLoadouts", "Item Pouch Loadouts", {}, 0,
+                                          [rt = &runtime, selected_slot]() {
+                                              return g_item_loadouts.can_use_loadouts(rt->memory()) &&
+                                                     g_item_loadouts.has_preset(*selected_slot);
+                                          },
+                                          [rt = &runtime, selected_slot](int) -> std::string {
+                                              return g_item_loadouts.apply_preset(rt->memory(), *selected_slot).message;
+                                          }});
+            }
+            {
+                frontend.add_game_option({"targetLockCamera", "Target lock-on camera (R3)",
+                                          "Press R3 (or Tab / Middle-Click) to lock onto or cycle large monsters in your area.",
+                                          false, g_target_lock_camera.load() ? 1 : 0, 0, 1, 1, "",
+                                          [](int v) {
+                                              g_target_lock_camera = v != 0;
+                                              if (v == 0) g_target_lock.clear();
+                                          }, "Camera"});
                 frontend.add_game_option({"analogCamera", "Analog camera",
                                           "The right stick turns and tilts the camera in proportion to how far it is pushed.",
                                           false, g_analog_camera ? 1 : 0, 0, 1, 1, "",
