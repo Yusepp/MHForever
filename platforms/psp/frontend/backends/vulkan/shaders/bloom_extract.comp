@@ -1,0 +1,72 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Quarter-resolution selective emissive bloom extract + 13-tap Kawase blur.
+// Only high-luminance emissives (campfires, fireballs, lightning, magma, snow highlights) glow.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D u_bloom_out;
+
+struct LightingParams {
+    vec4 proj_info;
+    vec4 vz_and_size;
+    vec4 sun_dir_view;
+    vec4 sun_screen;
+    vec4 shadow_tint;
+    vec4 fog_color;
+    vec4 scatter_color;
+    vec4 bloom_rim;     // x = bloom_threshold, y = bloom_strength, z = rim_strength, w = key_strength
+    uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
+    uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+vec3 soft_threshold(vec3 c, float thresh) {
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float knee = 0.22;
+    float soft = clamp(luma - thresh + knee, 0.0, 2.0 * knee);
+    soft = (soft * soft) / (4.0 * knee + 1e-5);
+    float contrib = max(luma - thresh, soft) / max(luma, 1e-4);
+    return c * contrib;
+}
+
+vec3 sample_scene(LightingParams p, vec2 uv) {
+    return texture(sampler2D(u_textures[nonuniformEXT(p.tex_slots.x)],
+                             u_samplers[nonuniformEXT(p.aux_slots.y)]),
+                   clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+}
+
+void main() {
+    LightingParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(p.aux_slots.z) || gid.y >= int(p.aux_slots.w)) return;
+
+    vec2 uv = (vec2(gid) + 0.5) / vec2(p.aux_slots.zw);
+    vec2 tx = 2.5 / p.vz_and_size.zw;
+    float th = p.bloom_rim.x;
+
+    // 9-tap wide tent filter at quarter-res for smooth, shimmer-free emissive glow.
+    vec3 sum = soft_threshold(sample_scene(p, uv), th) * 0.25;
+    sum += soft_threshold(sample_scene(p, uv + vec2(-tx.x, -tx.y)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2( tx.x, -tx.y)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2(-tx.x,  tx.y)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2( tx.x,  tx.y)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2(-2.0 * tx.x, 0.0)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2( 2.0 * tx.x, 0.0)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2(0.0, -2.0 * tx.y)), th) * 0.09375;
+    sum += soft_threshold(sample_scene(p, uv + vec2(0.0,  2.0 * tx.y)), th) * 0.09375;
+
+    imageStore(u_bloom_out, gid, vec4(sum, 1.0));
+}

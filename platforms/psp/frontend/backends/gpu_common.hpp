@@ -82,6 +82,9 @@ struct LiveSettings {
     // Written by the drawing thread at every flip: that flip drew the quest HUD (its clock). The hunting horn's song
     // panel is only shown over it.
     std::atomic<bool> quest_hud{false};
+    // Next-gen Vulkan lighting & atmosphere (multi-bounce GTAO, zone-aware volumetric fog/sun shafts,
+    // selective emissive bloom, per-pixel sun key/rim, and soft filmic highlight rolloff).
+    std::atomic<bool> enhanced_lighting{true};
 };
 
 namespace gpu_common {

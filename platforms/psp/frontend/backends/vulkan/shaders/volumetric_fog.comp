@@ -1,0 +1,116 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Quarter-resolution zone-aware Volumetric Sun Shafts & Atmospheric Height Fog.
+// Auto-disables sun shafts in caves/indoors and adapts tint/density per MHFU biome + live PSP fog color.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D u_vol_out;
+
+struct LightingParams {
+    vec4 proj_info;     // x = 1/proj00, y = 1/proj11, z = proj10, w = proj14
+    vec4 vz_and_size;   // x = vz_scale, y = vz_center, z = full_w, w = full_h
+    vec4 sun_dir_view;  // xyz = normalized sun dir in view space, w = is_cave (0 or 1)
+    vec4 sun_screen;    // xy = sun UV in [0,1], z = sun_facing [0,1], w = frame_jitter
+    vec4 shadow_tint;   // rgb = sky/biome shadow tint, a = ao_strength
+    vec4 fog_color;     // rgb = biome/PSP fog color, a = fog_density
+    vec4 scatter_color; // rgb = volumetric sun scatter color, a = scatter_strength
+    vec4 bloom_rim;     // x = bloom_threshold, y = bloom_strength, z = rim_strength, w = key_strength
+    uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
+    uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+float linear_eye_z(LightingParams p, float d) {
+    float zn = (d * 65535.0 - p.vz_and_size.y) / max(abs(p.vz_and_size.x), 1e-3);
+    float denom = zn + p.proj_info.z;
+    if (abs(denom) < 1e-5) denom = (denom >= 0.0 ? 1e-5 : -1e-5);
+    return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
+}
+
+// Henyey-Greenstein phase function for forward atmospheric scattering.
+float hg_phase(float cos_theta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cos_theta, 0.05);
+    return (1.0 - g2) / (4.0 * 3.14159265 * pow(denom, 1.5));
+}
+
+void main() {
+    LightingParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(p.aux_slots.z) || gid.y >= int(p.aux_slots.w)) return;
+
+    ivec2 full_size = ivec2(p.vz_and_size.zw);
+    ivec2 full_max = full_size - ivec2(1);
+    ivec2 ip = clamp(gid * 4 + ivec2(2), ivec2(0), full_max);
+    uint dslot = p.tex_slots.y;
+    float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
+
+    vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec3 ray_dir = normalize(vec3(ndc.x * p.proj_info.x, ndc.y * p.proj_info.y, -1.0));
+
+    bool is_sky = (d0 >= 0.99992);
+    float max_dist = is_sky ? 1400.0 : min(linear_eye_z(p, d0), 1600.0);
+
+    // 1. Atmospheric distance + gentle height-modulated fog (starts smoothly beyond foreground hunter).
+    float fog_start = p.sun_dir_view.w > 0.5 ? 55.0 : 90.0;
+    float eff_dist = max(max_dist - fog_start, 0.0);
+    // Slightly denser mist lower in the view (valley floor) and thinner high up.
+    float height_mod = clamp(1.15 - ndc.y * 0.35, 0.55, 1.35);
+    float optical_depth = eff_dist * p.fog_color.a * height_mod;
+    float transmittance = is_sky ? 1.0 : exp(-optical_depth);
+    // Keep foreground and mid-ground clear so combat visibility is never compromised.
+    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.72);
+    vec3 fog_scatter = p.fog_color.rgb * (1.0 - transmittance);
+
+    // 2. Outdoor Volumetric Sun Shafts (disabled automatically in caves/indoors).
+    vec3 shafts = vec3(0.0);
+    if (p.sun_dir_view.w < 0.5 && p.scatter_color.a > 0.001 && p.sun_screen.z > 0.02) {
+        float cos_theta = clamp(dot(ray_dir, normalize(p.sun_dir_view.xyz)), -1.0, 1.0);
+        float phase = clamp(hg_phase(cos_theta, 0.62) * 1.35, 0.0, 2.5);
+
+        // Radial occlusion march toward projected sun position (10 jittered steps).
+        vec2 to_sun = p.sun_screen.xy - uv;
+        float sun_dist = length(to_sun);
+        vec2 step_uv = (to_sun / max(sun_dist, 1e-4)) * min(sun_dist, 0.55) / 10.0;
+        float jitter = ign(vec2(gid) + p.sun_screen.w * 11.17);
+
+        float lit_sum = 0.0;
+        float weight_sum = 0.0;
+        for (int s = 0; s < 10; ++s) {
+            float t = (float(s) + jitter) / 10.0;
+            vec2 suv = uv + step_uv * (float(s) + jitter);
+            if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) break;
+            ivec2 sip = clamp(ivec2(suv * p.vz_and_size.zw), ivec2(0), full_max);
+            float sd = texelFetch(u_textures[nonuniformEXT(dslot)], sip, 0).r;
+            float w = 1.0 - t * 0.65;
+            // Sky gaps and far background let sunlight stream through; foreground rock/trees occlude shafts.
+            float unoccluded = smoothstep(0.996, 0.99985, sd);
+            lit_sum += unoccluded * w;
+            weight_sum += w;
+        }
+        float shaft_vis = weight_sum > 0.0 ? (lit_sum / weight_sum) : 0.0;
+        float dist_atten = is_sky ? 0.55 : clamp(eff_dist / 420.0, 0.12, 1.0);
+        float radial_falloff = exp(-sun_dist * 1.65);
+        shafts = p.scatter_color.rgb * (shaft_vis * phase * dist_atten * radial_falloff * p.scatter_color.a * p.sun_screen.z);
+    }
+
+    imageStore(u_vol_out, gid, vec4(fog_scatter + shafts, transmittance));
+}

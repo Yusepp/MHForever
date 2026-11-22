@@ -25,6 +25,10 @@ SHADERS = [
     ("kShadowFactorCompSpv", "shadow_factor.comp"),
     ("kShadowApplyCompSpv", "shadow_apply.comp"),
     ("kPlaceV2CompSpv", "place_v2.comp"),
+    ("kGtaoCompSpv", "gtao.comp"),
+    ("kVolumetricFogCompSpv", "volumetric_fog.comp"),
+    ("kBloomExtractCompSpv", "bloom_extract.comp"),
+    ("kLightingCompositeCompSpv", "lighting_composite.comp"),
 ]
 
 

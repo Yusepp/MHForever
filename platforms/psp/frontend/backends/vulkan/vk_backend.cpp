@@ -12,6 +12,7 @@
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
 #include "vk_interpolate.hpp"
+#include "vk_lighting.hpp"
 #include "vk_pipelines.hpp"
 #include "vk_shadows.hpp"
 #include "vk_swapchain.hpp"
@@ -231,6 +232,7 @@ private:
     void apply_live_scale();
     void apply_live_fps();
     void render_interpolated_subframe(float phase);
+    void apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in);
     void read_back();
     void capture_clean_3d_snapshot(RenderTarget &rt);
     void copy_shown_to_vram(RenderTarget *shown);
@@ -284,6 +286,7 @@ private:
     vk::Pipelines pipelines_;
     vk::PackStreamer pack_streamer_;
     vk::ShadowCompute shadow_compute_;
+    vk::LightingPipeline lighting_;
     vk::GpuInterpolator interpolator_;
 
     VkImageResource blur_a_;
@@ -358,6 +361,9 @@ private:
     std::uint32_t killcam_matched_oy_ = 0;
     bool frame_had_3d_ = false;
     bool captured_clean_3d_ = false;
+    bool lit_3d_this_frame_ = false;
+    vk::LightingFrameInput cur_light_in_{};
+    vk::LightingFrameInput last_light_in_{};
     VkImageResource vram_rb_img_;
     VkBuffer vram_rb_buf_ = VK_NULL_HANDLE;
     VmaAllocation vram_rb_alloc_ = VK_NULL_HANDLE;
@@ -414,6 +420,7 @@ bool VkBackend::init() {
     pack_streamer_.init(ctx_, live_->texture_pack_folder, live_->texture_pack_game,
                         live_->builtin_textures_folder, live_->texture_pack_mipmaps.load());
     shadow_compute_.init(ctx_, descriptors_.layout());
+    lighting_.init(ctx_, descriptors_.layout(), live_);
     interpolator_.init(ctx_);
 
     for (int i = 0; i < kFramesInFlight; ++i) {
@@ -449,7 +456,7 @@ void VkBackend::shutdown() {
 
     for (auto &[addr, rt] : targets_) {
         rt.color.destroy_immediate(ctx_, &descriptors_);
-        rt.depth.destroy_immediate(ctx_, nullptr);
+        rt.depth.destroy_immediate(ctx_, &descriptors_);
     }
     targets_.clear();
 
@@ -473,7 +480,7 @@ void VkBackend::shutdown() {
         vram_rb_mapped_ = nullptr;
     }
     interp_rt_.color.destroy_immediate(ctx_, &descriptors_);
-    interp_rt_.depth.destroy_immediate(ctx_, nullptr);
+    interp_rt_.depth.destroy_immediate(ctx_, &descriptors_);
     auto destroy_snap_buf = [&](SnapRawBuf &sb) {
         if (sb.buf != VK_NULL_HANDLE) {
             vmaDestroyBuffer(ctx_.allocator, sb.buf, sb.alloc);
@@ -485,6 +492,7 @@ void VkBackend::shutdown() {
 
     pack_streamer_.shutdown(ctx_, descriptors_);
     shadow_compute_.shutdown(ctx_, descriptors_);
+    lighting_.shutdown(ctx_, descriptors_);
     interpolator_.shutdown(ctx_);
 
     collect_retired(UINT64_MAX);
@@ -569,7 +577,13 @@ void VkBackend::transition_resource(VkImageResource &res, VkImageLayout new_layo
         src_stage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
         src_access = 0;
     } else if (res.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        src_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        src_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        src_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    } else if (res.layout == VK_IMAGE_LAYOUT_GENERAL) {
+        src_stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        src_access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    } else if (res.layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         src_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     } else if (res.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -606,10 +620,12 @@ RenderTarget &VkBackend::ensure_target(std::uint32_t address, std::uint32_t stri
         rt.format = format;
         rt.color.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                            VK_IMAGE_USAGE_STORAGE_BIT |
                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                         VK_IMAGE_ASPECT_COLOR_BIT);
-        rt.depth.create(ctx_, nullptr, pw, ph, VK_FORMAT_D32_SFLOAT,
-                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        rt.depth.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_D32_SFLOAT,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                            VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                         VK_IMAGE_ASPECT_DEPTH_BIT);
     } else {
         rt.stride = w;
@@ -717,6 +733,28 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 
     const bool clear = (ge.reg(kClearMode) & 1u) != 0;
     const bool textured = !clear && (ge.reg(kTextureMapEnable) & 1u) != 0;
+    if (!setup_.through) {
+        if ((ge.reg(0x18u) & 1u) != 0) {
+            auto f24 = [](std::uint32_t r) {
+                const std::uint32_t bits = r << 8u;
+                float f = 0.0f;
+                std::memcpy(&f, &bits, 4);
+                return f;
+            };
+            cur_light_in_.light0_dir[0] = f24(ge.reg(0x63u));
+            cur_light_in_.light0_dir[1] = f24(ge.reg(0x64u));
+            cur_light_in_.light0_dir[2] = f24(ge.reg(0x65u));
+            cur_light_in_.has_light0 = true;
+        }
+        if ((ge.reg(kFogEnable) & 1u) != 0) {
+            unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
+            cur_light_in_.has_psp_fog = true;
+        }
+        if ((ge.reg(kTextureMapEnable) & 1u) != 0) {
+            lighting_.note_texture_hash(ge.texture_hash());
+        }
+    }
+
     if (textured) {
         const auto info = ge.texture_info();
         setup_.tex_width = static_cast<float>(std::max(info.width, 1u));
@@ -887,8 +925,14 @@ void VkBackend::draw_batch() {
     if (!clear && is_shown_target(setup_.target)) {
         if (!setup_.through) {
             frame_had_3d_ = true;
-        } else if (frame_had_3d_ && !captured_clean_3d_ && !setup_.self_sampled) {
-            capture_clean_3d_snapshot(rt);
+        } else if (frame_had_3d_ && !setup_.self_sampled) {
+            if (!lit_3d_this_frame_) {
+                apply_enhanced_lighting(rt, cur_light_in_);
+                lit_3d_this_frame_ = true;
+            }
+            if (!captured_clean_3d_) {
+                capture_clean_3d_snapshot(rt);
+            }
         }
     }
 
@@ -1132,6 +1176,14 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
         cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
     }
     cur_layer_ = draw.layer;
+    if (!draw.through && !draw.clear) {
+        const auto sum_tmp = interpolation::summarize(draw);
+        if (sum_tmp.perspective) {
+            std::copy_n(sum_tmp.projection.data(), 16, cur_light_in_.proj);
+            cur_light_in_.vz_scale = draw.viewport[2];
+            cur_light_in_.vz_center = draw.viewport[5];
+        }
+    }
     if (subframes_ <= 1) return;
     cur_draw_index_ = static_cast<std::uint32_t>(cur_snap_.summaries.size());
     cur_snap_.summaries.push_back(interpolation::summarize(draw));
@@ -2012,6 +2064,33 @@ bool VkBackend::upload_snap_raw(SnapRawBuf &dst, const std::vector<vk::RawGpuVer
     return true;
 }
 
+void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in) {
+    if (!lighting_.ready() || !live_->enhanced_lighting.load(std::memory_order_relaxed)) return;
+    if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE || rt.depth.bindless_slot == 0) return;
+
+    const std::uint32_t w = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
+    const std::uint32_t h = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
+    if (w < 64u || h < 64u) return;
+
+    ensure_recording();
+    end_render_pass();
+
+    FrameSlice &f = frames_[frame_slot_];
+    auto pslice = f.params.allocate(sizeof(vk::LightingComputeParams) * vk::LightingPipeline::kParamSlotsPerDispatch, 16);
+    if (!pslice.ptr) return;
+
+    transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    transition_resource(rt.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+    vk::LightingFrameInput fin = in;
+    fin.frame_index = frame_number_;
+    lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
+                       rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address);
+    rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
+}
+
 void VkBackend::render_interpolated_subframe(float phase) {
     if (!interp_can_blend_ || blend_older_.raw_verts.empty() || snap_raw_old_.buf == VK_NULL_HANDLE) {
         // Cut / 2D / movie screen: present latest rendered frame at target cadence so pacing & MangoHUD stay locked.
@@ -2034,10 +2113,12 @@ void VkBackend::render_interpolated_subframe(float phase) {
         interp_rt_.height = blend_older_.height;
         interp_rt_.stride = blend_older_.width;
         interp_rt_.color.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
-                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_STORAGE_BIT,
                                 VK_IMAGE_ASPECT_COLOR_BIT);
-        interp_rt_.depth.create(ctx_, nullptr, pw, ph, VK_FORMAT_D32_SFLOAT,
-                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+        interp_rt_.depth.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_D32_SFLOAT,
+                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT);
     }
 
     // Velocity-matched cubic Hermite phase smoothing (zero extra frame latency):
@@ -2171,7 +2252,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
     depth_att.imageView = interp_rt_.depth.view;
     depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_att.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depth_att.clearValue.depthStencil = {1.0f, 0u};
 
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO, nullptr, 0, {{0, 0}, {pw, ph}}, 1, 0, 1, &color_att, &depth_att, nullptr};
@@ -2193,14 +2274,40 @@ void VkBackend::render_interpolated_subframe(float phase) {
     VkViewport vp_full{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph), 0.0f, 1.0f};
     vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
     VkPipeline last_pipe = VK_NULL_HANDLE;
+    bool interp_saw_3d = false;
+    bool interp_lit = false;
 
     for (const auto &rb : blend_older_.batches) {
         if (rb.v_count == 0 || rb.setup.target != blend_older_.shown_addr) continue;
-        auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
-        if (!pslice.ptr) break;
-
         const auto R = [&](std::uint32_t reg) { return key_reg(rb.setup.key, reg); };
         const bool clear = (R(kClearMode) & 1u) != 0;
+
+        // Run enhanced Vulkan lighting strictly after 3D draws and before 2D HUD draws on 120/180 Hz subframes too!
+        if (!clear) {
+            if (!rb.setup.through) {
+                interp_saw_3d = true;
+            } else if (interp_saw_3d && !interp_lit && lighting_.ready() &&
+                       live_->enhanced_lighting.load(std::memory_order_relaxed)) {
+                vkCmdEndRendering(f.cmd);
+                apply_enhanced_lighting(interp_rt_, last_light_in_);
+                interp_lit = true;
+                transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                transition_resource(interp_rt_.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                vkCmdBeginRendering(f.cmd, &ri);
+                vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+                vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
+                last_pipe = VK_NULL_HANDLE;
+            }
+        }
+
+        auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
+        if (!pslice.ptr) break;
         const bool textured = !clear && (R(kTextureMapEnable) & 1u) != 0;
         const bool fog = !clear && !rb.setup.through && (R(kFogEnable) & 1u) != 0;
         const bool alpha_test = !clear && (R(kAlphaTestEnable) & 1u) != 0;
@@ -2328,6 +2435,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
     }
 
     vkCmdEndRendering(f.cmd);
+    if (interp_saw_3d && !interp_lit && lighting_.ready() && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
+        apply_enhanced_lighting(interp_rt_, last_light_in_);
+    }
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
@@ -2358,6 +2468,10 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
     if (have_gpu_frame) {
         RenderTarget &rt = it->second;
+        if (frame_had_3d_ && !lit_3d_this_frame_) {
+            apply_enhanced_lighting(rt, cur_light_in_);
+            lit_3d_this_frame_ = true;
+        }
         if (frame_had_3d_ && !captured_clean_3d_) {
             capture_clean_3d_snapshot(rt);
         }
@@ -2467,8 +2581,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     }
 
     last_menu_draw_ = now;
+    if (frame_had_3d_) last_light_in_ = cur_light_in_;
+    lighting_.end_frame_zone_vote();
     frame_had_3d_ = false;
     captured_clean_3d_ = false;
+    lit_3d_this_frame_ = false;
+    cur_light_in_ = vk::LightingFrameInput{};
     if ((frame_number_ % 60u) == 0u) {
         pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + 1u);
     }
