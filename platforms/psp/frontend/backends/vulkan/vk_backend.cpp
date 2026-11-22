@@ -2033,20 +2033,19 @@ void VkBackend::render_interpolated_subframe(float phase) {
                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
     }
 
-    // Velocity-matched cubic Hermite camera phase smoothing (zero extra frame latency):
-    // When consecutive camera motion is continuous, ease angular velocity across 30 Hz boundaries.
-    float cam_phase = phase;
+    // Velocity-matched cubic Hermite phase smoothing (zero extra frame latency):
+    // Applied uniformly to the entire scene (characters + terrain) so skinned models never desync from the ground.
+    float scene_phase = phase;
     if (has_prev_cam_ && last_cam_motion_.valid && prev_cam_motion_.valid && phase > 0.0f && phase < 1.0f) {
         const float a_curr = last_cam_motion_.angle;
         const float a_prev = prev_cam_motion_.angle;
-        if (a_curr > 1e-4f && a_prev > 1e-4f) {
-            const float ratio = std::clamp(a_prev / a_curr, 0.5f, 1.5f);
+        if (a_curr > 0.01f && a_prev > 0.01f) {
+            const float ratio = std::clamp(a_prev / a_curr, 0.7f, 1.3f);
             const float m0 = 0.5f * (ratio + 1.0f);
             const float t = phase;
             const float t2 = t * t;
             const float t3 = t2 * t;
-            // Hermite basis from 0 -> 1 with incoming tangent m0 and outgoing tangent 1.0.
-            cam_phase = std::clamp((t3 - 2.0f * t2 + t) * m0 + (-2.0f * t3 + 3.0f * t2) + (t3 - t2), 0.0f, 1.0f);
+            scene_phase = std::clamp((t3 - 2.0f * t2 + t) * m0 + (-2.0f * t3 + 3.0f * t2) + (t3 - t2), 0.0f, 1.0f);
         }
     }
 
@@ -2069,6 +2068,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
         const auto &older = blend_older_.summaries[i];
         const auto eye_old = interpolation::multiply(older.view, older.world);
         interpolation::Matrix eye_blend = eye_old;
+        interpolation::Matrix proj_blend = older.projection;
         const std::int32_t partner = (i < last_matching_.newer_of.size()) ? last_matching_.newer_of[i] : interpolation::Matching::kNoPartner;
         const bool has_partner = (partner >= 0 && static_cast<std::size_t>(partner) < blend_newer_.summaries.size());
         if (has_partner) {
@@ -2076,15 +2076,18 @@ void VkBackend::render_interpolated_subframe(float phase) {
             const auto eye_new = interpolation::multiply(newer.view, newer.world);
             interpolation::RigidMotion rm;
             if (interpolation::rigid_between(eye_old, eye_new, rm)) {
-                const float use_t = older.skinned ? phase : cam_phase;
-                eye_blend = interpolation::follow_rigid(eye_old, rm, use_t);
+                eye_blend = interpolation::follow_rigid(eye_old, rm, scene_phase);
             } else if (last_cam_motion_.valid) {
-                eye_blend = interpolation::blend_eye(eye_old, eye_new, last_cam_motion_, phase);
+                eye_blend = interpolation::blend_eye(eye_old, eye_new, last_cam_motion_, scene_phase);
             } else {
-                eye_blend = interpolation::blend_affine(eye_old, eye_new, phase);
+                eye_blend = interpolation::blend_affine(eye_old, eye_new, scene_phase);
             }
-        } else if (partner == interpolation::Matching::kFollowCamera && last_cam_motion_.valid) {
-            eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, cam_phase);
+            // Interpolate projection matrix too so FOV / depth zoom transitions run smoothly at 120/180 FPS.
+            proj_blend = interpolation::blend_linear(older.projection, newer.projection, scene_phase);
+        } else if (older.eligible && last_cam_motion_.valid) {
+            // Both kFollowCamera and unpaired 3D draws (e.g. scenery leaving frustum during a zoom)
+            // follow the camera motion so they never freeze/lag behind the scene!
+            eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, scene_phase);
         }
 
         // Map world -> interpolated eye via eye_blend * inverse(older.world).
@@ -2095,12 +2098,12 @@ void VkBackend::render_interpolated_subframe(float phase) {
         }
         pack_3x4(world_to_eye_old, transforms[i].mv_old);
 
-        // Dual-stream per-vertex interpolation for matched draws with matching raw vertex counts
-        // (animates skinned hunters, monsters, wings, tails, cloth, and scrolling UVs at 120/180 FPS!).
+        // Dual-stream per-vertex interpolation for matched SKINNED draws (hunters, monsters, NPCs, Palicos).
+        // Rigid scenery/skyboxes stay on pure rigid mv_old so they never suffer vertex-order mismatch or popping.
         bool has_vertex_pair = false;
         std::uint32_t old_start = (i < blend_older_.draw_raw_start.size()) ? blend_older_.draw_raw_start[i] : 0u;
         std::uint32_t new_start = 0u;
-        if (has_partner && snap_raw_new_.buf != VK_NULL_HANDLE) {
+        if (older.skinned && has_partner && snap_raw_new_.buf != VK_NULL_HANDLE) {
             const std::size_t pi = static_cast<std::size_t>(partner);
             const std::uint32_t old_cnt = (i < blend_older_.draw_raw_count.size()) ? blend_older_.draw_raw_count[i] : 0u;
             const std::uint32_t new_cnt = (pi < blend_newer_.draw_raw_count.size()) ? blend_newer_.draw_raw_count[pi] : 0u;
@@ -2119,7 +2122,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
             pack_3x4(world_to_eye_old, transforms[i].mv_new);
         }
 
-        std::copy_n(older.projection.data(), 16, transforms[i].proj);
+        std::copy_n(proj_blend.data(), 16, transforms[i].proj);
         const auto &vp = blend_older_.viewports[i];
         transforms[i].vp_scale[0] = vp[0];
         transforms[i].vp_scale[1] = vp[1];
@@ -2132,13 +2135,13 @@ void VkBackend::render_interpolated_subframe(float phase) {
         transforms[i].pair_info[0] = old_start;
         transforms[i].pair_info[1] = new_start;
         transforms[i].pair_info[2] = has_vertex_pair ? 1u : 0u;
-        const float max_deform = older.skinned ? 90.0f : 45.0f;
+        const float max_deform = 90.0f;
         std::memcpy(&transforms[i].pair_info[3], &max_deform, sizeof(float));
     }
 
     // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
     const std::uint32_t raw_count = static_cast<std::uint32_t>(blend_older_.raw_verts.size());
-    interpolator_.dispatch_place_v2(f.cmd, snap_raw_old_.addr, snap_raw_new_.addr, tslice.address, raw_count, phase);
+    interpolator_.dispatch_place_v2(f.cmd, snap_raw_old_.addr, snap_raw_new_.addr, tslice.address, raw_count, scene_phase);
 
     // 3. Render interpolated 3D + 2D batches into interp_rt_ via Dynamic Rendering.
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
