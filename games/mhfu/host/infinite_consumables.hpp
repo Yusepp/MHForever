@@ -16,10 +16,10 @@ struct InfiniteConsumablesSymbols {
     }
 };
 
-// MHFU item IDs (verified identical across EU, US, JP, FUComplete).
-inline constexpr std::uint16_t kItemPaintball = 58u;
-inline constexpr std::uint16_t kItemWhetstone = 153u;
-inline constexpr std::uint16_t kItemMiniWhetstone = 867u;
+// MHFU item IDs (verified from MHFU/MHP2G item tables, identical across EU, US, JP, FUComplete).
+inline constexpr std::uint16_t kItemPaintball = 64u;       // 0x0040
+inline constexpr std::uint16_t kItemWhetstone = 153u;      // 0x0099
+inline constexpr std::uint16_t kItemMiniWhetstone = 867u;  // 0x0363
 
 // Keeps Whetstones and Paintballs infinite during quests (restoring consumed uses and supplying a
 // temporary item when none were packed, removed cleanly upon returning to the village).
