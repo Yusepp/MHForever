@@ -232,6 +232,7 @@ private:
     void submit_and_present(std::uint32_t swap_img_idx);
     void apply_live_scale();
     void apply_live_fps();
+    void prepare_interp_draws();
     void render_interpolated_subframe(float phase);
     void apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in);
     void read_back();
@@ -414,6 +415,25 @@ private:
     SnapRawBuf snap_raw_old_[2];
     SnapRawBuf snap_raw_new_[2];
     int snap_buf_idx_ = 0;
+
+    struct PreparedDraw {
+        bool active = false;
+        bool has_partner = false;
+        bool has_rigid = false;
+        bool follow_cam = false;
+        bool has_inv_world_old = false;
+        bool has_vertex_pair = false;
+        bool proj_differs = false;
+        std::size_t partner = 0;
+        std::uint32_t old_start = 0;
+        std::uint32_t new_start = 0;
+        interpolation::Matrix eye_old{};
+        interpolation::Matrix eye_new{};
+        interpolation::Matrix inv_world_old{};
+        interpolation::Matrix inv_world_new{};
+        interpolation::RigidMotion rm{};
+    };
+    std::vector<PreparedDraw> prepared_draws_;
 
     RenderTarget interp_rt_;
     bool interp_active_ = false;
@@ -2320,6 +2340,56 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
     rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
 }
 
+void VkBackend::prepare_interp_draws() {
+    const std::size_t ndraws = blend_older_.summaries.size();
+    prepared_draws_.resize(ndraws);
+    const SnapRawBuf &cur_new_buf = snap_raw_new_[snap_buf_idx_];
+    const bool new_buf_ok = cur_new_buf.buf != VK_NULL_HANDLE &&
+                            cur_new_buf.cap >= blend_newer_.raw_verts.size() * sizeof(vk::RawGpuVertex);
+
+    for (std::size_t i = 0; i < ndraws; ++i) {
+        PreparedDraw &pd = prepared_draws_[i];
+        const std::uint32_t old_cnt = (i < blend_older_.draw_raw_count.size()) ? blend_older_.draw_raw_count[i] : 0u;
+        if (old_cnt == 0u) {
+            pd.active = false;
+            continue;
+        }
+        pd.active = true;
+        const auto &older = blend_older_.summaries[i];
+        pd.eye_old = interpolation::multiply(older.view, older.world);
+        pd.has_inv_world_old = interpolation::affine_inverse(older.world, pd.inv_world_old);
+        pd.old_start = (i < blend_older_.draw_raw_start.size()) ? blend_older_.draw_raw_start[i] : 0u;
+        pd.new_start = 0u;
+        pd.has_rigid = false;
+        pd.follow_cam = false;
+        pd.has_vertex_pair = false;
+        pd.proj_differs = false;
+
+        const std::int32_t partner = (i < last_matching_.newer_of.size()) ? last_matching_.newer_of[i] : interpolation::Matching::kNoPartner;
+        pd.has_partner = (partner >= 0 && static_cast<std::size_t>(partner) < blend_newer_.summaries.size());
+        if (pd.has_partner) {
+            const std::size_t pi = static_cast<std::size_t>(partner);
+            pd.partner = pi;
+            const auto &newer = blend_newer_.summaries[pi];
+            pd.eye_new = interpolation::multiply(newer.view, newer.world);
+            pd.has_rigid = interpolation::rigid_between(pd.eye_old, pd.eye_new, pd.rm);
+            pd.proj_differs = (older.projection != newer.projection);
+            if (older.skinned && new_buf_ok) {
+                const std::uint32_t new_cnt = (pi < blend_newer_.draw_raw_count.size()) ? blend_newer_.draw_raw_count[pi] : 0u;
+                const std::uint32_t cand_new_start = (pi < blend_newer_.draw_raw_start.size()) ? blend_newer_.draw_raw_start[pi] : 0u;
+                if (old_cnt == new_cnt &&
+                    static_cast<std::size_t>(cand_new_start) + new_cnt <= blend_newer_.raw_verts.size() &&
+                    interpolation::affine_inverse(newer.world, pd.inv_world_new)) {
+                    pd.new_start = cand_new_start;
+                    pd.has_vertex_pair = true;
+                }
+            }
+        } else if (older.eligible && last_cam_motion_.valid) {
+            pd.follow_cam = true;
+        }
+    }
+}
+
 void VkBackend::render_interpolated_subframe(float phase) {
     const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (prof_.enabled) ++prof_.interp_calls;
@@ -2380,7 +2450,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
         }
     }
 
-    // 1. Build per-draw interpolated DrawTransform array (tiny CPU loop: ~100-300 draws, <0.05 ms).
+    // 1. Build per-draw interpolated DrawTransform array from precomputed per-frame invariants.
     FrameSlice &f = frames_[frame_slot_];
     const std::size_t ndraws = blend_older_.summaries.size();
     auto tslice = f.params.allocate(ndraws * sizeof(vk::DrawTransform), 16);
@@ -2395,82 +2465,71 @@ void VkBackend::render_interpolated_subframe(float phase) {
         out[8] = m[2]; out[9] = m[6]; out[10] = m[10]; out[11] = m[14];
     };
     auto *transforms = reinterpret_cast<vk::DrawTransform *>(tslice.ptr);
+    const float max_deform = 90.0f;
+    std::uint32_t max_deform_bits = 0;
+    std::memcpy(&max_deform_bits, &max_deform, sizeof(float));
+    const bool zero_phase = (scene_phase <= 0.0f);
+
     for (std::size_t i = 0; i < ndraws; ++i) {
+        const PreparedDraw &pd = prepared_draws_[i];
+        if (!pd.active) continue; // zero vertices in raw_verts -> never read by place_v2.comp!
+
         const auto &older = blend_older_.summaries[i];
-        const auto eye_old = interpolation::multiply(older.view, older.world);
-        interpolation::Matrix eye_blend = eye_old;
-        interpolation::Matrix proj_blend = older.projection;
-        const std::int32_t partner = (i < last_matching_.newer_of.size()) ? last_matching_.newer_of[i] : interpolation::Matching::kNoPartner;
-        const bool has_partner = (partner >= 0 && static_cast<std::size_t>(partner) < blend_newer_.summaries.size());
-        if (has_partner) {
-            const auto &newer = blend_newer_.summaries[static_cast<std::size_t>(partner)];
-            const auto eye_new = interpolation::multiply(newer.view, newer.world);
-            interpolation::RigidMotion rm;
-            if (interpolation::rigid_between(eye_old, eye_new, rm)) {
-                eye_blend = interpolation::follow_rigid(eye_old, rm, scene_phase);
-            } else if (last_cam_motion_.valid) {
-                eye_blend = interpolation::blend_eye(eye_old, eye_new, last_cam_motion_, scene_phase);
-            } else {
-                eye_blend = interpolation::blend_affine(eye_old, eye_new, scene_phase);
-            }
-            // Interpolate projection matrix too so FOV / depth zoom transitions run smoothly at 120/180 FPS.
-            proj_blend = interpolation::blend_linear(older.projection, newer.projection, scene_phase);
-        } else if (older.eligible && last_cam_motion_.valid) {
-            // Both kFollowCamera and unpaired 3D draws (e.g. scenery leaving frustum during a zoom)
-            // follow the camera motion so they never freeze/lag behind the scene!
-            eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, scene_phase);
-        }
-
-        // Map world -> interpolated eye via eye_blend * inverse(older.world).
-        interpolation::Matrix inv_world_old;
-        interpolation::Matrix world_to_eye_old = older.view;
-        if (interpolation::affine_inverse(older.world, inv_world_old)) {
-            world_to_eye_old = interpolation::multiply(eye_blend, inv_world_old);
-        }
-        pack_3x4(world_to_eye_old, transforms[i].mv_old);
-
-        // Dual-stream per-vertex interpolation for matched SKINNED draws (hunters, monsters, NPCs, Palicos).
-        // Rigid scenery/skyboxes stay on pure rigid mv_old so they never suffer vertex-order mismatch or popping.
-        bool has_vertex_pair = false;
-        std::uint32_t old_start = (i < blend_older_.draw_raw_start.size()) ? blend_older_.draw_raw_start[i] : 0u;
-        std::uint32_t new_start = 0u;
-        if (older.skinned && has_partner && cur_new_buf.buf != VK_NULL_HANDLE &&
-            cur_new_buf.cap >= blend_newer_.raw_verts.size() * sizeof(vk::RawGpuVertex)) {
-            const std::size_t pi = static_cast<std::size_t>(partner);
-            const std::uint32_t old_cnt = (i < blend_older_.draw_raw_count.size()) ? blend_older_.draw_raw_count[i] : 0u;
-            const std::uint32_t new_cnt = (pi < blend_newer_.draw_raw_count.size()) ? blend_newer_.draw_raw_count[pi] : 0u;
-            const std::uint32_t cand_new_start = (pi < blend_newer_.draw_raw_start.size()) ? blend_newer_.draw_raw_start[pi] : 0u;
-            if (old_cnt > 0u && old_cnt == new_cnt &&
-                static_cast<std::size_t>(cand_new_start) + new_cnt <= blend_newer_.raw_verts.size()) {
-                const auto &newer = blend_newer_.summaries[pi];
-                interpolation::Matrix inv_world_new;
-                if (interpolation::affine_inverse(newer.world, inv_world_new)) {
-                    const auto world_to_eye_new = interpolation::multiply(eye_blend, inv_world_new);
-                    pack_3x4(world_to_eye_new, transforms[i].mv_new);
-                    new_start = cand_new_start;
-                    has_vertex_pair = true;
+        vk::DrawTransform &tr = transforms[i];
+        if (zero_phase) {
+            pack_3x4(older.view, tr.mv_old);
+            pack_3x4(older.view, tr.mv_new);
+            std::copy_n(older.projection.data(), 16, tr.proj);
+            tr.pair_info[0] = pd.old_start;
+            tr.pair_info[1] = pd.new_start;
+            tr.pair_info[2] = 0u;
+            tr.pair_info[3] = max_deform_bits;
+        } else {
+            interpolation::Matrix eye_blend = pd.eye_old;
+            if (pd.has_partner) {
+                if (pd.has_rigid) {
+                    eye_blend = interpolation::follow_rigid(pd.eye_old, pd.rm, scene_phase);
+                } else if (last_cam_motion_.valid) {
+                    eye_blend = interpolation::blend_eye(pd.eye_old, pd.eye_new, last_cam_motion_, scene_phase);
+                } else {
+                    eye_blend = interpolation::blend_affine(pd.eye_old, pd.eye_new, scene_phase);
                 }
+            } else if (pd.follow_cam) {
+                eye_blend = interpolation::follow_rigid(pd.eye_old, last_cam_motion_, scene_phase);
             }
-        }
-        if (!has_vertex_pair) {
-            pack_3x4(world_to_eye_old, transforms[i].mv_new);
+
+            const interpolation::Matrix world_to_eye_old =
+                pd.has_inv_world_old ? interpolation::multiply(eye_blend, pd.inv_world_old) : older.view;
+            pack_3x4(world_to_eye_old, tr.mv_old);
+
+            if (pd.has_vertex_pair) {
+                const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
+                pack_3x4(world_to_eye_new, tr.mv_new);
+            } else {
+                pack_3x4(world_to_eye_old, tr.mv_new);
+            }
+
+            if (pd.proj_differs) {
+                const auto proj_blend = interpolation::blend_linear(older.projection, blend_newer_.summaries[pd.partner].projection, scene_phase);
+                std::copy_n(proj_blend.data(), 16, tr.proj);
+            } else {
+                std::copy_n(older.projection.data(), 16, tr.proj);
+            }
+            tr.pair_info[0] = pd.old_start;
+            tr.pair_info[1] = pd.new_start;
+            tr.pair_info[2] = pd.has_vertex_pair ? 1u : 0u;
+            tr.pair_info[3] = max_deform_bits;
         }
 
-        std::copy_n(proj_blend.data(), 16, transforms[i].proj);
         const auto &vp = blend_older_.viewports[i];
-        transforms[i].vp_scale[0] = vp[0];
-        transforms[i].vp_scale[1] = vp[1];
-        transforms[i].vp_scale[2] = vp[2];
-        transforms[i].vp_scale[3] = 0.0f;
-        transforms[i].vp_center[0] = vp[3] - vp[6];
-        transforms[i].vp_center[1] = vp[4] - vp[7];
-        transforms[i].vp_center[2] = vp[5];
-        transforms[i].vp_center[3] = 1.0f;
-        transforms[i].pair_info[0] = old_start;
-        transforms[i].pair_info[1] = new_start;
-        transforms[i].pair_info[2] = has_vertex_pair ? 1u : 0u;
-        const float max_deform = 90.0f;
-        std::memcpy(&transforms[i].pair_info[3], &max_deform, sizeof(float));
+        tr.vp_scale[0] = vp[0];
+        tr.vp_scale[1] = vp[1];
+        tr.vp_scale[2] = vp[2];
+        tr.vp_scale[3] = 0.0f;
+        tr.vp_center[0] = vp[3] - vp[6];
+        tr.vp_center[1] = vp[4] - vp[7];
+        tr.vp_center[2] = vp[5];
+        tr.vp_center[3] = 1.0f;
     }
 
     // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
@@ -2818,6 +2877,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                         prof_.flat_verts += blend_older_.flat_verts.size();
                     }
                     interp_can_blend_ = ok_old;
+                    if (interp_can_blend_) {
+                        prepare_interp_draws();
+                    }
                 } else {
                     interpolator_.matcher().forget_motion();
                     has_prev_cam_ = false;
