@@ -1453,7 +1453,7 @@ int main(int argc, char **argv) {
                 frontend.add_game_option({"betterSharpness", "Better sharpness gauge",
                                           "Shows how much of each sharpness tier is left during a quest.",
                                           false, better_sharpness ? 1 : 0, 0, 1, 1, "",
-                                          [](int v) { g_better_sharpness = v != 0; }});
+                                          [](int v) { g_better_sharpness = v != 0; }, "Combat & HUD"});
                 extra = [&frontend, &runtime, last_frame = std::uint64_t{0},
                          shown = std::optional<mhf::mhfu::Sharpness>{}, previous = std::move(extra)]() mutable {
                     if (previous) previous();
@@ -1482,24 +1482,24 @@ int main(int argc, char **argv) {
                     [&load_gathering_icons](int v) {
                         if (v != 0) load_gathering_icons();
                         g_gathering.indicators = g_gathering.automatic_tools = v != 0;
-                    }});
+                    }, "Gathering & Carving"});
                 frontend.add_game_option({"infiniteGatheringTools", "Infinite gathering tools",
                     "Mine, catch bugs, and fish without carrying pickaxes, bug nets, or bait.",
                     false, g_gathering.infinite_tools ? 1 : 0, 0, 1, 1, "",
                     [&load_gathering_icons](int v) {
                         if (v != 0) load_gathering_icons();
                         g_gathering.infinite_tools = v != 0;
-                    }});
+                    }, "Gathering & Carving"});
                 frontend.add_game_option({"modernCarving", "Modern carving",
                     "Hold Circle to repeat gathering, carving, mining, and bug-catching.",
                     false, g_gathering.modern_carving ? 1 : 0, 0, 1, 1, "",
-                    [](int v) { g_gathering.modern_carving = v != 0; }});
+                    [](int v) { g_gathering.modern_carving = v != 0; }, "Gathering & Carving"});
             }
             if constexpr (kCarveInvulnMapped) {
                 frontend.add_game_option({"invulnerableCarveQuest", "Invulnerable post-quest carving",
                     "Ignores hits, roars and wind while carving after Quest Clear.",
                     false, g_invulnerable_carve_quest.load() ? 1 : 0, 0, 1, 1, "",
-                    [](int v) { g_invulnerable_carve_quest = v != 0; }});
+                    [](int v) { g_invulnerable_carve_quest = v != 0; }, "Gathering & Carving"});
             }
             extra = [&frontend, previous = std::move(extra), shown = std::optional<mhf::mhfu::QuestMarker>{},
                      image = std::shared_ptr<const std::vector<std::uint32_t>>{}]() mutable {
@@ -1515,7 +1515,7 @@ int main(int argc, char **argv) {
                 frontend.add_game_option({"keyQuestMarkers", "Show key quest markers",
                                           "A gold key beside Village and Guild Hall key quests, including completed quests.",
                                           false, g_key_quest_markers ? 1 : 0, 0, 1, 1, "",
-                                          [](int v) { g_key_quest_markers = v != 0; }});
+                                          [](int v) { g_key_quest_markers = v != 0; }, "Quests & Menus"});
             }
             // The enhancements the in-game menu changes while playing; the launcher keeps what is chosen there.
             const auto percent = [](float speed) { return static_cast<int>(std::lround(speed * 100.0f)); };
@@ -1523,44 +1523,44 @@ int main(int argc, char **argv) {
                 frontend.add_game_option({"trueWeaponValues", "Show true weapon values",
                                           "Displays attack and element without the game's display multipliers.", false,
                                           g_true_weapon_values ? 1 : 0, 0, 1, 1, "",
-                                          [](int v) { g_true_weapon_values = v != 0; }});
+                                          [](int v) { g_true_weapon_values = v != 0; }, "Quests & Menus"});
             }
             frontend.add_game_option({"fastSupplyBox", "Fast supply box",
                                       "Shortens the delay between items taken from the supply box.",
                                       false, g_fast_supply_box ? 1 : 0, 0, 1, 1, "",
-                                      [](int v) { g_fast_supply_box = v != 0; }});
+                                      [](int v) { g_fast_supply_box = v != 0; }, "Quests & Menus"});
             if constexpr (kGuildScalingMapped) {
                 frontend.add_game_option(
                     {"guildQuestScaling", "Dynamic Guild quest scaling",
                      "Scales large-monster HP and part stagger in Guild quests to the active hunter count (1-4 players).",
                      false, g_guild_quest_scaling ? 1 : 0, 0, 1, 1, "",
-                     [](int v) { g_guild_quest_scaling = v != 0; }});
+                     [](int v) { g_guild_quest_scaling = v != 0; }, "Quests & Menus"});
             }
             if constexpr (kQuestAutoclearMapped) {
                 frontend.add_game_option({"questAutoclear", "Quest auto-clear",
                                           "Hold L + R + Select for 2 seconds during a quest to complete it.",
                                           false, g_quest_autoclear ? 1 : 0, 0, 1, 1, "",
-                                          [](int v) { g_quest_autoclear = v != 0; }});
+                                          [](int v) { g_quest_autoclear = v != 0; }, "Quests & Menus"});
             }
             {
                 frontend.add_game_option({"analogCamera", "Analog camera",
                                           "The right stick turns and tilts the camera in proportion to how far it is pushed.",
                                           false, g_analog_camera ? 1 : 0, 0, 1, 1, "",
-                                          [](int v) { g_analog_camera = v != 0; }});
+                                          [](int v) { g_analog_camera = v != 0; }, "Camera"});
                 frontend.add_game_option({"analogCameraTurnSpeed", "Camera turn speed", "100% matches the D-pad.", true,
                                           percent(g_turn_speed), 50, 200, 10, "analogCamera",
-                                          [](int v) { g_turn_speed = static_cast<float>(v) / 100.0f; }});
+                                          [](int v) { g_turn_speed = static_cast<float>(v) / 100.0f; }, "Camera"});
                 frontend.add_game_option({"analogCameraTiltSpeed", "Camera tilt speed",
                                           "Tilt speed at full stick deflection.",
                                           true, percent(g_tilt_speed), 50, 200, 10, "analogCamera",
-                                          [](int v) { g_tilt_speed = static_cast<float>(v) / 100.0f; }});
+                                          [](int v) { g_tilt_speed = static_cast<float>(v) / 100.0f; }, "Camera"});
                 frontend.add_game_option({"mouseCamera", "Mouse camera",
                                           "The mouse controls the camera and bow and bowgun aiming. Press Esc to release the mouse.", false,
                                           g_mouse_camera ? 1 : 0, 0, 1, 1, "analogCamera",
-                                          [](int v) { g_mouse_camera = v != 0; }});
+                                          [](int v) { g_mouse_camera = v != 0; }, "Camera"});
                 frontend.add_game_option({"mouseCameraSpeed", "Mouse sensitivity", "Camera sensitivity to mouse movement.",
                                           true, percent(g_mouse_speed), 25, 300, 25, "mouseCamera",
-                                          [](int v) { g_mouse_speed = static_cast<float>(v) / 100.0f; }});
+                                          [](int v) { g_mouse_speed = static_cast<float>(v) / 100.0f; }, "Camera"});
                 // The mouse is held in the window while it moves the camera: both switches on.
                 frontend.set_mouse_look([] { return g_analog_camera.load() && g_mouse_camera.load(); });
             }

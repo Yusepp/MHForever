@@ -995,8 +995,10 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     quit.detail = "Return to the launcher. Unsaved progress will be lost.";
     quit.danger = true;
     overlay::MenuTab game{"Game", {resume, quit}, v.subtitle, {}};
-    // The game's options that change while playing (add_game_option); a row shown with a switch only while it is on.
-    if (!impl.game_options.empty()) game.items.push_back(menu_item(Kind::Heading, 0, "Enhancements"));
+
+    // Dedicated Gameplay QoL tab (mirrors the Vulkan tab layout with category headings).
+    overlay::MenuTab qol{"QoL", {}, "Changes apply immediately.", {}};
+    std::string last_category;
     for (std::size_t i = 0; i < impl.game_options.size(); ++i) {
         const Frontend::GameOption &o = impl.game_options[i];
         // Shown while its switch is on, and that switch's own switch (the mouse's sensitivity needs the mouse camera,
@@ -1009,6 +1011,10 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             with_setting = &with->shown_with;
         }
         if (!shown) continue;
+        if (!o.category.empty() && o.category != last_category) {
+            qol.items.push_back(menu_item(Kind::Heading, 0, o.category));
+            last_category = o.category;
+        }
         overlay::MenuItem row = menu_item(o.slider ? Kind::Slider : Kind::Toggle, kGameOptionBase + static_cast<int>(i), o.label, o.value);
         row.detail = o.detail;
         if (o.slider) {
@@ -1016,27 +1022,27 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             row.max = o.max;
             row.step = o.step;
         }
-        game.items.push_back(row);
+        qol.items.push_back(row);
     }
     if (impl.song_spot && impl.songs_offered) { // the songs can be shown: the player turns them on and off here
-        game.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
+        qol.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
         overlay::MenuItem on = menu_item(Kind::Toggle, kSongsOn, "Show hunting horn songs", impl.songs_on ? 1 : 0);
         on.detail = "Shows the horn's songs, the song being played and active effects during quests.";
-        game.items.push_back(on);
+        qol.items.push_back(on);
     }
     if (impl.song_spot && impl.songs_on) { // the hunting horn's songs are on (the launcher's setting, or the switch above)
-        if (!impl.songs_offered) game.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
+        if (!impl.songs_offered) qol.items.push_back(menu_item(Kind::Heading, 0, "Hunting horn songs"));
         // A spot of the player's own selects none of the places.
         const bool own = impl.song_spot->place == overlay::SongPlace::custom;
         overlay::MenuItem place = menu_item(Kind::Choice, kSongPlace, "Position", own ? -1 : static_cast<int>(impl.song_spot->place));
         for (const std::string_view label : overlay::kSongPlaceLabels) place.options.emplace_back(label);
         place.detail = own ? "Custom position." : "Position of the song list during quests.";
-        game.items.push_back(place);
+        qol.items.push_back(place);
         overlay::MenuItem move = menu_item(Kind::Button, kSongMove, "Move them anywhere");
         move.detail = impl.songs_seen ? "Drag with the mouse, or use the arrow keys or the D-pad."
                                       : "Available after a quest with a hunting horn.";
-        move.enabled = impl.songs_seen.has_value() && impl.gpu_state == 1; // only the OpenGL renderer shows them
-        game.items.push_back(move);
+        move.enabled = impl.songs_seen.has_value() && impl.gpu_state == 1; // only the GPU renderer shows them
+        qol.items.push_back(move);
     }
 
     overlay::MenuTab audio{"Audio", {menu_item(Kind::Slider, kMusic, "Music", impl.music_volume),
@@ -1127,7 +1133,10 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     }
     controls.items.push_back(stick);
     controls.items.push_back(menu_item(Kind::Button, kRestorePad, "Restore controller defaults"));
-    v.tabs = {game, audio, video};
+    v.tabs = {game};
+    if (!qol.items.empty()) v.tabs.push_back(std::move(qol));
+    v.tabs.push_back(audio);
+    v.tabs.push_back(video);
     if (impl.backend == GraphicsBackend::Vulkan && impl.gpu_state == 1) {
         const bool lit_on = impl.live.enhanced_lighting.load(std::memory_order_relaxed);
         const std::uint32_t mask = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);

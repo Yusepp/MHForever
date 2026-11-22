@@ -627,7 +627,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
       </motion.div>}
 
       {enhanced && <motion.div className="glass section" {...rise(0.065)}>
-        <h3>Game</h3>
+        <h3>Gameplay QoL</h3>
         <div className="srow">
           <div className="slabel"><b>Show true weapon values</b><span>{fucomplete
             ? "Uses FUComplete's true raw display for attack, element and status."
@@ -703,7 +703,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
         </div>
         {s.hornSongs && (
           <div className="srow">
-            <div className="slabel"><b>Hunting horn songs position</b><span>{(s.hornSongsPlace ?? '').startsWith('custom:') ? 'Custom position set in game.' : 'Position of the song list. It can also be moved in game from Esc > Game.'}</span></div>
+            <div className="slabel"><b>Hunting horn songs position</b><span>{(s.hornSongsPlace ?? '').startsWith('custom:') ? 'Custom position set in game.' : 'Position of the song list. It can also be moved in game from Esc > QoL.'}</span></div>
             <div className="seg wide" role="radiogroup" aria-label="Hunting horn songs position" style={{ '--n': songPlaces.length } as CSSProperties}>
               {!(s.hornSongsPlace ?? '').startsWith('custom:') && <span className="pill" style={{ transform: `translateX(${Math.max(0, songPlaces.findIndex((p) => p.id === (s.hornSongsPlace ?? 'next-to-sheet'))) * 100}%)` }} />}
               {songPlaces.map((p) => (

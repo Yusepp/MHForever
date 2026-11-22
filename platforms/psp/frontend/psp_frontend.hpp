@@ -105,6 +105,7 @@ public:
         int value = 0, min = 0, max = 1, step = 1;
         std::string shown_with; // the setting of a switch that must be on for this row to show ("analogCamera")
         std::function<void(int)> changed; // runs on the game's thread when the player changes it
+        std::string category; // optional section heading inside the QoL tab
     };
     void add_game_option(GameOption option);
     // The hunting horn's songs (overlay/song_panel.hpp), from the `extra` poll: shown at their place while the game draws
