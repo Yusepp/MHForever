@@ -69,7 +69,8 @@ void write_piece(psprecomp::GuestMemory &memory, std::uint32_t addr, const Equip
 }
 
 bool piece_non_empty(const EquipPiece &p) noexcept {
-    return p[0] != 0u;
+    // MHFU 12-byte equipment record: byte 0 = level/flags, byte 1 = equip type (1..7), bytes 2..3 = u16 id.
+    return p[1] != 0u || p[2] != 0u || p[3] != 0u;
 }
 
 std::uint32_t valid_game_sys(const psprecomp::GuestMemory &memory, ItemLoadoutsSymbols symbols) noexcept {
@@ -113,59 +114,167 @@ void draw_button_pill(mhf::overlay::Painter &painter, float x, float y, float w,
                  highlight ? mhf::overlay::kInk : kMhParchment, 0.98f, true, 0.25f);
 }
 
-struct ItemVisualInfo {
-    const char *label;
-    mhf::overlay::Color accent;
-};
+// Master localized text archive layout in ResourceManager (same format across EU, US, JP, FUComplete):
+// header: u32 num_groups (~23), u32 table_offset (8), u32 group_offsets[num_groups].
+// Each group starts with an array of (possibly unaligned) u32 offsets from the group base to UTF-8 strings.
+constexpr std::uint32_t kResourceTable = 0x83C030u;
+constexpr std::uint32_t kResourceEntry = 12u;
+constexpr std::uint32_t kResources = 512u;
+constexpr std::uint32_t kGroupItems = 1u;
+constexpr std::uint32_t kGroupBlademaster = 3u;
+constexpr std::uint32_t kGroupGunner = 5u;
+constexpr std::uint32_t kGroupHead = 7u;
+constexpr std::uint32_t kGroupChest = 9u;
+constexpr std::uint32_t kGroupArms = 11u;
+constexpr std::uint32_t kGroupWaist = 13u;
+constexpr std::uint32_t kGroupLegs = 15u;
+constexpr std::uint8_t kEquipTypeBlademaster = 5u;
 
-// Verified MHFU item IDs for common hunter pouch essentials; other IDs fall back to "Item #<id>".
-ItemVisualInfo item_visual_info(std::uint16_t id) noexcept {
+std::uint32_t load_u32_unaligned(const psprecomp::GuestMemory &memory, std::uint32_t addr) noexcept {
+    return static_cast<std::uint32_t>(memory.load8(addr)) |
+           (static_cast<std::uint32_t>(memory.load8(addr + 1u)) << 8u) |
+           (static_cast<std::uint32_t>(memory.load8(addr + 2u)) << 16u) |
+           (static_cast<std::uint32_t>(memory.load8(addr + 3u)) << 24u);
+}
+
+bool printable_utf8(std::string_view text) noexcept {
+    if (text.empty()) return false;
+    for (std::size_t i = 0; i < text.size();) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        const std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        if (len == 0 || i + len > text.size() || (len == 1 && c < 0x20)) return false;
+        for (std::size_t k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80) return false;
+        }
+        i += len;
+    }
+    return true;
+}
+
+std::optional<std::string> read_text_entry(const psprecomp::GuestMemory &memory, std::uint32_t res,
+                                           std::uint32_t group_idx, std::uint32_t entry_id) {
+    if (res == 0u || !memory.contains(res, 16u)) return std::nullopt;
+    const std::uint32_t num_groups = load_u32_unaligned(memory, res);
+    if (group_idx >= num_groups || !memory.contains(res + (group_idx + 2u) * 4u, 4u)) return std::nullopt;
+    const std::uint32_t group_off = load_u32_unaligned(memory, res + (group_idx + 2u) * 4u);
+    if (group_off == 0u) return std::nullopt;
+    const std::uint32_t group = res + group_off;
+    if (!memory.contains(group + entry_id * 4u, 4u)) return std::nullopt;
+    const std::uint32_t str_off = load_u32_unaligned(memory, group + entry_id * 4u);
+    if (str_off == 0xFFFFFFFFu || str_off == 0u || str_off > 0x200000u) return std::nullopt;
+    const std::uint32_t str_addr = group + str_off;
+    if (!memory.contains(str_addr, 2u)) return std::nullopt;
+
+    std::string out;
+    out.reserve(32);
+    for (std::uint32_t i = 0; i < 64u && memory.contains(str_addr + i, 1u); ++i) {
+        const char ch = static_cast<char>(memory.load8(str_addr + i));
+        if (ch == '\0' || ch == '\n' || ch == '\r') break;
+        out.push_back(ch);
+    }
+    return printable_utf8(out) ? std::optional(std::move(out)) : std::nullopt;
+}
+
+// Finds the resident master text archive (Items, Weapons, Armor) in ResourceManager.
+std::uint32_t find_master_text_resource(const psprecomp::GuestMemory &memory, ItemLoadoutsSymbols symbols) noexcept {
+    if (!symbols.resource_manager || !readable_word_address(memory, *symbols.resource_manager)) return 0u;
+    const std::uint32_t mgr = memory.load32(*symbols.resource_manager);
+    if (mgr == 0u || !memory.contains(mgr + kResourceTable, kResources * kResourceEntry)) return 0u;
+    for (std::uint32_t i = 0; i < kResources; ++i) {
+        const std::uint32_t id = memory.load32(mgr + kResourceTable + i * kResourceEntry);
+        if (id == 0xFFFFFFFFu) continue;
+        const std::uint32_t data = memory.load32(mgr + kResourceTable + i * kResourceEntry + 4u);
+        if (data == 0u || !memory.contains(data, 72u)) continue;
+        const std::uint32_t num_groups = load_u32_unaligned(memory, data);
+        const std::uint32_t table_off = load_u32_unaligned(memory, data + 4u);
+        if (num_groups >= 16u && num_groups <= 40u && table_off == 8u) {
+            if (read_text_entry(memory, data, kGroupItems, 1u).has_value() &&
+                read_text_entry(memory, data, kGroupBlademaster, 1u).has_value()) {
+                return data;
+            }
+        }
+    }
+    return 0u;
+}
+
+std::string fit_text(mhf::overlay::Painter &painter, std::string text, float fsize, float max_w) {
+    if (!painter.font_ok() || max_w <= 8.0f || painter.measure(text, fsize, false) <= max_w) return text;
+    while (text.size() > 2u) {
+        // Pop one UTF-8 codepoint at a time so we never split a multibyte character.
+        do {
+            text.pop_back();
+        } while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0u) == 0x80u);
+        if (painter.measure(text + "..", fsize, false) <= max_w) return text + "..";
+    }
+    return text;
+}
+
+mhf::overlay::Color item_accent_color(std::uint16_t id) noexcept {
     constexpr mhf::overlay::Color kHeal{0.34f, 0.78f, 0.45f};
     constexpr mhf::overlay::Color kTool{0.44f, 0.72f, 0.92f};
     constexpr mhf::overlay::Color kBomb{0.92f, 0.55f, 0.24f};
     constexpr mhf::overlay::Color kBook{0.89f, 0.74f, 0.36f};
     constexpr mhf::overlay::Color kMisc{0.76f, 0.70f, 0.58f};
 
-    switch (id) {
-        case 1u: return {"Combo Bk 1", kBook};
-        case 2u: return {"Combo Bk 2", kBook};
-        case 3u: return {"Combo Bk 3", kBook};
-        case 4u: return {"Combo Bk 4", kBook};
-        case 5u: return {"Combo Bk 5", kBook};
-        case 7u: return {"Potion", kHeal};
-        case 8u: return {"Mega Pot", kHeal};
-        case 64u: return {"Paintball", kBomb};
-        case 65u: return {"Flash Bmb", kBomb};
-        case 66u: return {"Sonic Bmb", kBomb};
-        case 143u: return {"Mega Fly", kTool};
-        case 146u: return {"Mega Pick", kTool};
-        case 150u: return {"Mega Net", kTool};
-        case 153u: return {"Whetstone", kTool};
-        case 867u: return {"Mini Whet", kTool};
-        default: return {nullptr, kMisc};
-    }
+    if (id >= 1u && id <= 5u) return kBook;
+    if (id >= 7u && id <= 25u) return kHeal;
+    if (id >= 60u && id <= 80u) return kBomb;
+    if ((id >= 135u && id <= 160u) || id == 867u) return kTool;
+    return kMisc;
 }
 
-std::string item_short_name(std::uint16_t id) {
-    if (const auto info = item_visual_info(id); info.label != nullptr) return info.label;
+std::optional<std::string> read_text_entry_from_bytes(const std::vector<std::uint8_t> &buf,
+                                                      std::uint32_t group_idx, std::uint32_t entry_id) {
+    if (buf.size() < 16u) return std::nullopt;
+    auto u32 = [&](std::size_t off) -> std::uint32_t {
+        return static_cast<std::uint32_t>(buf[off]) | (static_cast<std::uint32_t>(buf[off + 1u]) << 8u) |
+               (static_cast<std::uint32_t>(buf[off + 2u]) << 16u) | (static_cast<std::uint32_t>(buf[off + 3u]) << 24u);
+    };
+    const std::uint32_t num_groups = u32(0u);
+    if (group_idx >= num_groups || (group_idx + 3u) * 4u > buf.size()) return std::nullopt;
+    const std::uint32_t group_off = u32((group_idx + 2u) * 4u);
+    if (group_off == 0u || static_cast<std::size_t>(group_off) + static_cast<std::size_t>(entry_id) * 4u + 4u > buf.size()) {
+        return std::nullopt;
+    }
+    const std::uint32_t str_off = u32(static_cast<std::size_t>(group_off) + static_cast<std::size_t>(entry_id) * 4u);
+    if (str_off == 0xFFFFFFFFu || str_off == 0u) return std::nullopt;
+    const std::size_t str_pos = static_cast<std::size_t>(group_off) + static_cast<std::size_t>(str_off);
+    if (str_pos >= buf.size()) return std::nullopt;
+
+    std::string out;
+    out.reserve(32);
+    for (std::size_t i = 0; i < 64u && str_pos + i < buf.size(); ++i) {
+        const char ch = static_cast<char>(buf[str_pos + i]);
+        if (ch == '\0' || ch == '\n' || ch == '\r') break;
+        out.push_back(ch);
+    }
+    return printable_utf8(out) ? std::optional(std::move(out)) : std::nullopt;
+}
+
+std::string resolve_item_name(const psprecomp::GuestMemory &memory, std::uint32_t text_res,
+                              const std::vector<std::uint8_t> &fallback, std::uint16_t id) {
+    if (auto live = read_text_entry(memory, text_res, kGroupItems, id)) return *live;
+    if (auto disk = read_text_entry_from_bytes(fallback, kGroupItems, id)) return *disk;
     return "Item #" + std::to_string(id);
 }
 
-const char *weapon_type_name(std::uint8_t type) noexcept {
-    switch (type) {
-        case 5u: return "Greatsword";
-        case 6u: return "SnS";
-        case 7u: return "Hammer";
-        case 8u: return "Lance";
-        case 9u: return "Heavy Bowgun";
-        case 11u: return "Light Bowgun";
-        case 12u: return "Longsword";
-        case 13u: return "Dual Blades";
-        case 14u: return "Hunting Horn";
-        case 15u: return "Gunlance";
-        case 16u: return "Bow";
-        default: return "Weapon";
+std::string resolve_equip_name(const psprecomp::GuestMemory &memory, std::uint32_t text_res,
+                               const std::vector<std::uint8_t> &fallback, std::size_t raw_slot,
+                               const EquipPiece &piece) {
+    const std::uint16_t piece_id = static_cast<std::uint16_t>(piece[2]) | (static_cast<std::uint16_t>(piece[3]) << 8u);
+    std::uint32_t group = kGroupBlademaster;
+    switch (raw_slot) {
+        case 0u: group = (piece[1] == kEquipTypeBlademaster) ? kGroupBlademaster : kGroupGunner; break;
+        case 1u: group = kGroupLegs; break;
+        case 2u: group = kGroupHead; break;
+        case 3u: group = kGroupChest; break;
+        case 4u: group = kGroupArms; break;
+        case 5u: group = kGroupWaist; break;
+        default: break;
     }
+    if (auto live = read_text_entry(memory, text_res, group, piece_id)) return *live;
+    if (auto disk = read_text_entry_from_bytes(fallback, group, piece_id)) return *disk;
+    return (raw_slot == 0u ? "Weapon #" : "Armor #") + std::to_string(piece_id);
 }
 
 std::size_t count_decorations(const EquipPiece &p) noexcept {
@@ -206,6 +315,10 @@ std::string ItemLoadouts::armor_storage_path() const {
 void ItemLoadouts::set_storage_path(std::string path) {
     storage_path_ = std::move(path);
     load_from_disk();
+}
+
+void ItemLoadouts::set_text_archive(std::vector<std::uint8_t> archive) {
+    text_archive_ = std::move(archive);
 }
 
 void ItemLoadouts::load_from_disk() {
@@ -601,6 +714,7 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
     const float rx = div_x + 8.0f;
     const float rw = (px + pw - 10.0f) - rx;
     const std::uint32_t gs = valid_game_sys(memory, symbols_);
+    const std::uint32_t text_res = find_master_text_resource(memory, symbols_);
 
     if (on_items) {
         const bool saved = presets_[selected_].saved;
@@ -644,15 +758,14 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             painter.rrect(cx, cy, cell_w, cell_h, 2.5f, kMhGoldDim, occupied ? 0.55f : 0.22f, 0.65f);
             if (!occupied) continue;
 
-            const auto info = item_visual_info(s.id);
-            painter.rrect(cx + 2.5f, cy + 3.0f, 3.2f, cell_h - 6.0f, 1.5f, info.accent, 0.96f);
-
-            const std::string name = item_short_name(s.id);
-            painter.text(cx + 8.0f, cy + 10.8f, name, 6.8f, kMhParchment, 0.96f, false);
+            painter.rrect(cx + 2.5f, cy + 3.0f, 3.2f, cell_h - 6.0f, 1.5f, item_accent_color(s.id), 0.96f);
 
             const std::string qty = "x" + std::to_string(s.count);
-            const float qw = painter.font_ok() ? painter.measure(qty, 6.8f, true) : 14.0f;
-            painter.text(cx + cell_w - 4.0f - qw, cy + 10.8f, qty, 6.8f, kMhGoldBright, 0.96f, true);
+            const float qw = painter.font_ok() ? painter.measure(qty, 6.4f, true) : 14.0f;
+            const float max_name_w = cell_w - 8.0f - qw - 6.5f;
+            const std::string name = fit_text(painter, resolve_item_name(memory, text_res, text_archive_, s.id), 6.4f, max_name_w);
+            painter.text(cx + 8.0f, cy + 10.7f, name, 6.4f, kMhParchment, 0.96f, false);
+            painter.text(cx + cell_w - 3.5f - qw, cy + 10.7f, qty, 6.4f, kMhGoldBright, 0.96f, true);
         }
     } else {
         const bool saved = armor_presets_[selected_].saved;
@@ -707,13 +820,13 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
                 continue;
             }
 
-            const std::uint16_t piece_id = static_cast<std::uint16_t>(piece[2]) | (static_cast<std::uint16_t>(piece[3]) << 8u);
-            std::string desc = (sv.raw_slot == 0u ? std::string(weapon_type_name(piece[0])) : std::string("Armor")) +
-                               " #" + std::to_string(piece_id);
-            if (piece[1] > 0u) desc += "  Lv." + std::to_string(static_cast<unsigned>(piece[1]));
+            std::string desc = resolve_equip_name(memory, text_res, text_archive_, sv.raw_slot, piece);
+            if (sv.raw_slot != 0u && piece[0] > 0u) desc += " Lv." + std::to_string(static_cast<unsigned>(piece[0]) + 1u);
             const std::size_t decos = count_decorations(piece);
-            if (decos > 0u) desc += "  [" + std::to_string(decos) + " deco]";
-            painter.text(rx + 44.0f, cy + 13.5f, desc, 7.6f, kMhParchment, 0.96f, false);
+            if (decos > 0u) desc += " [" + std::to_string(decos) + " deco]";
+            const float st_w = 42.0f;
+            const std::string fitted = fit_text(painter, std::move(desc), 7.4f, rw - 44.0f - st_w - 10.0f);
+            painter.text(rx + 44.0f, cy + 13.4f, fitted, 7.4f, kMhParchment, 0.96f, false);
 
             // Live ownership status badge against current equipped / Equipment Box
             bool equipped_now = false;
@@ -726,7 +839,6 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             const std::string status = equipped_now ? "Equipped" : (in_box ? "In Box" : "Missing");
             const mhf::overlay::Color st_bg = equipped_now ? kMhHeader : (in_box ? kMhOkBg : kMhErrBg);
             const mhf::overlay::Color st_fg = equipped_now ? kMhGoldBright : (in_box ? kMhOkText : kMhErrText);
-            const float st_w = 42.0f;
             painter.rrect(rx + rw - st_w - 5.0f, cy + 4.5f, st_w, row_h - 9.0f, 2.5f, st_bg, 0.92f);
             const float st_tw = painter.font_ok() ? painter.measure(status, 6.4f, true) : 26.0f;
             painter.text(rx + rw - st_w - 5.0f + (st_w - st_tw) * 0.5f, cy + 13.0f, status, 6.4f, st_fg, 0.96f, true);

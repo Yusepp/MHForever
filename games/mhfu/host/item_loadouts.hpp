@@ -9,11 +9,13 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace mhf::mhfu {
 
 struct ItemLoadoutsSymbols {
-    std::optional<std::uint32_t> game_sys; // GameSys* pointer in guest RAM
+    std::optional<std::uint32_t> game_sys;         // GameSys* pointer in guest RAM
+    std::optional<std::uint32_t> resource_manager; // ResourceManager* pointer in guest RAM (for live localized names)
 
     [[nodiscard]] constexpr bool complete() const noexcept {
         return game_sys.has_value();
@@ -59,6 +61,7 @@ public:
     explicit ItemLoadouts(ItemLoadoutsSymbols symbols = {}, std::string storage_path = {}) noexcept;
 
     void set_storage_path(std::string path);
+    void set_text_archive(std::vector<std::uint8_t> archive);
     void load_from_disk();
     void save_to_disk() const;
 
@@ -91,6 +94,7 @@ private:
 
     ItemLoadoutsSymbols symbols_;
     std::string storage_path_;
+    std::vector<std::uint8_t> text_archive_;
     std::array<ItemLoadoutPreset, kItemLoadoutCount> presets_{};
     std::array<ArmorLoadoutPreset, kItemLoadoutCount> armor_presets_{};
     std::uint64_t box_seen_us_{0};

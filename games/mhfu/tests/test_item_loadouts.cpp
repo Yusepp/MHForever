@@ -28,7 +28,7 @@ void test_save_and_restock_roundtrip() {
     set_slot(mem, kBoxBase, 0, 10u, 50u);
     set_slot(mem, kBoxBase, 1, 11u, 20u);
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt});
     MHF_CHECK(loadouts.can_use_loadouts(mem));
     MHF_CHECK(loadouts.save_preset(mem, 0).ok);
 
@@ -51,7 +51,7 @@ void test_blocked_during_quest() {
     mem.store32(kGameSysPtrAddr, kGameSysAddr);
     mem.store8(kGameSysAddr + 0x2Eu, 2u); // Active quest
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt});
     MHF_CHECK(!loadouts.can_use_loadouts(mem));
     MHF_CHECK(!loadouts.save_preset(mem, 0).ok);
 }
@@ -67,7 +67,7 @@ void test_armor_set_save_and_equip_after_box_sort() {
 
     // Equip weapon (slot 0) at box index 2, head (slot 2) at box index 5.
     auto put_piece = [&](std::uint32_t addr, std::uint8_t type, std::uint8_t id) {
-        mem.store8(addr + 0u, type);
+        mem.store8(addr + 1u, type);
         mem.store8(addr + 2u, id);
     };
     put_piece(kEqBase + 0u * 12u, 5u, 42u);
@@ -78,7 +78,7 @@ void test_armor_set_save_and_equip_after_box_sort() {
     put_piece(kEqBox + 5u * 12u, 2u, 19u);
     mem.store16(kEqIdx + 2u * 2u, 5u);
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt});
     MHF_CHECK(loadouts.save_armor_preset(mem, 0).ok);
 
     // Equip different gear AND move saved pieces to new box slots (simulating box sort!).

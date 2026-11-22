@@ -608,7 +608,7 @@ std::atomic<std::uint16_t> g_camera_yaw{0};
 std::atomic<bool> g_camera_yaw_valid{false};
 mhf::mhfu::QuestTimerSkip g_quest_timer_skip{{region::mh_quest_manager, region::mh_game_sys}};
 mhf::mhfu::InfiniteConsumables g_infinite_consumables{{region::mh_game_sys}};
-mhf::mhfu::ItemLoadouts g_item_loadouts{{region::mh_game_sys}};
+mhf::mhfu::ItemLoadouts g_item_loadouts{{region::mh_game_sys, region::mh_resource_manager}};
 mhf::mhfu::MonsterTracker g_monster_tracker{
     {region::mh_game_sys, region::mh_player_manager, region::mh_enemy_manager, region::mh_enemy_species_table,
      region::mh_quest_manager}};
@@ -1364,6 +1364,9 @@ int main(int argc, char **argv) {
             g_item_loadouts.set_storage_path((std::filesystem::path(controls_file).parent_path() / "item_loadouts.txt").string());
         } else if (!options.memstick_root.empty()) {
             g_item_loadouts.set_storage_path((std::filesystem::path(options.memstick_root) / "item_loadouts.txt").string());
+        }
+        if (auto text_arc = mhf::mhfu::load_game_text_archive(options.disc_image, exe); !text_arc.empty()) {
+            g_item_loadouts.set_text_archive(std::move(text_arc));
         }
         std::function<void()> extra;
         if (!dump_folder.empty() || seconds > 0 || !script.empty() || language_pick) {
