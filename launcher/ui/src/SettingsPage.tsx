@@ -541,6 +541,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           </div>
         </div>
         <div className="srow">
+          <div className="slabel"><b>Enhanced Vulkan lighting</b><span>Adds GTAO ambient occlusion, zone-aware volumetric fog/sun shafts, emissive bloom, and rim lighting (Vulkan backend).</span></div>
+          <Toggle on={!!s.enhancedLighting} onToggle={() => onChange({ enhancedLighting: !s.enhancedLighting })} label="Enhanced Vulkan lighting" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Internal resolution</b><span>{resolutions[s.scale - 1]}{s.scale === 4 ? ' (recommended)' : ''}</span></div>
           <div className="seg wide" role="radiogroup" aria-label="Internal resolution" style={{ '--n': resolutions.length } as CSSProperties}>
             <span className="pill" style={{ transform: `translateX(${(s.scale - 1) * 100}%)` }} />

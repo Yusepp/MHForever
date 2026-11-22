@@ -84,7 +84,7 @@ struct LiveSettings {
     std::atomic<bool> quest_hud{false};
     // Next-gen Vulkan lighting & atmosphere (multi-bounce GTAO, zone-aware volumetric fog/sun shafts,
     // selective emissive bloom, per-pixel sun key/rim, and soft filmic highlight rolloff).
-    std::atomic<bool> enhanced_lighting{true};
+    std::atomic<bool> enhanced_lighting{false};
 };
 
 namespace gpu_common {

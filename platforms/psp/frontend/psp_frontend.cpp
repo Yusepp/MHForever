@@ -414,6 +414,10 @@ void Frontend::set_shadows(bool on, bool whole_map, int quality, int darkness) {
     impl_->shadows_offered = true;
 }
 
+void Frontend::set_enhanced_lighting(bool on) {
+    impl_->live.enhanced_lighting.store(on, std::memory_order_relaxed);
+}
+
 void Frontend::set_song_spot(overlay::SongSpot spot) { impl_->song_spot = spot; }
 
 void Frontend::offer_songs(bool on, overlay::SongSpot spot) {

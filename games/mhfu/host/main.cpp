@@ -1055,7 +1055,7 @@ int main(int argc, char **argv) {
     bool widescreen = false; // --widescreen: the 3D fills a window wider than the PSP's screen (enhancement)
     // The projected shadows (enhancement): --projected-shadows turns them on, --no-whole-map-shadows leaves only the hunter and
     // monsters casting, --shadow-quality 0..2 (low by default), --shadow-darkness 0..100 (50: as each zone was tuned).
-    bool projected_shadows = false, whole_map_shadows = true;
+    bool projected_shadows = false, whole_map_shadows = true, enhanced_lighting = false;
     int shadow_quality = 0, shadow_darkness = 50;
     bool true_weapon_values = false; // --true-weapon-values: menus show attack and element without display multipliers
     bool fast_supply_box = false; // --fast-supply-box: the supply box takes the next button soon after a take-out
@@ -1102,6 +1102,8 @@ int main(int argc, char **argv) {
         else if (a == "--hud-size" && i + 1 < argc) hud_size = std::clamp(std::stoi(argv[++i]), 50, 100); // enhancement
         else if (a == "--widescreen") widescreen = true; // enhancement, off by default
         else if (a == "--projected-shadows") projected_shadows = true; // enhancement, off by default
+        else if (a == "--enhanced-lighting") enhanced_lighting = true;
+        else if (a == "--no-enhanced-lighting") enhanced_lighting = false;
         else if (a == "--no-whole-map-shadows") whole_map_shadows = false;
         else if (a == "--shadow-quality" && i + 1 < argc) shadow_quality = std::clamp(std::stoi(argv[++i]), 0, 2);
         else if (a == "--shadow-darkness" && i + 1 < argc) shadow_darkness = std::clamp(std::stoi(argv[++i]), 0, 100);
@@ -1415,6 +1417,7 @@ int main(int argc, char **argv) {
             const char *shadow_env = std::getenv("MHF_SHADOW"); // MHF_SHADOW=1 turns them on as --projected-shadows does
             frontend.set_shadows(projected_shadows || (shadow_env != nullptr && shadow_env[0] != '0'), whole_map_shadows, shadow_quality,
                                  shadow_darkness);
+            frontend.set_enhanced_lighting(enhanced_lighting);
             // The horn's songs over the quest HUD, read from the game a few times a second (horn_songs.hpp). The
             // in-game menu turns them on and off, so they are read even while off.
             g_gathering.input_blocked = [&frontend] { return frontend.game_input_blocked(); };

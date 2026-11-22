@@ -132,6 +132,7 @@ Json default_settings() {
     Json s;
     s["scale"] = 4;
     s["graphicsBackend"] = "opengl"; // opengl, vulkan (experimental) or software
+    s["enhancedLighting"] = false; // Vulkan compute GTAO, volumetric fog/sun shafts, bloom, rim light
     s["fullscreen"] = false;
     s["smoothTextures"] = false;
     s["packMipmaps"] = false; // texture packs: mip levels made for images that ship none (softer far away, no shimmer)
@@ -1029,7 +1030,7 @@ void Launcher::import_game_controls() {
                 static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "modernCarving", "invulnerableCarveQuest", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
-                                                                    "projectedShadows", "wholeMapShadows", "shadowQuality",
+                                                                    "projectedShadows", "wholeMapShadows", "shadowQuality", "enhancedLighting",
                                                                     "shadowDarkness", "widescreen"};
                 const std::string setting = name == "horn-songs" ? "hornSongs" : name == "hud-size" ? "hudSize" : name.substr(7);
                 if (setting != "hornSongs" && setting != "hudSize" && std::ranges::find(kGameOptions, setting) == std::end(kGameOptions)) continue;
@@ -1135,7 +1136,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
         const double level = std::clamp(partial["anisotropy"].as_number(), 1.0, 16.0);
         s["anisotropy"] = std::exp2(std::round(std::log2(level)));
     }
-    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
+    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting", "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
                             "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
@@ -1608,6 +1609,7 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
     }
     // The shadows' settings travel even while they are off, so that turning them on in the game's menu finds them.
     if (s["projectedShadows"].as_bool()) plan.args.push_back("--projected-shadows");
+    if (s["enhancedLighting"].as_bool()) plan.args.push_back("--enhanced-lighting");
     if (!s["wholeMapShadows"].as_bool(true)) plan.args.push_back("--no-whole-map-shadows");
     if (s["shadowQuality"].is_number() && s["shadowQuality"].as_number() != 0) {
         plan.args.push_back("--shadow-quality");
