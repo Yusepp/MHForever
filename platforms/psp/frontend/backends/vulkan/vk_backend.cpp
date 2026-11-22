@@ -2341,12 +2341,13 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     const float wide = live_->wide_aspect.load(std::memory_order_relaxed);
     frame_stretch_ = wide > 0.0f ? (wide / (480.0f / 272.0f)) : 1.0f;
 
+    const bool is_vram_addr = (address & 0x0F000000u) == 0x04000000u;
     const std::uint32_t off = (address & 0x1FFFFFFFu) & 0x001FFFFFu;
-    if (off != shown_addrs_[0]) {
+    if (is_vram_addr && off != shown_addrs_[0]) {
         shown_addrs_[1] = shown_addrs_[0];
         shown_addrs_[0] = off;
     }
-    auto it = targets_.find(off);
+    auto it = is_vram_addr ? targets_.find(off) : targets_.end();
     bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
     if (have_gpu_frame) {
         RenderTarget &rt = it->second;
@@ -2366,15 +2367,22 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         last_shown_linear_ = true;
     } else {
         copy_shown_to_vram(nullptr);
-        // CPU-drawn screen (boot logos, PSMF intro videos): upload from guest VRAM.
-        const std::uint32_t s = stride > 0 ? stride : 512u;
+        // CPU-drawn screen (boot logos, PSMF intro videos in VRAM 0x04xxxxxx OR main RAM 0x08xxxxxx).
         const std::uint32_t bpp = pixel_format == 3u ? 4u : 2u;
+        const std::uint32_t min_stride =
+            ((address & 0x0F000000u) == 0x04000000u || (address & 0x0F000000u) == 0x08000000u) ? 480u : 512u;
+        const std::uint32_t s = std::max(stride, min_stride);
+        const std::size_t needed = static_cast<std::size_t>(s) * 271u * bpp + 480u * bpp;
         decode_buf_.assign(480u * 272u, 0xFF000000u);
-        for (std::uint32_t y = 0; y < 272u; ++y) {
-            const std::uint8_t *row = memory_.raw_pointer(0x04000000u + off + y * s * bpp, 480u * bpp);
-            if (!row) continue;
-            for (std::uint32_t x = 0; x < 480u; ++x) {
-                decode_buf_[y * 480u + x] = framebuffer_pixel(row + x * bpp, pixel_format);
+        if (memory_.contains(address, needed)) {
+            const std::uint8_t *base = memory_.raw_pointer(address, needed);
+            if (base) {
+                for (std::uint32_t y = 0; y < 272u; ++y) {
+                    const std::uint8_t *row = base + static_cast<std::size_t>(y) * s * bpp;
+                    for (std::uint32_t x = 0; x < 480u; ++x) {
+                        decode_buf_[y * 480u + x] = framebuffer_pixel(row + x * bpp, pixel_format);
+                    }
+                }
             }
         }
         upload_texture_2d(cpu_display_tex_, 480u, 272u, decode_buf_.data());
