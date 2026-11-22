@@ -1,14 +1,14 @@
 #pragma once
 
-// Next-Gen Vulkan 1.3+ Lighting & Atmosphere Pipeline (branch feat/lightning-improv):
-// - Half-res Multi-Bounce Horizon GTAO + discontinuity-aware normal reconstruction (gtao.comp)
-// - Quarter-res Zone-Aware Volumetric Sun Shafts & Atmospheric Height Fog (volumetric_fog.comp)
-// - Quarter-res Selective Emissive Bloom (bloom_extract.comp)
-// - Unified Full-Res Composite: multi-bounce sky-tinted AO, per-pixel sun key & Fresnel rim,
-//   volumetric fog/shafts, emissive bloom, and soft filmic highlight shoulder (lighting_composite.comp)
+// Vulkan 1.3+ Compute Lighting & Atmosphere Pipeline:
+// - Half-res multi-bounce horizon GTAO + two-scale contact/projected sun shadows + bilateral denoise
+// - Quarter-res zone-aware volumetric height fog & sun/doorway shafts (volumetric_fog.comp)
+// - Quarter-res 13-tap Karis emissive bloom, SSGI-lite indirect bounce, Kawase blur & 4x2 dynamic flash
+// - Full-res unified composite (AO, hemisphere bounce, specular/rim, fog, bloom, vignette, debanding)
+// - Full-res pre-HUD FXAA 3.11 edge anti-aliasing (fxaa_prehud.comp)
 //
 // Runs strictly after 3D draws and BEFORE 2D HUD draws (both on 30 Hz frames and 120/180 Hz subframes),
-// so HUD/UI/menus are never affected and the 4x HUD-free killcam captures the enhanced lighting too!
+// so HUD/UI/menus stay crisp and the 4x HUD-free killcam captures the enhanced lighting too.
 
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
@@ -20,7 +20,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace mhf::psp::vk {
 
@@ -57,7 +56,7 @@ struct alignas(16) LightingComputeParams {
     float spec_contact[4]{};      // x = spec_strength, y = spec_gloss, z = contact_shadow_str, w = vibrance
     std::uint32_t tex_slots[4]{}; // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     std::uint32_t aux_slots[4]{}; // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
-    std::uint32_t ext_slots[4]{}; // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+    std::uint32_t ext_slots[4]{}; // x = ssgi_slot, y = gtao_raw/flash_slot, z = biome_id, w = flags (bit0=cave, bit1=vig, bit2=fxaa)
 };
 static_assert(sizeof(LightingComputeParams) == 224);
 
@@ -94,13 +93,8 @@ public:
                       const textures::MemoryReader &reader);
     void end_frame_zone_vote() noexcept;
 
-    [[nodiscard]] BiomeKind active_biome() const noexcept { return active_biome_; }
-    [[nodiscard]] bool active_is_cave() const noexcept { return active_is_cave_; }
-
-    // Runs GTAO (1/2 res) -> Volumetric Fog/Shafts (1/4 res) -> Emissive Bloom (1/4 res) ->
-    // Unified Full-Res Composite in-place on `scene_color`.
-    // `params_bda` must hold 4 contiguous LightingComputeParams slots (or 1 reused — we pass 3 BDA offsets
-    // from the caller's mapped param ring so each pass has its exact `out_w/out_h`!).
+    // Runs enabled lighting/atmosphere compute passes on `scene_color` using `kParamSlotsPerDispatch`
+    // contiguous `LightingComputeParams` slots starting at `params_cpu_ptr` / `params_bda`.
     void dispatch(VkCommandBuffer cmd, const Context &ctx, const BindlessDescriptors &desc,
                   VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
