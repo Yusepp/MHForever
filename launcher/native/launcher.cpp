@@ -133,6 +133,16 @@ Json default_settings() {
     s["scale"] = 4;
     s["graphicsBackend"] = "opengl"; // opengl, vulkan (experimental) or software
     s["enhancedLighting"] = false; // Vulkan compute GTAO, volumetric fog/sun shafts, bloom, rim light
+    s["vkAo"] = true;
+    s["vkContactShadows"] = true;
+    s["vkVolumetricFog"] = true;
+    s["vkBloom"] = true;
+    s["vkSsgi"] = true;
+    s["vkSpecular"] = true;
+    s["vkSoftParticles"] = true;
+    s["vkFxaa"] = true;
+    s["vkVignette"] = true;
+    s["vkKillcamDof"] = true;
     s["fullscreen"] = false;
     s["smoothTextures"] = false;
     s["packMipmaps"] = false; // texture packs: mip levels made for images that ship none (softer far away, no shimmer)
@@ -1031,6 +1041,8 @@ void Launcher::import_game_controls() {
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality", "enhancedLighting",
+                                                                    "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
+                                                                    "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
                                                                     "shadowDarkness", "widescreen"};
                 const std::string setting = name == "horn-songs" ? "hornSongs" : name == "hud-size" ? "hudSize" : name.substr(7);
                 if (setting != "hornSongs" && setting != "hudSize" && std::ranges::find(kGameOptions, setting) == std::end(kGameOptions)) continue;
@@ -1136,7 +1148,9 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
         const double level = std::clamp(partial["anisotropy"].as_number(), 1.0, 16.0);
         s["anisotropy"] = std::exp2(std::round(std::log2(level)));
     }
-    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting", "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
+    for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting",
+                            "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
+                            "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
                             "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
@@ -1610,6 +1624,18 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
     // The shadows' settings travel even while they are off, so that turning them on in the game's menu finds them.
     if (s["projectedShadows"].as_bool()) plan.args.push_back("--projected-shadows");
     if (s["enhancedLighting"].as_bool()) plan.args.push_back("--enhanced-lighting");
+    {
+        std::uint32_t vk_mask = 0u;
+        const char *const kVkKeys[10] = {"vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
+                                         "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof"};
+        for (unsigned bit = 0u; bit < 10u; ++bit) {
+            if (s[kVkKeys[bit]].as_bool(true)) vk_mask |= (1u << bit);
+        }
+        if (vk_mask != 0x3FFu) {
+            plan.args.push_back("--vulkan-effects-mask");
+            plan.args.push_back(std::to_string(vk_mask));
+        }
+    }
     if (!s["wholeMapShadows"].as_bool(true)) plan.args.push_back("--no-whole-map-shadows");
     if (s["shadowQuality"].is_number() && s["shadowQuality"].as_number() != 0) {
         plan.args.push_back("--shadow-quality");
