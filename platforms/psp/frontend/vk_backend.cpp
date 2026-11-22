@@ -286,10 +286,19 @@ private:
     VkImageResource copy_tex_;
     VkImageResource overlay_tex_;
     std::uint64_t overlay_gen_ = 0;
+    std::uint64_t overlay_shown_at_ms_ = 0;
     bool overlay_visible_ = false;
     bool overlay_continuous_ = false;
     float overlay_aspect_ = 0.0f;
     std::chrono::steady_clock::time_point last_menu_draw_{};
+
+    // Quest HUD detection + HUD sizing + widescreen 2D aspect preservation (drives Better Sharpness,
+    // Gathering Assistance, Hunting Horn Songs, and pixel-aligned Key Quest Markers).
+    std::uint32_t cur_layer_ = gpu::DrawInfo::kNoLayer;
+    std::uint32_t hud_layer_ = gpu::DrawInfo::kNoLayer;
+    bool quest_hud_this_flip_ = false;
+    std::uint32_t last_shown_addr_ = 0;
+    float frame_stretch_ = 1.0f;
 
     std::uint32_t last_shown_slot_ = 0;
     float last_shown_uv_[2]{1.0f, 1.0f};
@@ -757,6 +766,60 @@ void VkBackend::draw_batch() {
     RenderTarget &rt = rt_it->second;
     begin_target_pass(rt);
 
+    const auto R = [&](std::uint32_t reg) { return key_reg(setup_.key, reg); };
+    const bool clear = (R(kClearMode) & 1u) != 0;
+
+    // Quest HUD detection, HUD scaling, and widescreen 2D aspect preservation (single tight pass).
+    float hud_scale = 1.0f, hud_ax = 0.0f, hud_ay = 0.0f;
+    float wide_scale = 1.0f, wide_ax = 240.0f;
+    if (setup_.through && !clear && !setup_.self_sampled && (setup_.target == last_shown_addr_ || last_shown_addr_ == 0u)) {
+        float x1 = 1e9f, y1 = 1e9f, x2 = -1e9f, y2 = -1e9f;
+        for (const GpuVertex &v : batch_) {
+            x1 = std::min(x1, v.x);
+            y1 = std::min(y1, v.y);
+            x2 = std::max(x2, v.x);
+            y2 = std::max(y2, v.y);
+        }
+        const bool whole_screen = (x2 - x1 >= 448.0f && y2 - y1 >= 32.0f) || (y2 - y1 >= 256.0f);
+        if (!whole_screen) {
+            constexpr float kHudClock[4] = {8.0f, 8.0f, 60.0f, 56.0f};
+            const bool is_clock = std::fabs(x1 - kHudClock[0]) < 1.5f && std::fabs(y1 - kHudClock[1]) < 1.5f &&
+                                  x2 >= kHudClock[2] - 1.5f && y2 >= kHudClock[3] - 1.5f && y2 <= 160.0f;
+            if (hud_layer_ == gpu::DrawInfo::kNoLayer && is_clock) {
+                hud_layer_ = cur_layer_;
+                quest_hud_this_flip_ = true;
+            }
+            const int hud_pct = std::clamp(live_->hud_size.load(std::memory_order_relaxed), 50, 100);
+            if (hud_layer_ != gpu::DrawInfo::kNoLayer) {
+                if (cur_layer_ == hud_layer_) {
+                    hud_scale = static_cast<float>(hud_pct) / 100.0f;
+                    hud_ax = 0.0f;
+                    hud_ay = 0.0f;
+                    if (frame_stretch_ > 1.0f) { wide_scale = 1.0f / frame_stretch_; wide_ax = 0.0f; }
+                } else if (cur_layer_ == hud_layer_ + 1u && x1 >= 240.0f) {
+                    hud_scale = static_cast<float>(hud_pct) / 100.0f;
+                    hud_ax = 480.0f;
+                    hud_ay = y1 < 180.0f ? 0.0f : 272.0f;
+                    if (frame_stretch_ > 1.0f) { wide_scale = 1.0f / frame_stretch_; wide_ax = 480.0f; }
+                } else if (frame_stretch_ > 1.0f) {
+                    wide_scale = 1.0f / frame_stretch_;
+                    wide_ax = 240.0f;
+                }
+            } else if (frame_stretch_ > 1.0f) {
+                wide_scale = 1.0f / frame_stretch_;
+                wide_ax = 240.0f;
+            }
+            if (hud_scale != 1.0f || wide_scale != 1.0f) {
+                for (GpuVertex &v : batch_) {
+                    const float hx = hud_ax + (v.x - hud_ax) * hud_scale;
+                    const float hy = hud_ay + (v.y - hud_ay) * hud_scale;
+                    v.x = wide_ax + (hx - wide_ax) * wide_scale;
+                    v.y = hy;
+                }
+            }
+        }
+    }
+
     FrameSlice &f = frames_[frame_slot_];
     const std::size_t vbytes = batch_.size() * sizeof(GpuVertex);
     auto vslice = f.vertices.allocate(vbytes, 16);
@@ -767,8 +830,6 @@ void VkBackend::draw_batch() {
     }
     std::memcpy(vslice.ptr, batch_.data(), vbytes);
 
-    const auto R = [&](std::uint32_t reg) { return key_reg(setup_.key, reg); };
-    const bool clear = (R(kClearMode) & 1u) != 0;
     const bool textured = !clear && (R(kTextureMapEnable) & 1u) != 0;
     const bool fog = !clear && !setup_.through && (R(kFogEnable) & 1u) != 0;
     const bool alpha_test = !clear && (R(kAlphaTestEnable) & 1u) != 0;
@@ -939,6 +1000,7 @@ void VkBackend::draw_batch() {
 }
 
 void VkBackend::draw_started(const gpu::DrawInfo &draw) {
+    cur_layer_ = draw.layer;
     if (subframes_ <= 1) return;
     cur_draw_index_ = static_cast<std::uint32_t>(cur_snap_.summaries.size());
     cur_snap_.summaries.push_back(interpolation::summarize(draw));
@@ -1128,10 +1190,12 @@ void VkBackend::upload_overlay_if_needed() {
     bool upload = false;
     {
         std::lock_guard lock(overlay_->mutex);
-        overlay_visible_ = overlay_->visible;
+        const bool now_visible = overlay_->visible && overlay_->width > 0 && overlay_->height > 0;
+        if (now_visible && !overlay_visible_) overlay_shown_at_ms_ = SDL_GetTicks();
+        overlay_visible_ = now_visible;
         overlay_continuous_ = overlay_->continuous;
         overlay_aspect_ = overlay_->aspect;
-        if (overlay_->visible && overlay_->generation != overlay_gen_ && overlay_->width > 0 && overlay_->height > 0) {
+        if (now_visible && overlay_->generation != overlay_gen_) {
             w = overlay_->width;
             h = overlay_->height;
             pixels = overlay_->pixels;
@@ -1192,16 +1256,6 @@ void VkBackend::build_menu_blur(std::uint32_t src_slot, float uv_max_x, float uv
 void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter) {
     ensure_recording();
     end_render_pass();
-    upload_overlay_if_needed();
-    if (overlay_visible_ && overlay_continuous_) {
-        build_menu_blur(tex_slot, uv_max_x, uv_max_y);
-        if (blur_src_slot_ != 0) {
-            tex_slot = blur_src_slot_;
-            uv_max_x = 1.0f;
-            uv_max_y = 1.0f;
-            linear_filter = true;
-        }
-    }
 
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(window_, &pw, &ph);
@@ -1214,7 +1268,17 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
         swapchain_.recreate(ctx_, pw, ph);
         pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
         ensure_recording();
-        upload_overlay_if_needed();
+    }
+
+    upload_overlay_if_needed();
+    if (overlay_visible_ && overlay_continuous_) {
+        build_menu_blur(tex_slot, uv_max_x, uv_max_y);
+        if (blur_src_slot_ != 0) {
+            tex_slot = blur_src_slot_;
+            uv_max_x = 1.0f;
+            uv_max_y = 1.0f;
+            linear_filter = true;
+        }
     }
 
     std::uint32_t img_idx = 0;
@@ -1296,8 +1360,10 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
         vkCmdSetScissor(cmd, 0, 1, &osc);
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.overlay_pipe);
+        const float ft = std::clamp(static_cast<float>(SDL_GetTicks() - overlay_shown_at_ms_) / 150.0f, 0.0f, 1.0f);
+        const float alpha = ft * (2.0f - ft); // smooth ease-out fade-in
         vk::PresentPush op{{1.0f, 1.0f}, overlay_tex_.bindless_slot,
-                           vk::BindlessDescriptors::sampler_index(true, false, true, true, 1), 1.0f};
+                           vk::BindlessDescriptors::sampler_index(true, false, true, true, 1), alpha};
         vkCmdPushConstants(cmd, pipelines_.present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(op), &op);
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -1640,7 +1706,15 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     have_state_ = false;
     ++frame_number_;
 
+    // Publish quest HUD detection for Better Sharpness, Gathering Assistance, and Hunting Horn Songs.
+    live_->quest_hud.store(quest_hud_this_flip_, std::memory_order_relaxed);
+    quest_hud_this_flip_ = false;
+    hud_layer_ = gpu::DrawInfo::kNoLayer;
+    const float wide = live_->wide_aspect.load(std::memory_order_relaxed);
+    frame_stretch_ = wide > 0.0f ? (wide / (480.0f / 272.0f)) : 1.0f;
+
     const std::uint32_t off = (address & 0x1FFFFFFFu) & 0x001FFFFFu;
+    last_shown_addr_ = off;
     auto it = targets_.find(off);
     bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
     if (have_gpu_frame) {
