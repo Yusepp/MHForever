@@ -935,8 +935,23 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 if (prof_.enabled) ++prof_.tex_misses;
                 // Compute content hash ONCE per unique texture per frame.
                 const std::uint64_t h = ge.texture_hash();
+                auto build_facts = [&]() {
+                    textures::TextureFacts facts{};
+                    facts.address = info.address;
+                    facts.buffer_width = info.stride;
+                    facts.format = info.format;
+                    facts.width = info.width;
+                    facts.height = info.height;
+                    facts.dimension = static_cast<std::uint16_t>(ge.reg(kTexSize0) & 0xFFFFu);
+                    facts.clut_format_word = (kClutFormat << 24u) | (ge.reg(kClutFormat) & 0xFFFFFFu);
+                    facts.clut = ge.clut_bytes();
+                    facts.clut_last_bytes = ge.clut_last_bytes();
+                    facts.clut_max_bytes = ge.clut_max_bytes();
+                    return facts;
+                };
                 if (!setup_.through && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
-                    lighting_.note_texture_hash(h);
+                    lighting_.note_texture(h, build_facts(),
+                                           [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); });
                 }
 
                 // Phase 3: check texture pack (cached by content hash so XXHash never runs on repeated draws).
@@ -948,17 +963,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                                             (pit->second.pending && pit->second.last_try_frame != frame_number_);
                     if (need_query) {
                         if (prof_.enabled) ++prof_.pack_queries;
-                        textures::TextureFacts facts{};
-                        facts.address = info.address;
-                        facts.buffer_width = info.stride;
-                        facts.format = info.format;
-                        facts.width = info.width;
-                        facts.height = info.height;
-                        facts.dimension = static_cast<std::uint16_t>(ge.reg(kTexSize0) & 0xFFFFu);
-                        facts.clut_format_word = (kClutFormat << 24u) | (ge.reg(kClutFormat) & 0xFFFFFFu);
-                        facts.clut = ge.clut_bytes();
-                        facts.clut_last_bytes = ge.clut_last_bytes();
-                        facts.clut_max_bytes = ge.clut_max_bytes();
+                        const textures::TextureFacts facts = build_facts();
                         textures::Filter pfilter = textures::Filter::Auto;
                         bool has_mips = false;
                         bool pending = false;
@@ -1353,6 +1358,23 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
         std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
         cur_light_in_.vz_scale = draw.viewport[2];
         cur_light_in_.vz_center = draw.viewport[5];
+        // Capture orthonormalized 3x3 world -> view rotation from the first terrain/camera draw so sun direction,
+        // contact shadows, and sky/ground hemisphere bounce stay 100% world-locked as the camera rotates.
+        const auto eye = interpolation::multiply(sum.view, sum.world);
+        float c0[3]{eye[0], eye[1], eye[2]};
+        float c1[3]{eye[4], eye[5], eye[6]};
+        float c2[3]{eye[8], eye[9], eye[10]};
+        auto norm3 = [](float v[3]) {
+            const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (l > 1e-4f) { v[0] /= l; v[1] /= l; v[2] /= l; return true; }
+            return false;
+        };
+        if (norm3(c0) && norm3(c1) && norm3(c2)) {
+            cur_light_in_.view_rot[0] = c0[0]; cur_light_in_.view_rot[1] = c1[0]; cur_light_in_.view_rot[2] = c2[0];
+            cur_light_in_.view_rot[3] = c0[1]; cur_light_in_.view_rot[4] = c1[1]; cur_light_in_.view_rot[5] = c2[1];
+            cur_light_in_.view_rot[6] = c0[2]; cur_light_in_.view_rot[7] = c1[2]; cur_light_in_.view_rot[8] = c2[2];
+            cur_light_in_.has_view_rot = true;
+        }
     }
     if (subframes_ <= 1) return;
 

@@ -129,6 +129,9 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
                 tex_to_zone_[h32] = zidx;
             }
         }
+        if (!tex_to_zone_.empty()) {
+            zone_keys_ = textures::Pack::keys_only();
+        }
     }
 
     return ready();
@@ -162,11 +165,25 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     }
 }
 
-void LightingPipeline::note_texture_hash(std::uint64_t tex_hash) noexcept {
-    if (tex_to_zone_.empty()) return;
-    const auto it = tex_to_zone_.find(static_cast<std::uint32_t>(tex_hash));
-    if (it != tex_to_zone_.end()) {
-        ++zone_votes_[static_cast<std::size_t>(it->second)];
+void LightingPipeline::note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
+                                    const textures::MemoryReader &reader) {
+    if (tex_to_zone_.empty() || !zone_keys_) return;
+    int zone = -1;
+    if (const auto cit = content_hash_to_zone_.find(content_hash); cit != content_hash_to_zone_.end()) {
+        zone = cit->second;
+    } else {
+        textures::Key key{};
+        std::uint32_t cw = facts.width, ch = facts.height;
+        if (zone_keys_->key_of(facts, reader, key, cw, ch)) {
+            if (const auto zit = tex_to_zone_.find(key.data); zit != tex_to_zone_.end()) {
+                zone = zit->second;
+            }
+        }
+        if (content_hash_to_zone_.size() > 16384u) content_hash_to_zone_.clear();
+        content_hash_to_zone_.emplace(content_hash, zone);
+    }
+    if (zone >= 0 && static_cast<std::size_t>(zone) < zone_votes_.size()) {
+        ++zone_votes_[static_cast<std::size_t>(zone)];
     }
 }
 
@@ -262,24 +279,57 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.vz_and_size[0] = in.vz_scale;
     p.vz_and_size[1] = in.vz_center;
 
-    // Normalized view-space sun direction (from live PSP GE light 0, with sensible upper-sky fallback).
-    float lx = in.has_light0 ? in.light0_dir[0] : 0.32f;
-    float ly = in.has_light0 ? in.light0_dir[1] : 0.78f;
-    float lz = in.has_light0 ? in.light0_dir[2] : -0.54f;
-    const float llen = std::sqrt(lx * lx + ly * ly + lz * lz);
-    if (llen > 1e-4f) {
-        lx /= llen;
-        ly /= llen;
-        lz /= llen;
-    } else {
-        lx = 0.32f;
-        ly = 0.78f;
-        lz = -0.54f;
+    // World-space sun direction: prefer live PSP GE directional light 0, or fall back to zone sun elevation/turn.
+    float wx = 0.34f, wy = 0.78f, wz = 0.52f;
+    if (in.has_light0) {
+        wx = in.light0_dir[0];
+        wy = in.light0_dir[1];
+        wz = in.light0_dir[2];
+    } else if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size() &&
+               zones_[static_cast<std::size_t>(active_zone_)].sun_height_deg > 0.0f) {
+        const auto &z = zones_[static_cast<std::size_t>(active_zone_)];
+        const float elev = std::clamp(z.sun_height_deg, 18.0f, 75.0f) * (3.14159265f / 180.0f);
+        const float azim = z.sun_turn * (3.14159265f / 180.0f);
+        const float ce = std::cos(elev);
+        wx = ce * std::sin(azim);
+        wy = std::sin(elev);
+        wz = ce * std::cos(azim);
     }
+    const float wlen = std::sqrt(wx * wx + wy * wy + wz * wz);
+    if (wlen > 1e-4f) { wx /= wlen; wy /= wlen; wz /= wlen; }
+    else { wx = 0.34f; wy = 0.78f; wz = 0.52f; }
+    // Ensure outdoor sun points upward so contact shadows & key light always come from the sky.
+    if (wy < 0.15f) {
+        wy = std::fabs(wy) + 0.25f;
+        const float l2 = std::sqrt(wx * wx + wy * wy + wz * wz);
+        wx /= l2; wy /= l2; wz /= l2;
+    }
+
+    // Transform world sun & world up (0,1,0) into view space using active camera rotation so sun shafts,
+    // contact shadows, key light, rim light, and hemisphere bounce stay 100% world-locked as camera rotates!
+    float lx = wx, ly = wy, lz = wz;
+    float ux = 0.0f, uy = 1.0f, uz = 0.0f;
+    if (in.has_view_rot) {
+        const float *R = in.view_rot;
+        lx = R[0] * wx + R[1] * wy + R[2] * wz;
+        ly = R[3] * wx + R[4] * wy + R[5] * wz;
+        lz = R[6] * wx + R[7] * wy + R[8] * wz;
+        ux = R[1];
+        uy = R[4];
+        uz = R[7];
+    }
+    const float llen = std::sqrt(lx * lx + ly * ly + lz * lz);
+    if (llen > 1e-4f) { lx /= llen; ly /= llen; lz /= llen; }
+    const float ulen = std::sqrt(ux * ux + uy * uy + uz * uz);
+    if (ulen > 1e-4f) { ux /= ulen; uy /= ulen; uz /= ulen; }
+
     p.sun_dir_view[0] = lx;
     p.sun_dir_view[1] = ly;
     p.sun_dir_view[2] = lz;
     p.sun_dir_view[3] = active_is_cave_ ? 1.0f : 0.0f;
+    p.world_up_view[0] = ux;
+    p.world_up_view[1] = uy;
+    p.world_up_view[2] = uz;
 
     // Project sun direction onto screen UV for volumetric god-rays (smoothly fades when sun is behind camera).
     const float sun_facing = std::clamp((-lz + 0.25f) / 1.15f, 0.0f, 1.0f);
@@ -289,84 +339,128 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.sun_screen[2] = active_is_cave_ ? 0.0f : sun_facing;
     p.sun_screen[3] = static_cast<float>(in.frame_index & 63u);
 
-    // Biome-tuned lighting, AO, shadow tint, volumetric fog, and bloom presets.
+    // Biome-tuned lighting, AO, contact shadows, hemisphere ground/magma bounce, specular sheen, SSGI, fog & bloom.
     float shadow_rgb[3]{0.78f, 0.82f, 0.90f};
-    float ao_str = 0.62f;
+    float ao_str = 0.60f;
     float fog_rgb[3]{0.70f, 0.78f, 0.88f};
-    float fog_dens = 0.00042f;
+    float fog_dens = 0.00040f;
     float scat_rgb[3]{1.00f, 0.94f, 0.82f};
     float scat_str = 0.22f;
     float bloom_th = 0.80f;
     float bloom_str = 0.26f;
     float rim_str = 0.14f;
     float key_str = 0.14f;
+    float ground_rgb[3]{0.38f, 0.40f, 0.36f};
+    float hemi_str = 0.09f;
+    float spec_str = 0.12f;
+    float spec_gloss = 28.0f;
+    float contact_str = 0.42f;
+    float ssgi_str = 0.22f;
+    float vibrance = 0.06f;
 
     switch (active_biome_) {
     case BiomeKind::Snowy:
-        // Pokke Village & Snowy Mountains: crisp cool alpine sky bounce + gentle snow-glare scatter.
-        shadow_rgb[0] = 0.74f; shadow_rgb[1] = 0.82f; shadow_rgb[2] = 0.96f;
-        ao_str = 0.64f;
-        fog_rgb[0] = 0.78f; fog_rgb[1] = 0.86f; fog_rgb[2] = 0.96f;
-        fog_dens = 0.00046f;
+        // Pokke Village & Snowy Mountains: crisp alpine sky bounce, bright snow ground bounce, icy specular glint.
+        shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.82f; shadow_rgb[2] = 0.96f;
+        ao_str = 0.58f;
+        fog_rgb[0] = 0.80f; fog_rgb[1] = 0.88f; fog_rgb[2] = 0.96f;
+        fog_dens = 0.00042f;
         scat_rgb[0] = 0.94f; scat_rgb[1] = 0.97f; scat_rgb[2] = 1.00f;
         scat_str = 0.20f;
-        bloom_th = 0.82f; bloom_str = 0.28f;
+        bloom_th = 0.84f; bloom_str = 0.26f;
         rim_str = 0.15f; key_str = 0.14f;
+        ground_rgb[0] = 0.80f; ground_rgb[1] = 0.88f; ground_rgb[2] = 0.98f;
+        hemi_str = 0.10f;
+        spec_str = 0.16f; spec_gloss = 38.0f;
+        contact_str = 0.45f;
+        ssgi_str = 0.18f;
+        vibrance = 0.05f;
         break;
     case BiomeKind::Desert:
-        // Desert / Old Desert: golden sunlight, warm sand shadow bounce, subtle heat haze.
-        shadow_rgb[0] = 0.84f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.72f;
-        ao_str = 0.58f;
+        // Desert / Old Desert: golden sunlight, warm sand ground bounce, crisp sunlit contact shadows.
+        shadow_rgb[0] = 0.84f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.70f;
+        ao_str = 0.56f;
         fog_rgb[0] = 0.90f; fog_rgb[1] = 0.82f; fog_rgb[2] = 0.68f;
-        fog_dens = 0.00038f;
+        fog_dens = 0.00036f;
         scat_rgb[0] = 1.00f; scat_rgb[1] = 0.90f; scat_rgb[2] = 0.70f;
         scat_str = 0.24f;
         bloom_th = 0.82f; bloom_str = 0.24f;
         rim_str = 0.15f; key_str = 0.16f;
+        ground_rgb[0] = 0.86f; ground_rgb[1] = 0.72f; ground_rgb[2] = 0.50f;
+        hemi_str = 0.11f;
+        spec_str = 0.13f; spec_gloss = 26.0f;
+        contact_str = 0.48f;
+        ssgi_str = 0.20f;
+        vibrance = 0.07f;
         break;
     case BiomeKind::JungleForest:
-        // Jungle / Forest & Hills / Great Forest: lush green canopy sun shafts & humid valley mist.
+        // Jungle / Forest & Hills / Great Forest: lush canopy sun shafts, humid wet-rock specular sheen.
         shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.82f; shadow_rgb[2] = 0.76f;
-        ao_str = 0.68f;
+        ao_str = 0.64f;
         fog_rgb[0] = 0.70f; fog_rgb[1] = 0.80f; fog_rgb[2] = 0.74f;
-        fog_dens = 0.00050f;
+        fog_dens = 0.00048f;
         scat_rgb[0] = 0.96f; scat_rgb[1] = 0.98f; scat_rgb[2] = 0.80f;
         scat_str = 0.28f;
         bloom_th = 0.80f; bloom_str = 0.25f;
         rim_str = 0.15f; key_str = 0.14f;
+        ground_rgb[0] = 0.36f; ground_rgb[1] = 0.54f; ground_rgb[2] = 0.34f;
+        hemi_str = 0.10f;
+        spec_str = 0.18f; spec_gloss = 42.0f; // rain-slick wet sheen
+        contact_str = 0.44f;
+        ssgi_str = 0.24f;
+        vibrance = 0.08f;
         break;
     case BiomeKind::Swamp:
-        // Swamp / Old Swamp: atmospheric misty teal/violet fog with moody low sun scatter.
+        // Swamp / Old Swamp: misty teal/violet fog, wet sheen on stone & monster scales.
         shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.86f;
-        ao_str = 0.68f;
+        ao_str = 0.64f;
         fog_rgb[0] = 0.64f; fog_rgb[1] = 0.72f; fog_rgb[2] = 0.78f;
-        fog_dens = 0.00068f;
+        fog_dens = 0.00064f;
         scat_rgb[0] = 0.82f; scat_rgb[1] = 0.90f; scat_rgb[2] = 0.94f;
         scat_str = 0.22f;
         bloom_th = 0.78f; bloom_str = 0.24f;
-        rim_str = 0.13f; key_str = 0.12f;
+        rim_str = 0.14f; key_str = 0.12f;
+        ground_rgb[0] = 0.32f; ground_rgb[1] = 0.42f; ground_rgb[2] = 0.46f;
+        hemi_str = 0.09f;
+        spec_str = 0.19f; spec_gloss = 44.0f; // damp/rainy specular
+        contact_str = 0.40f;
+        ssgi_str = 0.24f;
+        vibrance = 0.05f;
         break;
     case BiomeKind::Volcano:
-        // Volcano / Battleground: warm ember scatter, glowing lava/fire bloom, smoky haze.
+        // Volcano / Battleground: warm magma under-glow from below, fiery ember bloom & strong SSGI lava bounce.
         shadow_rgb[0] = 0.80f; shadow_rgb[1] = 0.68f; shadow_rgb[2] = 0.64f;
-        ao_str = 0.66f;
+        ao_str = 0.62f;
         fog_rgb[0] = 0.62f; fog_rgb[1] = 0.36f; fog_rgb[2] = 0.24f;
-        fog_dens = 0.00052f;
+        fog_dens = 0.00050f;
         scat_rgb[0] = 1.00f; scat_rgb[1] = 0.62f; scat_rgb[2] = 0.32f;
         scat_str = 0.26f;
         bloom_th = 0.70f; bloom_str = 0.38f;
         rim_str = 0.18f; key_str = 0.14f;
+        ground_rgb[0] = 1.00f; ground_rgb[1] = 0.38f; ground_rgb[2] = 0.12f; // magma under-glow!
+        hemi_str = 0.16f;
+        spec_str = 0.16f; spec_gloss = 30.0f;
+        contact_str = 0.38f;
+        ssgi_str = 0.38f; // strong lava & fireball bounce!
+        vibrance = 0.08f;
         break;
     case BiomeKind::CaveIndoor:
-        // Caves & Pokke indoors (House, Hall, Kitchen, Farm): ZERO sun shafts, stronger architectural AO, warm torch bloom.
+        // Caves & Pokke indoors (House, Hall, Kitchen, Farm): ZERO sun shafts/sun contact shadows,
+        // rich architectural AO, warm torch/campfire SSGI bounce!
         shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.74f; shadow_rgb[2] = 0.80f;
-        ao_str = 0.74f;
+        ao_str = 0.70f;
         fog_rgb[0] = 0.28f; fog_rgb[1] = 0.30f; fog_rgb[2] = 0.36f;
-        fog_dens = 0.00032f;
+        fog_dens = 0.00028f;
         scat_rgb[0] = 0.95f; scat_rgb[1] = 0.82f; scat_rgb[2] = 0.66f;
         scat_str = 0.0f;
         bloom_th = 0.76f; bloom_str = 0.30f;
-        rim_str = 0.08f; key_str = 0.10f;
+        rim_str = 0.08f; key_str = 0.08f;
+        ground_rgb[0] = 0.42f; ground_rgb[1] = 0.34f; ground_rgb[2] = 0.28f;
+        hemi_str = 0.07f;
+        spec_str = 0.13f; spec_gloss = 34.0f; // damp cave rock / warm wood
+        contact_str = 0.0f; // no directional sun inside caves/indoors
+        ssgi_str = 0.36f; // campfires, torches, Khezu lightning illuminate walls & hunter!
+        vibrance = 0.05f;
         break;
     case BiomeKind::DefaultOutdoor:
         break;
@@ -378,12 +472,14 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         for (int c = 0; c < 3; ++c) {
             fog_rgb[c] = fog_rgb[c] * 0.45f + in.psp_fog_rgb[c] * 0.55f;
         }
-        // Dark night sky/fog: tone down sun shafts gently and cool down the scatter tint into moonlight.
+        // Dark night sky/fog: tone down sun shafts gently and cool down scatter into moonlight.
         if (psp_luma < 0.22f && active_biome_ != BiomeKind::Volcano && !active_is_cave_) {
             scat_str *= 0.55f;
             scat_rgb[0] = 0.72f;
             scat_rgb[1] = 0.82f;
             scat_rgb[2] = 1.00f;
+            contact_str *= 0.75f;
+            ssgi_str = std::max(ssgi_str, 0.30f); // campfires/fireballs pop at night!
         }
     }
 
@@ -397,6 +493,15 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.bloom_rim[1] = bloom_str;
     p.bloom_rim[2] = rim_str;
     p.bloom_rim[3] = key_str;
+    p.world_up_view[3] = ssgi_str;
+    p.ground_bounce[0] = ground_rgb[0]; p.ground_bounce[1] = ground_rgb[1]; p.ground_bounce[2] = ground_rgb[2];
+    p.ground_bounce[3] = hemi_str;
+    p.spec_contact[0] = spec_str;
+    p.spec_contact[1] = spec_gloss;
+    p.spec_contact[2] = contact_str;
+    p.spec_contact[3] = vibrance;
+    p.ext_slots[2] = static_cast<std::uint32_t>(active_biome_);
+    p.ext_slots[3] = active_is_cave_ ? 1u : 0u;
 }
 
 void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const BindlessDescriptors &desc,

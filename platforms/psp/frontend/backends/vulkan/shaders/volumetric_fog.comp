@@ -21,8 +21,12 @@ struct LightingParams {
     vec4 fog_color;     // rgb = biome/PSP fog color, a = fog_density
     vec4 scatter_color; // rgb = volumetric sun scatter color, a = scatter_strength
     vec4 bloom_rim;     // x = bloom_threshold, y = bloom_strength, z = rim_strength, w = key_strength
+    vec4 world_up_view; // xyz = normalized world-up in view space, w = ssgi_strength
+    vec4 ground_bounce; // rgb = biome ground/magma bounce tint, a = hemi_strength
+    vec4 spec_contact;  // x = spec_strength, y = spec_gloss, z = contact_shadow_str, w = vibrance
     uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
+    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {

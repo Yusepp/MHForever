@@ -13,9 +13,11 @@
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
 #include "../gpu_common.hpp"
+#include "texture_pack.hpp"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,24 +35,32 @@ enum class BiomeKind : std::uint8_t {
 };
 
 struct alignas(16) LightingComputeParams {
-    float proj_info[4]{};     // x = 1/proj00, y = 1/proj11, z = proj10, w = proj14
-    float vz_and_size[4]{};   // x = vz_scale, y = vz_center, z = full_w, w = full_h
-    float sun_dir_view[4]{};  // xyz = normalized sun dir in view space, w = is_cave (0 or 1)
-    float sun_screen[4]{};    // xy = sun UV in [0,1], z = sun_facing [0,1], w = frame_jitter
-    float shadow_tint[4]{};   // rgb = biome/sky shadow tint, a = ao_strength
-    float fog_color[4]{};     // rgb = biome/PSP fog color, a = fog_density
-    float scatter_color[4]{}; // rgb = volumetric sun scatter color, a = scatter_strength
-    float bloom_rim[4]{};     // x = bloom_threshold, y = bloom_strength, z = rim_strength, w = key_strength
+    float proj_info[4]{};         // x = 1/proj00, y = 1/proj11, z = proj10, w = proj14
+    float vz_and_size[4]{};       // x = vz_scale, y = vz_center, z = full_w, w = full_h
+    float sun_dir_view[4]{};      // xyz = normalized sun dir in view space, w = is_cave (0 or 1)
+    float sun_screen[4]{};        // xy = sun UV in [0,1], z = sun_facing [0,1], w = frame_jitter
+    float shadow_tint[4]{};       // rgb = biome/sky shadow tint, a = ao_strength
+    float fog_color[4]{};         // rgb = biome/PSP fog color, a = fog_density
+    float scatter_color[4]{};     // rgb = volumetric sun scatter color, a = scatter_strength
+    float bloom_rim[4]{};         // x = bloom_threshold, y = bloom_strength, z = rim_strength, w = key_strength
+    float world_up_view[4]{};     // xyz = normalized world-up in view space, w = ssgi_strength
+    float ground_bounce[4]{};     // rgb = biome ground/magma bounce tint, a = hemi_strength
+    float spec_contact[4]{};      // x = spec_strength, y = spec_gloss, z = contact_shadow_str, w = vibrance
     std::uint32_t tex_slots[4]{}; // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     std::uint32_t aux_slots[4]{}; // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
+    std::uint32_t ext_slots[4]{}; // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
 };
-static_assert(sizeof(LightingComputeParams) == 160);
+static_assert(sizeof(LightingComputeParams) == 224);
 
 struct LightingFrameInput {
     float proj[16]{};         // active 3D perspective projection matrix (column-major)
+    float view_rot[9]{1.0f, 0.0f, 0.0f,
+                      0.0f, 1.0f, 0.0f,
+                      0.0f, 0.0f, 1.0f}; // row-major 3x3 world -> view rotation
+    bool has_view_rot = false;
     float vz_scale = 32767.5f;
     float vz_center = 32767.5f;
-    float light0_dir[3]{0.35f, 0.78f, 0.52f}; // live PSP GE directional light 0
+    float light0_dir[3]{0.35f, 0.78f, 0.52f}; // live PSP GE directional light 0 (world space)
     bool has_light0 = false;
     float psp_fog_rgb[3]{0.72f, 0.78f, 0.86f};
     bool has_psp_fog = false;
@@ -67,8 +77,9 @@ public:
                bloom_pipe_ != VK_NULL_HANDLE && comp_pipe_ != VK_NULL_HANDLE;
     }
 
-    // Zone detection: call with the 32-bit texture hash during 3D draws (zero-cost lookup).
-    void note_texture_hash(std::uint64_t tex_hash) noexcept;
+    // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
+    void note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
+                      const textures::MemoryReader &reader);
     void end_frame_zone_vote() noexcept;
 
     [[nodiscard]] BiomeKind active_biome() const noexcept { return active_biome_; }
@@ -129,6 +140,8 @@ private:
     };
     std::vector<ZoneInfo> zones_;
     std::unordered_map<std::uint32_t, int> tex_to_zone_;
+    std::unordered_map<std::uint64_t, int> content_hash_to_zone_;
+    std::unique_ptr<textures::Pack> zone_keys_;
     std::vector<std::uint32_t> zone_votes_;
     int active_zone_ = -1;
     int pending_zone_ = -1;
