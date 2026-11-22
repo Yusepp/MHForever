@@ -40,8 +40,8 @@ namespace {
 using namespace gpu_common;
 
 constexpr int kFramesInFlight = 2;
-constexpr std::size_t kVertexRingBytes = 16u * 1024u * 1024u;
-constexpr std::size_t kParamsRingBytes = 2u * 1024u * 1024u;
+constexpr std::size_t kVertexRingBytes = 32u * 1024u * 1024u;
+constexpr std::size_t kParamsRingBytes = 8u * 1024u * 1024u;
 constexpr std::size_t kStagingRingBytes = 32u * 1024u * 1024u;
 constexpr std::size_t kMaxCachedTextures = 4096u;
 
@@ -1171,26 +1171,31 @@ void VkBackend::draw_batch() {
 }
 
 void VkBackend::draw_started(const gpu::DrawInfo &draw) {
-    if (subframes_ > 1) {
-        draw_batch();
-        cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
-    }
     cur_layer_ = draw.layer;
-    if (!draw.through && !draw.clear) {
-        const auto sum_tmp = interpolation::summarize(draw);
-        if (sum_tmp.perspective) {
-            std::copy_n(sum_tmp.projection.data(), 16, cur_light_in_.proj);
-            cur_light_in_.vz_scale = draw.viewport[2];
-            cur_light_in_.vz_center = draw.viewport[5];
-        }
+    const auto sum = (!draw.through && !draw.clear) || subframes_ > 1 ? interpolation::summarize(draw)
+                                                                      : interpolation::DrawSummary{};
+    if (!draw.through && !draw.clear && sum.perspective) {
+        std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
+        cur_light_in_.vz_scale = draw.viewport[2];
+        cur_light_in_.vz_center = draw.viewport[5];
     }
     if (subframes_ <= 1) return;
+
+    const bool next_eligible = !draw.through && !draw.clear && sum.perspective;
+    // Only flush batch_ on eligibility transitions (keeps full draw-call batching across identical-state draws!),
+    // and discard any orphaned raw_verts from fully frustum-clipped draws when batch_ is empty.
+    if (next_eligible != cur_draw_eligible_) {
+        draw_batch();
+        cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
+    } else if (batch_.empty()) {
+        cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
+    }
     cur_draw_index_ = static_cast<std::uint32_t>(cur_snap_.summaries.size());
-    cur_snap_.summaries.push_back(interpolation::summarize(draw));
+    cur_snap_.summaries.push_back(sum);
     cur_snap_.viewports.push_back(draw.viewport);
     cur_snap_.draw_raw_start.push_back(static_cast<std::uint32_t>(cur_snap_.raw_verts.size()));
     cur_snap_.draw_raw_count.push_back(0u);
-    cur_draw_eligible_ = !draw.through && !draw.clear && cur_snap_.summaries.back().perspective;
+    cur_draw_eligible_ = next_eligible;
 }
 
 void VkBackend::triangle_unclipped(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) {
