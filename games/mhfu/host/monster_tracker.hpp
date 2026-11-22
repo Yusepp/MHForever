@@ -1,6 +1,5 @@
 #pragma once
 
-#include "overlay/painter.hpp"
 #include "psprecomp/guest_memory.hpp"
 
 #include <array>
@@ -50,12 +49,8 @@ public:
     [[nodiscard]] std::uint16_t player_area() const noexcept { return player_area_; }
     [[nodiscard]] std::array<float, 3> player_pos() const noexcept { return player_pos_; }
     [[nodiscard]] bool capturable_in_area() const noexcept { return capturable_in_area_; }
+    [[nodiscard]] bool is_enemy_capturable(std::uint32_t enemy_address) const noexcept;
     [[nodiscard]] bool in_active_quest() const noexcept { return in_active_quest_; }
-
-    // Draws a World/Rise-style blue skull badge onto a 480x272 premultiplied RGBA overlay buffer.
-    static void draw_capturable_badge(std::vector<std::uint32_t> &rgba, int x, int y, float pulse_phase) noexcept;
-    // Renders a crisp native-HD World/Rise-style glowing cyan-blue skull medallion using TrueType Painter.
-    static void render_capturable_badge(mhf::overlay::Painter &painter, float cx, float cy, float pulse_phase);
 
 private:
     MonsterTrackerSymbols symbols_;

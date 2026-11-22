@@ -79,7 +79,7 @@ void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) c
     const float gap = 7.0f;
     const float card_w = std::clamp(pad_x * 2.0f + pill_w + gap + text_w, 126.0f, 198.0f);
     const float card_h = 28.0f;
-    const float card_x = 480.0f - card_w - 10.0f;
+    const float card_x = 10.0f;
     const float card_y = 272.0f - card_h - 10.0f;
 
     // Soft drop shadow + MH leather/slate gradient panel + double antique-gold bevel frame.

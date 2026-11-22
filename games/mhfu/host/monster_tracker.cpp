@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <cmath>
 
 namespace mhf::mhfu {
 namespace {
@@ -31,9 +30,6 @@ constexpr std::uint32_t kEnemyMinSize = kEnemyMaxHp + 2u;
 
 constexpr std::uint32_t kSpeciesStride = 0x1D0u;
 constexpr std::uint32_t kSpeciesScaleGroup = 0x14Fu;
-
-constexpr int kOverlayW = 480;
-constexpr int kOverlayH = 272;
 
 bool readable_word(const psprecomp::GuestMemory &memory, std::uint32_t addr) noexcept {
     return (addr & 3u) == 0u && memory.contains(addr, 4u);
@@ -66,27 +62,6 @@ bool is_non_capturable_species(std::uint8_t id) noexcept {
         return true;
     default: return false;
     }
-}
-
-void blend_pixel(std::vector<std::uint32_t> &rgba, int x, int y, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) noexcept {
-    if (x < 0 || x >= kOverlayW || y < 0 || y >= kOverlayH || a == 0u) return;
-    const std::size_t idx = static_cast<std::size_t>(y * kOverlayW + x);
-    const std::uint32_t dst = rgba[idx];
-    const std::uint32_t dr = dst & 0xFFu;
-    const std::uint32_t dg = (dst >> 8u) & 0xFFu;
-    const std::uint32_t db = (dst >> 16u) & 0xFFu;
-    const std::uint32_t da = (dst >> 24u) & 0xFFu;
-
-    const std::uint32_t sr = (static_cast<std::uint32_t>(r) * a + 127u) / 255u;
-    const std::uint32_t sg = (static_cast<std::uint32_t>(g) * a + 127u) / 255u;
-    const std::uint32_t sb = (static_cast<std::uint32_t>(b) * a + 127u) / 255u;
-    const std::uint32_t inv = 255u - a;
-
-    const std::uint32_t or_ = std::min<std::uint32_t>(255u, sr + (dr * inv + 127u) / 255u);
-    const std::uint32_t og_ = std::min<std::uint32_t>(255u, sg + (dg * inv + 127u) / 255u);
-    const std::uint32_t ob_ = std::min<std::uint32_t>(255u, sb + (db * inv + 127u) / 255u);
-    const std::uint32_t oa_ = std::min<std::uint32_t>(255u, a + (da * inv + 127u) / 255u);
-    rgba[idx] = or_ | (og_ << 8u) | (ob_ << 16u) | (oa_ << 24u);
 }
 
 } // namespace
@@ -199,89 +174,12 @@ void MonsterTracker::poll(psprecomp::GuestMemory &memory, bool quest_start_track
     if (marked_any) quest_start_applied_ = true;
 }
 
-void MonsterTracker::draw_capturable_badge(std::vector<std::uint32_t> &rgba, int cx, int cy, float pulse_phase) noexcept {
-    // 15x15 World/Rise-inspired glowing cyan-blue skull icon inside a dark circular medallion.
-    static constexpr const char *kSkull[13] = {
-        "....XXXXX....",
-        "..XXXXXXXXX..",
-        ".XXXXXXXXXXX.",
-        ".XXXXXXXXXXX.",
-        "XXXXXXXXXXXXX",
-        "XX..XXXXX..XX",
-        "XX..XXXXX..XX",
-        ".XXXXXXXXXXX.",
-        "..XXXX.XXXX..",
-        "..XXXXXXXXX..",
-        "...X.X.X.X...",
-        "...X.X.X.X...",
-        "....XXXXX....",
-    };
-
-    const float pulse = 0.78f + 0.22f * std::sin(pulse_phase);
-    const auto glow_a = static_cast<std::uint8_t>(std::clamp(pulse * 115.0f, 0.0f, 255.0f));
-
-    // Soft circular dark backing + cyan rim glow
-    for (int dy = -11; dy <= 11; ++dy) {
-        for (int dx = -11; dx <= 11; ++dx) {
-            const float d = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-            if (d <= 9.0f) {
-                blend_pixel(rgba, cx + dx, cy + dy, 10, 22, 38, 195);
-            } else if (d <= 11.0f) {
-                const float t = 1.0f - (d - 9.0f) * 0.5f;
-                blend_pixel(rgba, cx + dx, cy + dy, 75, 200, 255, static_cast<std::uint8_t>(glow_a * t));
-            }
-        }
+bool MonsterTracker::is_enemy_capturable(std::uint32_t enemy_address) const noexcept {
+    if (enemy_address == 0u) return false;
+    for (const auto &m : monsters_) {
+        if (m.address == enemy_address) return m.capturable;
     }
-
-    // Crisp World/Rise cyan-blue skull silhouette
-    const int x0 = cx - 6;
-    const int y0 = cy - 6;
-    const auto r = static_cast<std::uint8_t>(95 + static_cast<int>(45 * pulse));
-    const auto g = static_cast<std::uint8_t>(205 + static_cast<int>(40 * pulse));
-    const std::uint8_t b = 255;
-    for (int row = 0; row < 13; ++row) {
-        for (int col = 0; col < 13; ++col) {
-            if (kSkull[row][col] == 'X') {
-                blend_pixel(rgba, x0 + col, y0 + row, r, g, b, 245);
-            }
-        }
-    }
-}
-
-void MonsterTracker::render_capturable_badge(mhf::overlay::Painter &painter, float cx, float cy, float pulse_phase) {
-    const float pulse = 0.78f + 0.22f * std::sin(pulse_phase);
-    const mhf::overlay::Color kBgTop{0.055f, 0.110f, 0.180f};
-    const mhf::overlay::Color kBgBot{0.025f, 0.055f, 0.095f};
-    const mhf::overlay::Color kCyan{0.32f + 0.18f * pulse, 0.80f + 0.16f * pulse, 1.0f};
-    const mhf::overlay::Color kGlow{0.25f, 0.78f, 1.0f};
-    const mhf::overlay::Color kInk{0.035f, 0.065f, 0.115f};
-
-    // Soft pulsing cyan halo + dark circular medallion
-    const float rad = 14.0f;
-    painter.rrect(cx - rad - 2.0f, cy - rad - 2.0f, (rad + 2.0f) * 2.0f, (rad + 2.0f) * 2.0f, rad + 2.0f,
-                  kGlow, 0.28f * pulse);
-    painter.rrect(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, rad, kBgTop, 0.90f, 0.0f, &kBgBot);
-    painter.rrect(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, rad, kCyan, 0.92f, 1.25f);
-
-    // World/Rise-inspired crisp vector skull silhouette (cranium + cheekbones + jaw + eye sockets + teeth)
-    painter.rrect(cx - 7.0f, cy - 8.0f, 14.0f, 10.5f, 5.0f, kCyan, 0.98f);
-    painter.rrect(cx - 4.8f, cy + 0.5f, 9.6f, 5.5f, 2.0f, kCyan, 0.98f);
-    // Eye sockets & nasal cavity
-    painter.rrect(cx - 4.8f, cy - 3.6f, 3.4f, 3.0f, 1.3f, kInk, 0.98f);
-    painter.rrect(cx + 1.4f, cy - 3.6f, 3.4f, 3.0f, 1.3f, kInk, 0.98f);
-    painter.rrect(cx - 0.9f, cy - 0.4f, 1.8f, 1.8f, 0.7f, kInk, 0.96f);
-    // Jaw tooth notches
-    painter.rect(cx - 2.5f, cy + 3.0f, 1.0f, 3.0f, kInk, 0.95f);
-    painter.rect(cx - 0.5f, cy + 3.0f, 1.0f, 3.0f, kInk, 0.95f);
-    painter.rect(cx + 1.5f, cy + 3.0f, 1.0f, 3.0f, kInk, 0.95f);
-
-    // Crisp micro-pill below medallion: "CAPTURE"
-    const float pw = 34.0f, ph = 9.5f;
-    const float px = cx - pw * 0.5f, py = cy + rad + 2.5f;
-    painter.rrect(px, py, pw, ph, 3.0f, kBgBot, 0.88f);
-    painter.rrect(px, py, pw, ph, 3.0f, kCyan, 0.85f, 0.8f);
-    const float tw = painter.font_ok() ? painter.measure("CAPTURE", 5.6f, true, 0.3f) : 26.0f;
-    painter.text(px + (pw - tw) * 0.5f, py + 6.8f, "CAPTURE", 5.6f, kCyan, 0.98f, true, 0.3f);
+    return false;
 }
 
 } // namespace mhf::mhfu

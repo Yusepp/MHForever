@@ -629,6 +629,14 @@ void on_item_box_update(Runtime &rt, Context &) {
     if (!g_item_pouch_loadouts.load(std::memory_order_relaxed)) return;
     g_item_loadouts.mark_box_open(rt.now_us());
 }
+
+void on_minimap_enemy_color(Runtime &, Context &ctx) {
+    if (!g_capturable_indicator.load(std::memory_order_relaxed)) return;
+    // Epilogue of minimap enemy icon color calculation: s0 (gpr[16]) = Enemy*, v0 (gpr[2]) = 0xAARRGGBB.
+    if (g_monster_tracker.is_enemy_capturable(ctx.gpr[16])) {
+        ctx.set_gpr(2, 0xFF00E8FFu); // bright cyan instead of pink
+    }
+}
 constexpr std::uint32_t kCameraFov = 0x64;          // f32 in the camera: the field of view, set from the tilt level
 constexpr std::uint32_t kCameraPresetTable = 0x6C;  // u32 in the camera: the presets (the area's own, or the default)
 constexpr std::uint32_t kCameraPreset = 0x70;       // u32 in the camera: the preset the camera moves to
@@ -1360,6 +1368,7 @@ int main(int argc, char **argv) {
         runtime.register_hook("mh_combine_rate_done", &on_combine_rate_done);
         runtime.register_hook("mh_enemy_damage_apply", &on_enemy_damage_apply);
         runtime.register_hook("mh_item_box_update", &on_item_box_update);
+        runtime.register_hook("mh_minimap_enemy_color", &on_minimap_enemy_color);
         if (!controls_file.empty()) {
             g_item_loadouts.set_storage_path((std::filesystem::path(controls_file).parent_path() / "item_loadouts.txt").string());
         } else if (!options.memstick_root.empty()) {
@@ -1565,7 +1574,7 @@ int main(int argc, char **argv) {
                                               if (v == 0) g_damage_numbers.clear();
                                           }, "Combat & HUD"});
                 frontend.add_game_option({"capturableIndicator", "Capturable monster indicator",
-                                          "Shows a blue skull badge when a large monster in your area is ready to capture.",
+                                          "Turns a capturable large monster's minimap dot cyan instead of pink.",
                                           false, g_capturable_indicator.load() ? 1 : 0, 0, 1, 1, "",
                                           [](int v) { g_capturable_indicator = v != 0; }, "Combat & HUD"});
                 frontend.add_game_option({"questStartTracker", "Quest-start monster tracker (60s)",
@@ -1629,10 +1638,9 @@ int main(int argc, char **argv) {
                 const std::uint64_t now = rt->now_us();
                 const bool show_skip = g_skip_quest_clear_timer.load(std::memory_order_relaxed) && g_quest_timer_skip.can_skip();
                 if (g_monster_tracker.in_active_quest() || show_skip) {
-                    const bool show_cap = g_capturable_indicator.load(std::memory_order_relaxed) && g_monster_tracker.capturable_in_area();
                     const bool show_lock = g_target_lock_camera.load(std::memory_order_relaxed) && g_target_lock.locked();
                     const bool show_dmg = g_damage_numbers_enabled.load(std::memory_order_relaxed) && g_damage_numbers.active_count() > 0u;
-                    if (!show_cap && !show_lock && !show_dmg && !show_skip) {
+                    if (!show_lock && !show_dmg && !show_skip) {
                         if (qol_overlay_active || image) {
                             qol_overlay_active = false;
                             image.reset();
@@ -1641,26 +1649,24 @@ int main(int argc, char **argv) {
                     } else if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
                         const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
-                        if ((show_skip || show_cap) && !show_lock && !show_dmg) {
+                        if (show_skip && !show_lock && !show_dmg) {
                             const auto [ow, oh] = frontend.overlay_size();
                             auto buf = std::make_shared<std::vector<std::uint32_t>>(
                                 static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
                             qol_painter->begin(*buf, ow, oh, static_cast<float>(ow) / 480.0f);
-                            if (show_skip) g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
-                            if (show_cap) mhf::mhfu::MonsterTracker::render_capturable_badge(*qol_painter, 452.0f, 26.0f, pulse);
+                            g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
                             qol_painter->end();
                             image = std::move(buf);
                             qol_overlay_active = true;
                             frontend.set_game_overlay(image, ow, oh);
                         } else {
                             auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
-                            if (show_skip || show_cap) {
+                            if (show_skip) {
                                 qol_painter->begin(*buf, 480, 272, 1.0f);
-                                if (show_skip) g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
-                                if (show_cap) mhf::mhfu::MonsterTracker::render_capturable_badge(*qol_painter, 452.0f, 26.0f, pulse);
+                                g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
                                 qol_painter->end();
                             }
-                            if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 452, show_cap ? 60 : 26, pulse);
+                            if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 452, 26, pulse);
                             if (show_dmg) {
                                 const mhf::mhfu::CameraProjection cam{
                                     g_monster_tracker.player_pos(),

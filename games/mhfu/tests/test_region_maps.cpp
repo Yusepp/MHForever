@@ -136,6 +136,8 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_quest_markers_")) {
             MHF_CHECK(p.module == "lobby_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             quest_patches.insert(p.patch.name);
+        } else if (p.patch.name == "mh_minimap_enemy_color") {
+            MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
         } else {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             (p.patch.name.starts_with("mh_camera_aspect_") ? aspect_patches : camera_patches).insert(p.patch.name);
