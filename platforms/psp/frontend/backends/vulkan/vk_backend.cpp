@@ -251,6 +251,7 @@ private:
     struct InterpSnapshot {
         std::uint32_t shown_addr = 0;
         std::uint32_t width = 512, height = 272;
+        bool unblendable = false;
         std::vector<interpolation::DrawSummary> summaries;
         std::vector<std::array<float, 8>> viewports;
         std::vector<std::uint32_t> draw_raw_start;
@@ -1104,20 +1105,21 @@ void VkBackend::draw_batch() {
     vkCmdDraw(cmd, static_cast<std::uint32_t>(batch_.size()), 1, 0, 0);
 
     if (subframes_ > 1) {
+        if (setup_.self_sampled) cur_snap_.unblendable = true;
         RecordedBatch rb{};
         rb.setup = setup_;
         const std::uint32_t raw_cnt = static_cast<std::uint32_t>(cur_snap_.raw_verts.size()) - cur_raw_batch_start_;
-        if (raw_cnt > 0 && !setup_.through) {
+        if (cur_draw_eligible_ && !clear && !setup_.through && raw_cnt > 0) {
             rb.use_gpu_raw = true;
             rb.v_offset = cur_raw_batch_start_;
             rb.v_count = raw_cnt;
-            cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
         } else {
             rb.use_gpu_raw = false;
             rb.v_offset = static_cast<std::uint32_t>(cur_snap_.flat_verts.size());
             rb.v_count = static_cast<std::uint32_t>(batch_.size());
             cur_snap_.flat_verts.insert(cur_snap_.flat_verts.end(), batch_.begin(), batch_.end());
         }
+        cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
         cur_snap_.batches.push_back(rb);
     }
 
@@ -1125,6 +1127,10 @@ void VkBackend::draw_batch() {
 }
 
 void VkBackend::draw_started(const gpu::DrawInfo &draw) {
+    if (subframes_ > 1) {
+        draw_batch();
+        cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
+    }
     cur_layer_ = draw.layer;
     if (subframes_ <= 1) return;
     cur_draw_index_ = static_cast<std::uint32_t>(cur_snap_.summaries.size());
@@ -1211,6 +1217,7 @@ void VkBackend::block_transfer(std::uint32_t src, std::uint32_t /*src_stride*/, 
                                std::uint32_t dst, std::uint32_t dst_stride, std::uint32_t dx, std::uint32_t dy,
                                std::uint32_t width, std::uint32_t height, std::uint32_t bytes_per_pixel) {
     draw_batch();
+    if (subframes_ > 1) cur_snap_.unblendable = true;
     const std::uint32_t src_vram = src & 0x1FFFFFFFu;
     const std::uint32_t dst_vram = dst & 0x1FFFFFFFu;
     const bool src_in_vram = src_vram >= 0x04000000u && src_vram < 0x04800000u;
@@ -2422,7 +2429,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             cur_snap_ = InterpSnapshot{};
             cur_raw_batch_start_ = 0;
 
-            if (have_gpu_frame && !blend_older_.raw_verts.empty() && interpolator_.ready()) {
+            if (have_gpu_frame && !blend_older_.unblendable && !blend_newer_.unblendable &&
+                !blend_older_.raw_verts.empty() && interpolator_.ready()) {
                 interpolation::CutThresholds thr{};
                 last_matching_ = interpolator_.matcher().match(blend_older_.summaries, blend_newer_.summaries, thr);
                 if (last_matching_.cut == nullptr) {
@@ -2432,9 +2440,11 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                     (void)upload_snap_raw(snap_raw_new_, blend_newer_.raw_verts);
                     interp_can_blend_ = ok_old;
                 } else {
+                    interpolator_.matcher().forget_motion();
                     has_prev_cam_ = false;
                 }
             } else {
+                interpolator_.matcher().forget_motion();
                 has_prev_cam_ = false;
             }
         } else {
