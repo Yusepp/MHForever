@@ -13,19 +13,24 @@ using namespace mhf::psp;
 namespace region = mhf::psp::generated::mhfu_region_data;
 namespace {
 constexpr std::uint32_t sys = 0x08810000, manager = 0x08890000, player = 0x08891000, bag = 0x08893000;
-int probes = 0, actions = 0;
-bool static_target = true;
+int probes = 0, actions = 0, fish_actions = 0;
+bool static_target = true, fishing_spot = false;
 std::uint16_t probed_type = 3;
 constexpr std::uint32_t nodes = 0x08897000, dynamic_nodes = 0x08898000;
 bool reject_action = false, throw_action = false;
 std::uint8_t started_action = 0x51;
 std::uint16_t expected_tool_slot = 2;
+std::uint16_t last_used_item_id = 0;
 void probe(Runtime &rt, Context &c) {
     ++probes;
     MHF_CHECK(c.gpr[4] == player);
     rt.memory().store16(c.gpr[5], probed_type);
     c.gpr[2] = static_target ? 0 : 0xffff;
     c.gpr[16] = 0xdeadbeef;
+}
+[[maybe_unused]] void fishing_probe(Runtime &, Context &c) {
+    MHF_CHECK(c.gpr[4] == player);
+    c.gpr[2] = fishing_spot ? 23u : 0u;
 }
 void stage_nodes(Runtime &, Context &c) { c.gpr[2] = nodes; }
 void inventory(Runtime &, Context &c) {
@@ -38,9 +43,21 @@ void interact(Runtime &rt, Context &c) {
     if (reject_action) return;
     ++actions;
     MHF_CHECK(c.gpr[4] == player && c.gpr[5] == 2);
-    MHF_CHECK(rt.memory().load16(player + 0x648) == expected_tool_slot);
+    const auto slot = rt.memory().load16(player + 0x648);
+    MHF_CHECK(slot == expected_tool_slot);
+    last_used_item_id = rt.memory().load16(bag + 4u * slot);
     rt.memory().store8(player + 0x299, started_action);
     c.gpr[16] = 123;
+}
+[[maybe_unused]] void item_use(Runtime &rt, Context &c) {
+    if (throw_action) throw std::runtime_error("synthetic item use failure");
+    if (reject_action) return;
+    ++fish_actions;
+    MHF_CHECK(c.gpr[4] == player && c.gpr[5] == 0);
+    const auto slot = rt.memory().load16(player + 0x648);
+    MHF_CHECK(slot == expected_tool_slot);
+    last_used_item_id = rt.memory().load16(bag + 4u * slot);
+    rt.memory().store8(player + 0x299, std::uint8_t{0x4f});
 }
 } // namespace
 int main() {
@@ -58,13 +75,22 @@ int main() {
         MHF_CHECK(std::memcmp(&untouched, &before, sizeof untouched) == 0);
         return mhf::test::finish("test_gathering_runtime_unmapped");
     }
-    std::array<FunctionEntry, 2> f{{{*region::mh_gathering_probe, probe}, {*region::mh_gathering_interact, interact}}};
+    std::vector<FunctionEntry> f{{*region::mh_gathering_probe, probe}, {*region::mh_gathering_interact, interact}};
+    std::uint32_t overlay_min = std::min(*region::mh_gathering_probe, *region::mh_gathering_interact);
+    std::uint32_t overlay_max = std::max(*region::mh_gathering_probe, *region::mh_gathering_interact);
+    if constexpr (region::mh_fishing_probe && region::mh_item_use) {
+        f.push_back({*region::mh_fishing_probe, fishing_probe});
+        f.push_back({*region::mh_item_use, item_use});
+        overlay_min = std::min({overlay_min, *region::mh_fishing_probe, *region::mh_item_use});
+        overlay_max = std::max({overlay_max, *region::mh_fishing_probe, *region::mh_item_use});
+    }
+    std::sort(f.begin(), f.end(), [](const FunctionEntry &a, const FunctionEntry &b) { return a.address < b.address; });
     std::array<FunctionEntry, 2> main_functions{
         {{*region::mh_inventory_slot, inventory}, {*region::mh_stage_gathering_nodes, stage_nodes}}};
     const Program main_program{"synthetic", 0, 0, main_functions, {}, 0x08804000, 0x08910000, -1, {}};
     rt.add_program(main_program);
-    const auto overlay_begin = std::min(*region::mh_gathering_probe, *region::mh_gathering_interact) & ~0xfffu;
-    const auto overlay_end = std::max(*region::mh_gathering_probe, *region::mh_gathering_interact) + 0x1000u;
+    const auto overlay_begin = overlay_min & ~0xfffu;
+    const auto overlay_end = overlay_max + 0x1000u;
     const Program overlay{"synthetic_ovl_game_task", 0, 0, f, {}, overlay_begin, overlay_end, 71, {}};
     rt.add_overlay(overlay);
     MHF_CHECK(rt.activate_overlay(71));
@@ -325,6 +351,87 @@ int main() {
         m.store8(player + 0x299, std::uint8_t{0});
         single.update(rt, ctx);
         MHF_CHECK(actions == start_actions + 3 && m.load16(player + 0x648) == 4);
+    }
+    // Infinite virtual high-tier tools: mining (Mega Pickaxe 0x92), bugs (Mega Bug Net 0x96), fishing (Mega Fishing Fly 0x8F).
+    {
+        for (std::uint32_t i = 0; i < 25; ++i) {
+            m.store16(bag + 4u * i, std::uint16_t{0});
+            m.store16(bag + 4u * i + 2u, std::uint16_t{0});
+        }
+        mhf::mhfu::Gathering inf;
+        inf.indicators = inf.automatic_tools = inf.modern_carving = inf.infinite_tools = true;
+        inf.language = 1; // English
+        m.store16(player + 0x648, std::uint16_t{3});
+        m.store8(player + 0x299, std::uint8_t{0});
+
+        // 1) Empty bag + mining: injects Mega Pickaxe into slot 24, repeats while held, deletes on end.
+        static_target = true;
+        fishing_spot = false;
+        probed_type = 3;
+        started_action = 0x51;
+        m.store16(nodes + 20, std::uint16_t{3});
+        m.store16(nodes + 18, std::uint16_t{4});
+        expected_tool_slot = 24;
+        set_controller_state(rt, {});
+        inf.update(rt, ctx);
+        MHF_CHECK(inf.hint(rt) == "○  Mine");
+        const int inf_start = actions;
+        set_controller_state(rt, pad);
+        inf.update(rt, ctx);
+        MHF_CHECK(actions == inf_start + 1 && last_used_item_id == mhf::mhfu::kMegaPickaxeId);
+        MHF_CHECK(m.load16(bag + 4u * 24u) == mhf::mhfu::kMegaPickaxeId && m.load16(bag + 4u * 24u + 2u) == 1);
+        // Swing #1 finishes while Circle stays held: immediately swings again with Mega Pickaxe.
+        m.store8(player + 0x299, std::uint8_t{0});
+        inf.update(rt, ctx);
+        MHF_CHECK(actions == inf_start + 2 && last_used_item_id == mhf::mhfu::kMegaPickaxeId);
+        // Release Circle and finish swing #2: virtual tool deleted and original slot 3 restored.
+        set_controller_state(rt, {});
+        m.store8(player + 0x299, std::uint8_t{0});
+        inf.update(rt, ctx);
+        MHF_CHECK(m.load16(bag + 4u * 24u) == 0 && m.load16(bag + 4u * 24u + 2u) == 0);
+        MHF_CHECK(m.load16(player + 0x648) == 3);
+
+        // 2) Full 25/25 bag: borrows slot 24 and restores exact original item after mining.
+        for (std::uint32_t i = 0; i < 25; ++i) {
+            m.store16(bag + 4u * i, static_cast<std::uint16_t>(0x10 + i));
+            m.store16(bag + 4u * i + 2u, std::uint16_t{7});
+        }
+        set_controller_state(rt, pad);
+        inf.update(rt, ctx);
+        MHF_CHECK(actions == inf_start + 3 && last_used_item_id == mhf::mhfu::kMegaPickaxeId);
+        set_controller_state(rt, {});
+        m.store8(player + 0x299, std::uint8_t{0});
+        inf.update(rt, ctx);
+        MHF_CHECK(m.load16(bag + 4u * 24u) == 0x10 + 24 && m.load16(bag + 4u * 24u + 2u) == 7);
+        MHF_CHECK(m.load16(player + 0x648) == 3);
+
+        // 3) Empty bag + fishing: injects Mega Fishing Fly (0x8F), calls mh_item_use, hides prompt while fishing, cleans up.
+        for (std::uint32_t i = 0; i < 25; ++i) {
+            m.store16(bag + 4u * i, std::uint16_t{0});
+            m.store16(bag + 4u * i + 2u, std::uint16_t{0});
+        }
+        static_target = false;
+        fishing_spot = true;
+        set_controller_state(rt, {});
+        inf.update(rt, ctx);
+        MHF_CHECK(inf.hint(rt) == "○  Fish");
+        const int fish_start = fish_actions;
+        set_controller_state(rt, pad);
+        inf.update(rt, ctx);
+        MHF_CHECK(fish_actions == fish_start + 1 && last_used_item_id == mhf::mhfu::kMegaFishingFlyId);
+        MHF_CHECK(m.load8(player + 0x299) == 0x4f);
+        // Actively fishing: prompt hidden so bobber view is clear.
+        inf.update(rt, ctx);
+        MHF_CHECK(inf.hint(rt).empty());
+        // Fishing finishes: virtual Mega Fishing Fly deleted and original slot 3 restored.
+        set_controller_state(rt, {});
+        m.store8(player + 0x299, std::uint8_t{0});
+        inf.update(rt, ctx);
+        MHF_CHECK(m.load16(bag + 4u * 24u) == 0 && m.load16(bag + 4u * 24u + 2u) == 0);
+        MHF_CHECK(m.load16(player + 0x648) == 3);
+
+        fishing_spot = false;
+        static_target = true;
     }
     expected_tool_slot = 2;
     m.store16(bag + 20, std::uint16_t{0});

@@ -20,26 +20,35 @@ constexpr std::uint32_t kPlayerAction = 0x299, kPlayerSelectedItem = 0x648;
 constexpr std::uint32_t kNodeId = 16, kNodeRemaining = 18, kNodeType = 20;
 constexpr std::uint32_t kDynamicNodes = 20, kDynamicNodeSize = 32, kStaticNodeSize = 24;
 constexpr std::uint32_t kInventorySlots = 25, kCircle = 0x2000;
-constexpr std::uint8_t kGatherAction = 0x47, kCarveAction = 0x4a, kMiningAction = 0x51, kBugAction = 0x52;
+constexpr std::uint8_t kGatherAction = 0x47, kCarveAction = 0x4a, kFishingAction = 0x4f, kMiningAction = 0x51, kBugAction = 0x52;
+constexpr std::uint16_t kFishingSpotKind = 23;
 constexpr std::uint64_t kHintLifetimeUs = 150'000;
 
 struct HintText {
-    const char *mine, *bugs, *gather, *carve, *depleted, *no_tool;
+    const char *mine, *bugs, *fish, *gather, *carve, *depleted, *no_tool;
 };
 constexpr std::array<HintText, 6> kHints{{
-    {"採掘", "虫捕り", "採集", "剥ぎ取り", "採集済み", "道具なし"},
-    {"Mine", "Catch bugs", "Gather", "Carve", "Depleted", "No tool"},
-    {"Miner", "Attraper des insectes", "Ramasser", "Dépecer", "Épuisé", "Sans outil"},
-    {"Minar", "Atrapar insectos", "Recoger", "Tallar", "Agotado", "Sin herramienta"},
-    {"Abbauen", "Käfer fangen", "Sammeln", "Ausweiden", "Erschöpft", "Kein Werkzeug"},
-    {"Estrai", "Cattura insetti", "Raccogli", "Scuoia", "Esaurito", "Nessun attrezzo"},
+    {"採掘", "虫捕り", "釣り", "採集", "剥ぎ取り", "採集済み", "道具なし"},
+    {"Mine", "Catch bugs", "Fish", "Gather", "Carve", "Depleted", "No tool"},
+    {"Miner", "Attraper des insectes", "Pêcher", "Ramasser", "Dépecer", "Épuisé", "Sans outil"},
+    {"Minar", "Atrapar insectos", "Pescar", "Recoger", "Tallar", "Agotado", "Sin herramienta"},
+    {"Abbauen", "Käfer fangen", "Angeln", "Sammeln", "Ausweiden", "Erschöpft", "Kein Werkzeug"},
+    {"Estrai", "Cattura insetti", "Pesca", "Raccogli", "Scuoia", "Esaurito", "Nessun attrezzo"},
 }};
 
 struct Target {
     std::uint32_t index;
     std::uint16_t type, remaining;
     bool carving;
+    bool fishing;
 };
+
+[[maybe_unused]] std::uint16_t pick_virtual_slot(std::span<const GatheringItem> items) noexcept {
+    for (std::size_t i = items.size(); i-- > 0;) {
+        if (items[i].id == 0 || items[i].count == 0) return static_cast<std::uint16_t>(i);
+    }
+    return static_cast<std::uint16_t>(items.size() - 1u);
+}
 
 // Read-only: gathering checks and inventory access must preserve the interrupted guest context.
 std::optional<Target> read_target(psp::Runtime &rt, const psp::Context &ctx, std::uint32_t player,
@@ -80,7 +89,20 @@ std::optional<Target> read_target(psp::Runtime &rt, const psp::Context &ctx, std
             dynamic = true;
             break;
         }
-        if (!dynamic) return {};
+        if (!dynamic) {
+            if constexpr (region::mh_fishing_probe) {
+                auto fish_call = ctx;
+                fish_call.gpr[4] = player;
+                fish_call.gpr[5] = scratch;
+                fish_call.gpr[6] = scratch + 16;
+                fish_call.gpr[7] = scratch + 20;
+                rt.call(fish_call, *region::mh_fishing_probe);
+                if ((fish_call.gpr[2] & 0xffffu) == kFishingSpotKind) {
+                    return Target{0, 0, 1, false, true};
+                }
+            }
+            return {};
+        }
     } else {
         // The static probe ignores the remaining-use field; inspect the matched
         // node.
@@ -104,7 +126,7 @@ std::optional<Target> read_target(psp::Runtime &rt, const psp::Context &ctx, std
         }
         if (!found) return {};
     }
-    return Target{index, type, remaining, dynamic && type == 2};
+    return Target{index, type, remaining, dynamic && type == 2, false};
 }
 
 } // namespace
@@ -125,52 +147,72 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
     if constexpr (region::mh_gathering_probe && region::mh_gathering_interact && region::mh_inventory_slot &&
                   region::mh_game_sys && region::mh_player_manager && region::mh_cockpit &&
                   region::mh_gathering_dynamic_nodes && region::mh_stage_manager && region::mh_stage_gathering_nodes) {
+        auto &m = rt.memory();
+        auto cleanup_virtual = [&](const std::optional<VirtualTool> &vt) {
+            if (!vt || !m.contains(vt->bag + 4u * vt->slot, 4u)) return;
+            const std::uint32_t addr = vt->bag + 4u * vt->slot;
+            const std::uint16_t cur_id = m.load16(addr);
+            if (vt->saved.id == 0) {
+                if (cur_id == vt->tool_id) {
+                    m.store16(addr, std::uint16_t{0});
+                    m.store16(addr + 2u, std::uint16_t{0});
+                }
+            } else {
+                m.store16(addr, vt->saved.id);
+                m.store16(addr + 2u, vt->saved.count);
+            }
+        };
+        auto clear_selection = [&]() {
+            if (selection_) {
+                cleanup_virtual(selection_->virtual_tool);
+                selection_.reset();
+            }
+        };
         const auto *overlay = rt.active_overlay_at(*region::mh_gathering_probe);
         if (!overlay || !std::string_view(overlay->name).ends_with("_ovl_game_task")) {
-            selection_.reset();
+            clear_selection();
             repeat_ = {};
             tool_repeat_ = {};
             return;
         }
-        auto &m = rt.memory();
         const auto sys = m.load32(*region::mh_game_sys), manager = m.load32(*region::mh_player_manager);
         if (!m.contains(sys, 0x29) || !m.contains(manager, 0x24)) {
-            selection_.reset();
+            clear_selection();
             repeat_ = {};
             tool_repeat_ = {};
             return;
         }
         const auto slot = m.load8(sys + kGameSysPlayerSlot);
         if (slot >= kPlayerSlots) {
-            selection_.reset();
+            clear_selection();
             repeat_ = {};
             tool_repeat_ = {};
             return;
         }
         const auto player = m.load32(manager + kPlayerManagerPlayers + slot * 4u);
         if (!m.contains(player, 0x696)) {
-            selection_.reset();
+            clear_selection();
             repeat_ = {};
             tool_repeat_ = {};
             return;
         }
-        // Keep the tool selected until the game has finished consuming it. Never undo a later selection or write
-        // to a player that has left. This also runs after assistance is turned off or a menu is opened.
+        // Keep the tool selected (and any temporary virtual tool present) until the action finishes.
+        // Never undo a later selection or write to a player that has left.
         if (selection_) {
             if (selection_->player != player || m.load8(player + kPlayerReady) > 1 ||
                 m.load16(player + kPlayerSelectedItem) != selection_->tool) {
-                selection_.reset();
+                clear_selection();
             } else if (m.load8(player + kPlayerAction) != selection_->action) {
                 m.store16(player + kPlayerSelectedItem, selection_->previous);
-                selection_.reset();
+                clear_selection();
             }
         }
         if (!modern_carving || !circle) {
             repeat_ = {};
             tool_repeat_ = {};
         }
-        if (!automatic_tools) tool_repeat_ = {};
-        if (!indicators && !automatic_tools && !modern_carving) return;
+        if (!automatic_tools && !infinite_tools) tool_repeat_ = {};
+        if (!indicators && !automatic_tools && !modern_carving && !infinite_tools) return;
         if ((input_blocked && input_blocked()) || psp::current_dialog(rt).kind != psp::DialogView::Kind::None) {
             repeat_ = {};
             tool_repeat_ = {};
@@ -189,7 +231,7 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             return;
         }
         if (!scratch_) {
-            const auto block = rt.allocate_kernel_block("gathering-query", 16);
+            const auto block = rt.allocate_kernel_block("gathering-query", 32);
             if (!block) return;
             scratch_ = *block;
         }
@@ -204,7 +246,8 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         const auto action = m.load8(player + kPlayerAction);
         const auto area = m.load16(player + kPlayerArea);
         std::uint8_t repeat_action = 0;
-        if (target && target->remaining != 0 && (target->carving || (target->type != 3 && target->type != 4)))
+        if (target && target->remaining != 0 && !target->fishing &&
+            (target->carving || (target->type != 3 && target->type != 4)))
             repeat_action = target->carving ? kCarveAction : kGatherAction;
         const bool repeatable = modern_carving && target && target->remaining != 0 && repeat_action != 0;
         const bool same_target = target && repeat_.player == player && repeat_.area == area &&
@@ -233,7 +276,7 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             tool_repeat_ = {};
             return;
         }
-        const auto [index, type, remaining, carving] = *target;
+        const auto [index, type, remaining, carving, fishing] = *target;
         if (repeat_.working && modern_carving) {
             if (repeat_target_ != index) { repeat_target_ = index; repeat_remaining_ = remaining; reward_received_ = false; }
             else if (remaining < repeat_remaining_) {
@@ -251,64 +294,100 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         std::array<GatheringItem, kInventorySlots> items{};
         for (std::uint32_t i = 0; i < kInventorySlots; ++i)
             items[i] = {m.load16(bag + 4u * i), m.load16(bag + 4u * i + 2)};
-        const auto decision = decide_gathering({index, type, items, remaining == 0, carving});
-        visual_active_ = decision.kind != GatheringKind::none;
+        const auto decision = decide_gathering({index, type, items, remaining == 0, carving, fishing, infinite_tools});
+        const bool tool_kind = decision.kind == GatheringKind::mining || decision.kind == GatheringKind::bugs ||
+                               decision.kind == GatheringKind::fishing;
+        const bool allow_tool_circle = automatic_tools || infinite_tools;
+        const bool has_usable_tool = decision.tool_slot.has_value() || decision.uses_virtual_tool;
+        // Hide the fishing prompt while actively fishing so the screen stays clear for the bobber.
+        visual_active_ = decision.kind != GatheringKind::none && !(fishing && action == kFishingAction);
         kind_ = decision.kind;
         unavailable_ = !decision.available;
-        button_ = decision.available && (kind_ == GatheringKind::gather || kind_ == GatheringKind::carve ||
-                                         (automatic_tools && decision.tool_slot.has_value()));
-        if (indicators) {
+        button_ = decision.available && ((decision.kind == GatheringKind::gather || decision.kind == GatheringKind::carve) ||
+                                         (tool_kind && allow_tool_circle && has_usable_tool));
+        if (indicators && visual_active_) {
             const auto &text = kHints[language >= 0 && static_cast<std::size_t>(language) < kHints.size()
                                          ? static_cast<std::size_t>(language) : 1u];
             if (decision.kind == GatheringKind::mining)
                 hint_ = text.mine;
             else if (decision.kind == GatheringKind::bugs)
                 hint_ = text.bugs;
+            else if (decision.kind == GatheringKind::fishing)
+                hint_ = text.fish;
             else if (decision.kind == GatheringKind::gather)
                 hint_ = text.gather;
             else if (decision.kind == GatheringKind::carve)
                 hint_ = text.carve;
             if (remaining == 0) {
                 hint_.append(" - ").append(text.depleted);
-            } else if (decision.kind == GatheringKind::mining || decision.kind == GatheringKind::bugs) {
-                if (!decision.tool_slot)
+            } else if (tool_kind) {
+                if (!has_usable_tool)
                     hint_.append(" - ").append(text.no_tool);
-                else if (automatic_tools)
+                else if (allow_tool_circle)
                     hint_ = "○  " + hint_;
             } else if (!hint_.empty())
                 hint_ = "○  " + hint_;
         }
-        const auto expected_action = decision.kind == GatheringKind::mining ? kMiningAction : kBugAction;
+        if (!tool_kind) {
+            tool_repeat_ = {};
+            return;
+        }
+        const auto expected_action = decision.kind == GatheringKind::mining ? kMiningAction
+                                     : decision.kind == GatheringKind::bugs ? kBugAction
+                                                                            : kFishingAction;
+        const bool repeatable_tool = decision.kind == GatheringKind::mining || decision.kind == GatheringKind::bugs;
         if (tool_repeat_.active) {
             const bool same_tool_target = tool_repeat_.player == player && tool_repeat_.area == area &&
                                           tool_repeat_.target == index && tool_repeat_.type == type;
-            if (!same_tool_target || !decision.available || !decision.tool_slot ||
+            if (!repeatable_tool || !same_tool_target || !decision.available || !has_usable_tool ||
                 (action != tool_repeat_.action && action != 0)) {
                 tool_repeat_ = {};
             }
-        } else if (modern_carving && automatic_tools && circle && decision.available && decision.tool_slot &&
-                   action == expected_action) {
+        } else if (modern_carving && allow_tool_circle && repeatable_tool && circle && decision.available &&
+                   has_usable_tool && action == expected_action) {
             tool_repeat_ = ToolRepeat{player, index, type, area, expected_action, true};
         }
         const bool want_tool = pressed || (tool_repeat_.active && circle && action == 0);
-        if (!automatic_tools || !want_tool || !decision.tool_slot || !decision.available) return;
-        if (action == kMiningAction || action == kBugAction) return;
+        if (!allow_tool_circle || !want_tool || !has_usable_tool || !decision.available) return;
+        if (action == kMiningAction || action == kBugAction || action == kFishingAction) return;
+
+        std::uint16_t use_slot = 0;
+        std::optional<VirtualTool> vt;
+        if (decision.uses_virtual_tool) {
+            use_slot = pick_virtual_slot(items);
+            vt = VirtualTool{bag, use_slot, decision.virtual_tool_id, items[use_slot]};
+            m.store16(bag + 4u * use_slot, decision.virtual_tool_id);
+            m.store16(bag + 4u * use_slot + 2u, std::uint16_t{1});
+        } else {
+            use_slot = *decision.tool_slot;
+        }
+
         const auto previous_slot = m.load16(player + kPlayerSelectedItem);
-        m.store16(player + kPlayerSelectedItem, *decision.tool_slot);
-        auto interact = ctx;
-        interact.gpr[4] = player;
-        interact.gpr[5] = 2;
+        m.store16(player + kPlayerSelectedItem, use_slot);
         try {
-            rt.call(interact, *region::mh_gathering_interact);
+            auto interact = ctx;
+            interact.gpr[4] = player;
+            if (decision.kind == GatheringKind::fishing) {
+                if constexpr (region::mh_item_use) {
+                    interact.gpr[5] = 0;
+                    rt.call(interact, *region::mh_item_use);
+                }
+            } else {
+                interact.gpr[5] = 2;
+                rt.call(interact, *region::mh_gathering_interact);
+            }
         } catch (...) {
             m.store16(player + kPlayerSelectedItem, previous_slot);
+            cleanup_virtual(vt);
             throw;
         }
         if (m.load8(player + kPlayerAction) != expected_action) {
             m.store16(player + kPlayerSelectedItem, previous_slot);
+            cleanup_virtual(vt);
         } else {
-            selection_ = Selection{player, previous_slot, *decision.tool_slot, expected_action};
-            if (modern_carving) tool_repeat_ = ToolRepeat{player, index, type, area, expected_action, true};
+            selection_ = Selection{player, previous_slot, use_slot, expected_action, vt};
+            if (modern_carving && repeatable_tool)
+                tool_repeat_ = ToolRepeat{player, index, type, area, expected_action, true};
         }
     }
 }

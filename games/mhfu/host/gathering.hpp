@@ -12,7 +12,7 @@ namespace mhf::mhfu {
 // RAM.
 class Gathering {
 public:
-    bool indicators = false, automatic_tools = false, modern_carving = false;
+    bool indicators = false, automatic_tools = false, modern_carving = false, infinite_tools = false;
     int language = 1; // PSP system language: Japanese, English, French, Spanish, German, Italian
     std::function<bool()> input_blocked; // frontend menu/dialog input and its release latch
     void update(psp::Runtime &rt, psp::Context &ctx);
@@ -25,10 +25,17 @@ public:
     std::vector<overlay::HintSprite> sprites(psp::Runtime &rt) const;
 
 private:
+    struct VirtualTool {
+        std::uint32_t bag = 0;
+        std::uint16_t slot = 0;
+        std::uint16_t tool_id = 0;
+        GatheringItem saved{};
+    };
     struct Selection {
-        std::uint32_t player;
-        std::uint16_t previous, tool;
-        std::uint8_t action;
+        std::uint32_t player = 0;
+        std::uint16_t previous = 0, tool = 0;
+        std::uint8_t action = 0;
+        std::optional<VirtualTool> virtual_tool;
     };
     struct Repeat {
         std::uint32_t player = 0;
