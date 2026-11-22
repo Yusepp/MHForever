@@ -61,6 +61,7 @@
 
 #if defined(MHF_HAS_FRONTEND)
 #include "horn_songs.hpp"
+#include "overlay/painter.hpp"
 #include "psp_frontend.hpp"
 #include "shadow_textures.hpp"
 #include "sharpness.hpp"
@@ -1544,10 +1545,6 @@ int main(int argc, char **argv) {
                     frontend.set_song_panel(songs.read(*rt));
                     auto sprites = g_gathering.sprites(*rt);
                     auto text = sprites.empty() ? g_gathering.hint(*rt) : std::string{};
-                    if (sprites.empty() && text.empty() && g_quest_timer_skip.can_skip()) {
-                        text = g_quest_timer_skip.hint(g_gathering.language);
-                        sprites = g_quest_timer_skip.sprites();
-                    }
                     frontend.set_game_hint(std::move(text), std::move(sprites));
                 }
                 if (previous) previous();
@@ -1625,24 +1622,33 @@ int main(int argc, char **argv) {
                     false, g_invulnerable_carve_quest.load() ? 1 : 0, 0, 1, 1, "",
                     [](int v) { g_invulnerable_carve_quest = v != 0; }, "Gathering & Carving"});
             }
-            extra = [&frontend, rt = &runtime, previous = std::move(extra),
+            auto qol_painter = std::make_shared<mhf::overlay::Painter>(std::filesystem::path(argv[0]).parent_path() / "fonts");
+            extra = [&frontend, rt = &runtime, qol_painter, previous = std::move(extra),
                      shown = std::optional<mhf::mhfu::QuestMarker>{},
                      image = std::shared_ptr<const std::vector<std::uint32_t>>{},
+                     qol_overlay_active = false,
                      hud_drawn_at = std::uint64_t{0}]() mutable {
                 if (previous) previous();
-                if (g_monster_tracker.in_active_quest()) {
-                    const std::uint64_t now = rt->now_us();
+                const std::uint64_t now = rt->now_us();
+                const bool show_skip = g_skip_quest_clear_timer.load(std::memory_order_relaxed) && g_quest_timer_skip.can_skip();
+                if (g_monster_tracker.in_active_quest() || show_skip) {
                     const bool show_cap = g_capturable_indicator.load(std::memory_order_relaxed) && g_monster_tracker.capturable_in_area();
                     const bool show_lock = g_target_lock_camera.load(std::memory_order_relaxed) && g_target_lock.locked();
                     const bool show_dmg = g_damage_numbers_enabled.load(std::memory_order_relaxed) && g_damage_numbers.active_count() > 0u;
-                    if (!show_cap && !show_lock && !show_dmg) {
-                        if (image) {
+                    if (!show_cap && !show_lock && !show_dmg && !show_skip) {
+                        if (qol_overlay_active || image) {
+                            qol_overlay_active = false;
                             image.reset();
                             frontend.set_game_overlay(nullptr);
                         }
                     } else if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
                         auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
+                        if (show_skip) {
+                            qol_painter->begin(*buf, 480, 272, 1.0f);
+                            g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
+                            qol_painter->end();
+                        }
                         const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
                         if (show_cap) mhf::mhfu::MonsterTracker::draw_capturable_badge(*buf, 456, 26, pulse);
                         if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 456, show_cap ? 52 : 26, pulse);
@@ -1656,23 +1662,32 @@ int main(int argc, char **argv) {
                             g_damage_numbers.render(*buf, cam, now);
                         }
                         image = std::move(buf);
+                        qol_overlay_active = true;
                         frontend.set_game_overlay(image);
                     }
                     shown.reset();
                     return;
                 }
-                const std::uint64_t now = rt->now_us();
                 if (g_item_pouch_loadouts.load(std::memory_order_relaxed) && g_item_loadouts.box_open(now)) {
                     if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
                         auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
-                        if (g_item_loadouts.render_box_ui(*buf, now)) {
+                        qol_painter->begin(*buf, 480, 272, 1.0f);
+                        const bool drew = g_item_loadouts.render_box_ui(*qol_painter, now);
+                        qol_painter->end();
+                        if (drew) {
                             image = std::move(buf);
+                            qol_overlay_active = true;
                             frontend.set_game_overlay(image);
                         }
                     }
                     shown.reset();
                     return;
+                }
+                if (qol_overlay_active) {
+                    qol_overlay_active = false;
+                    image.reset();
+                    frontend.set_game_overlay(nullptr);
                 }
                 const auto marker = g_key_quest_markers ? g_quest_markers.marker() : std::nullopt;
                 if (marker != shown) {
