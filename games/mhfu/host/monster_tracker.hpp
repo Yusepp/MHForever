@@ -1,5 +1,6 @@
 #pragma once
 
+#include "overlay/painter.hpp"
 #include "psprecomp/guest_memory.hpp"
 
 #include <array>
@@ -53,6 +54,8 @@ public:
 
     // Draws a World/Rise-style blue skull badge onto a 480x272 premultiplied RGBA overlay buffer.
     static void draw_capturable_badge(std::vector<std::uint32_t> &rgba, int x, int y, float pulse_phase) noexcept;
+    // Renders a crisp native-HD World/Rise-style glowing cyan-blue skull medallion using TrueType Painter.
+    static void render_capturable_badge(mhf::overlay::Painter &painter, float cx, float cy, float pulse_phase);
 
 private:
     MonsterTrackerSymbols symbols_;

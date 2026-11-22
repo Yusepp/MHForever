@@ -1640,26 +1640,27 @@ int main(int argc, char **argv) {
                         }
                     } else if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
-                        if (show_skip && !show_cap && !show_lock && !show_dmg) {
+                        const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
+                        if ((show_skip || show_cap) && !show_lock && !show_dmg) {
                             const auto [ow, oh] = frontend.overlay_size();
                             auto buf = std::make_shared<std::vector<std::uint32_t>>(
                                 static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
                             qol_painter->begin(*buf, ow, oh, static_cast<float>(ow) / 480.0f);
-                            g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
+                            if (show_skip) g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
+                            if (show_cap) mhf::mhfu::MonsterTracker::render_capturable_badge(*qol_painter, 452.0f, 26.0f, pulse);
                             qol_painter->end();
                             image = std::move(buf);
                             qol_overlay_active = true;
                             frontend.set_game_overlay(image, ow, oh);
                         } else {
                             auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
-                            if (show_skip) {
+                            if (show_skip || show_cap) {
                                 qol_painter->begin(*buf, 480, 272, 1.0f);
-                                g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
+                                if (show_skip) g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
+                                if (show_cap) mhf::mhfu::MonsterTracker::render_capturable_badge(*qol_painter, 452.0f, 26.0f, pulse);
                                 qol_painter->end();
                             }
-                            const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
-                            if (show_cap) mhf::mhfu::MonsterTracker::draw_capturable_badge(*buf, 456, 26, pulse);
-                            if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 456, show_cap ? 52 : 26, pulse);
+                            if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 452, show_cap ? 60 : 26, pulse);
                             if (show_dmg) {
                                 const mhf::mhfu::CameraProjection cam{
                                     g_monster_tracker.player_pos(),

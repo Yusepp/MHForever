@@ -248,4 +248,40 @@ void MonsterTracker::draw_capturable_badge(std::vector<std::uint32_t> &rgba, int
     }
 }
 
+void MonsterTracker::render_capturable_badge(mhf::overlay::Painter &painter, float cx, float cy, float pulse_phase) {
+    const float pulse = 0.78f + 0.22f * std::sin(pulse_phase);
+    const mhf::overlay::Color kBgTop{0.055f, 0.110f, 0.180f};
+    const mhf::overlay::Color kBgBot{0.025f, 0.055f, 0.095f};
+    const mhf::overlay::Color kCyan{0.32f + 0.18f * pulse, 0.80f + 0.16f * pulse, 1.0f};
+    const mhf::overlay::Color kGlow{0.25f, 0.78f, 1.0f};
+    const mhf::overlay::Color kInk{0.035f, 0.065f, 0.115f};
+
+    // Soft pulsing cyan halo + dark circular medallion
+    const float rad = 14.0f;
+    painter.rrect(cx - rad - 2.0f, cy - rad - 2.0f, (rad + 2.0f) * 2.0f, (rad + 2.0f) * 2.0f, rad + 2.0f,
+                  kGlow, 0.28f * pulse);
+    painter.rrect(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, rad, kBgTop, 0.90f, 0.0f, &kBgBot);
+    painter.rrect(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, rad, kCyan, 0.92f, 1.25f);
+
+    // World/Rise-inspired crisp vector skull silhouette (cranium + cheekbones + jaw + eye sockets + teeth)
+    painter.rrect(cx - 7.0f, cy - 8.0f, 14.0f, 10.5f, 5.0f, kCyan, 0.98f);
+    painter.rrect(cx - 4.8f, cy + 0.5f, 9.6f, 5.5f, 2.0f, kCyan, 0.98f);
+    // Eye sockets & nasal cavity
+    painter.rrect(cx - 4.8f, cy - 3.6f, 3.4f, 3.0f, 1.3f, kInk, 0.98f);
+    painter.rrect(cx + 1.4f, cy - 3.6f, 3.4f, 3.0f, 1.3f, kInk, 0.98f);
+    painter.rrect(cx - 0.9f, cy - 0.4f, 1.8f, 1.8f, 0.7f, kInk, 0.96f);
+    // Jaw tooth notches
+    painter.rect(cx - 2.5f, cy + 3.0f, 1.0f, 3.0f, kInk, 0.95f);
+    painter.rect(cx - 0.5f, cy + 3.0f, 1.0f, 3.0f, kInk, 0.95f);
+    painter.rect(cx + 1.5f, cy + 3.0f, 1.0f, 3.0f, kInk, 0.95f);
+
+    // Crisp micro-pill below medallion: "CAPTURE"
+    const float pw = 34.0f, ph = 9.5f;
+    const float px = cx - pw * 0.5f, py = cy + rad + 2.5f;
+    painter.rrect(px, py, pw, ph, 3.0f, kBgBot, 0.88f);
+    painter.rrect(px, py, pw, ph, 3.0f, kCyan, 0.85f, 0.8f);
+    const float tw = painter.font_ok() ? painter.measure("CAPTURE", 5.6f, true, 0.3f) : 26.0f;
+    painter.text(px + (pw - tw) * 0.5f, py + 6.8f, "CAPTURE", 5.6f, kCyan, 0.98f, true, 0.3f);
+}
+
 } // namespace mhf::mhfu
