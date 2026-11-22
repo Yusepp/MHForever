@@ -94,7 +94,7 @@ void main() {
     if (dot(N, -P) < 0.0) N = -N;
     vec3 V = normalize(-P);
 
-    // Horizon-based GTAO: 2 directions x 4 steps each side = 16 depth fetches.
+    // Horizon-based GTAO: 2 directions x 3 steps each side = 12 depth fetches (IGN-dithered).
     float noise = ign(vec2(gid) + p.sun_screen.w * 7.31);
     float base_angle = noise * 3.14159265;
     float radius_world = clamp(z0 * 0.065, 1.5, 42.0);
@@ -103,7 +103,7 @@ void main() {
 
     float visibility = 0.0;
     const int kDirs = 2;
-    const int kSteps = 4;
+    const int kSteps = 3;
 
     for (int d_idx = 0; d_idx < kDirs; ++d_idx) {
         float ang = base_angle + float(d_idx) * (3.14159265 / float(kDirs));

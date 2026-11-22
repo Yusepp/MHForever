@@ -1085,7 +1085,9 @@ void VkBackend::draw_batch() {
         if (!setup_.through) {
             frame_had_3d_ = true;
         } else if (frame_had_3d_ && !setup_.self_sampled) {
-            if (!lit_3d_this_frame_) {
+            // Skip redundant 5th lighting pass on main_rt when frame-gen is actively presenting interp_rt_!
+            const bool main_rt_skipped = (subframes_ > 1 && interp_can_blend_);
+            if (!lit_3d_this_frame_ && !main_rt_skipped) {
                 apply_enhanced_lighting(rt, cur_light_in_);
                 lit_3d_this_frame_ = true;
             }
@@ -2779,7 +2781,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
     if (have_gpu_frame) {
         RenderTarget &rt = it->second;
-        if (frame_had_3d_ && !lit_3d_this_frame_) {
+        const bool main_rt_skipped = (subframes_ > 1 && interp_can_blend_);
+        if (frame_had_3d_ && !lit_3d_this_frame_ && !main_rt_skipped) {
             apply_enhanced_lighting(rt, cur_light_in_);
             lit_3d_this_frame_ = true;
         }
