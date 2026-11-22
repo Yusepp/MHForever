@@ -76,7 +76,8 @@ void InfiniteConsumables::poll(psprecomp::GuestMemory &memory, bool infinite_whe
 
         if (in_quest_) {
             const SlotSnapshot prev = prev_slots_[i];
-            const bool restore_whet = infinite_whetstone && prev.id == kItemWhetstone && prev.count > 0u;
+            const bool is_whet = prev.id == kItemWhetstone || prev.id == kItemMiniWhetstone;
+            const bool restore_whet = infinite_whetstone && is_whet && prev.count > 0u;
             const bool restore_paint = infinite_paintballs && prev.id == kItemPaintball && prev.count > 0u;
             if ((restore_whet || restore_paint) && ((id == prev.id && count < prev.count) || (id == 0u && count == 0u))) {
                 id = prev.id;
@@ -86,7 +87,7 @@ void InfiniteConsumables::poll(psprecomp::GuestMemory &memory, bool infinite_whe
             }
         }
 
-        if (id == kItemWhetstone && count > 0u) has_whetstone = true;
+        if ((id == kItemWhetstone || id == kItemMiniWhetstone) && count > 0u) has_whetstone = true;
         if (id == 0u && count == 0u) last_empty_slot = i;
         prev_slots_[i] = {id, count};
     }
