@@ -164,8 +164,9 @@ Json default_settings() {
     s["analogCameraTiltSpeed"] = 100;
     s["mouseCamera"] = false;     // with the analog camera: the mouse turns and tilts it too
     s["mouseCameraSpeed"] = 100;  // its sensitivity in percent: 25..300 in steps of 25
-    s["gatheringAssistance"] = false; // nearby indicators and automatic pickaxe/bug-net selection
-    s["modernCarving"] = false; // holding Circle repeats ordinary gathering and carving
+    s["gatheringAssistance"] = false; // nearby indicators and automatic pickaxe/bug-net/bait selection
+    s["infiniteGatheringTools"] = false; // temporary high-tier pickaxe, bug net, and bait without carrying them
+    s["modernCarving"] = false; // holding Circle repeats gathering, carving, mining, and bug-catching
     s["invulnerableCarveQuest"] = false; // ignores hits, roars and wind while carving after Quest Clear
     s["betterSharpness"] = false; // segmented gauge next to the sharpness icon
     s["keyQuestMarkers"] = false; // a gold key beside progression quests
@@ -1037,7 +1038,7 @@ void Launcher::import_game_controls() {
             } else if (name == "horn-songs" || name == "hud-size" || name.starts_with("option.")) {
                 // What the game's in-game menu changes while playing: switches ("true", "false") and percentages, under
                 // the launcher's own names. Only these settings; apply_settings checks each value.
-                static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "modernCarving", "invulnerableCarveQuest", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
+                static constexpr std::string_view kGameOptions[] = {"gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "keyQuestMarkers", "betterSharpness",
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality", "enhancedLighting",
@@ -1151,7 +1152,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting",
                             "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
                             "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
-                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
+                            "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness", "fucDosAudio", "fucHornTweak", "fucLaoEarlyKill", "fucFullChest",
                             "fucDrinkBuff", "fdxHoldToGather", "fdxTrueRaw", "fdxLaoEarlyKill", "fdxSnsDebuff", "fdxFileReplacer",
                             "fdxFelyneSkills", "fdxDrinkBuff", "fdxInstantSupply", "fdxOfflineTreasure"}) {
         if (partial[key].is_bool()) s[key] = partial[key];
@@ -1590,6 +1591,8 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
         plan.args.push_back("--gathering-indicators");
         plan.args.push_back("--auto-gathering-tools");
     }
+    if (std::string_view(entry->game) == "mhfu" && s["infiniteGatheringTools"].as_bool())
+        plan.args.push_back("--infinite-gathering-tools");
     if (std::string_view(entry->game) == "mhfu" && s["modernCarving"].as_bool()) plan.args.push_back("--modern-carving");
     if (std::string_view(entry->game) == "mhfu" && s["invulnerableCarveQuest"].as_bool()) plan.args.push_back("--invulnerable-carve-quest");
     if (std::string_view(entry->game) == "mhfu" && s["keyQuestMarkers"].as_bool()) plan.args.push_back("--key-quest-markers");

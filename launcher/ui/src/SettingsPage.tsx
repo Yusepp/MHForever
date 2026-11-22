@@ -674,8 +674,12 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           </>
         )}
         <div className="srow">
-          <div className="slabel"><b>Gathering assistance</b><span>Shows nearby gathering and carving targets; Circle selects a usable pickaxe or bug net.</span></div>
+          <div className="slabel"><b>Gathering assistance</b><span>Shows nearby gathering, fishing, and carving targets; Circle selects a usable pickaxe, bug net, or bait.</span></div>
           <Toggle on={s.gatheringAssistance ?? false} onToggle={() => onChange({ gatheringAssistance: !(s.gatheringAssistance ?? false) })} label="Gathering assistance" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Infinite gathering tools</b><span>Mine, catch bugs, and fish without carrying pickaxes, bug nets, or bait (uses a temporary high-tier tool and removes it afterward).</span></div>
+          <Toggle on={s.infiniteGatheringTools ?? false} onToggle={() => onChange({ infiniteGatheringTools: !(s.infiniteGatheringTools ?? false) })} label="Infinite gathering tools" />
         </div>
         <div className="srow">
           <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat gathering, carving, mining, and bug-catching at the same spot.</span></div>

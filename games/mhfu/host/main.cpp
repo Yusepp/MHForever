@@ -1125,6 +1125,7 @@ int main(int argc, char **argv) {
             g_mouse_speed = static_cast<float>(std::clamp(std::stoi(argv[++i]), 25, 300)) / 100.0f; // in percent
         else if (a == "--gathering-indicators") g_gathering.indicators = true;
         else if (a == "--auto-gathering-tools") g_gathering.automatic_tools = true;
+        else if (a == "--infinite-gathering-tools") g_gathering.infinite_tools = true;
         else if (a == "--modern-carving") g_gathering.modern_carving = true;
         else if (a == "--invulnerable-carve-quest") g_invulnerable_carve_quest = true; // enhancement, off by default
         else if (a == "--better-sharpness") better_sharpness = true;
@@ -1249,7 +1250,7 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "[gathering] icons: %s (%u/2 pack atlases, originals for the rest)\n",
                          gathering_icons, gathering_pack_atlases);
         };
-        if (g_gathering.indicators || g_gathering.automatic_tools) load_gathering_icons();
+        if (g_gathering.indicators || g_gathering.automatic_tools || g_gathering.infinite_tools) load_gathering_icons();
         runtime.register_hook("mh_gathering_prompt_update", &on_gathering_update);
         g_guild_quest_scaling = guild_quest_scaling && kGuildScalingMapped;
         if constexpr (kGuildScalingMapped) {
@@ -1476,11 +1477,18 @@ int main(int argc, char **argv) {
             }
             if (region::mh_gathering_probe && region::mh_gathering_interact) {
                 frontend.add_game_option({"gatheringAssistance", "Gathering assistance",
-                    "Shows nearby targets; Circle selects a usable pickaxe or bug net.",
+                    "Shows nearby targets; Circle selects a usable pickaxe, bug net, or bait.",
                     false, g_gathering.indicators && g_gathering.automatic_tools ? 1 : 0, 0, 1, 1, "",
                     [&load_gathering_icons](int v) {
                         if (v != 0) load_gathering_icons();
                         g_gathering.indicators = g_gathering.automatic_tools = v != 0;
+                    }});
+                frontend.add_game_option({"infiniteGatheringTools", "Infinite gathering tools",
+                    "Mine, catch bugs, and fish without carrying pickaxes, bug nets, or bait.",
+                    false, g_gathering.infinite_tools ? 1 : 0, 0, 1, 1, "",
+                    [&load_gathering_icons](int v) {
+                        if (v != 0) load_gathering_icons();
+                        g_gathering.infinite_tools = v != 0;
                     }});
                 frontend.add_game_option({"modernCarving", "Modern carving",
                     "Hold Circle to repeat gathering, carving, mining, and bug-catching.",

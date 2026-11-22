@@ -39,7 +39,8 @@ export interface Settings {
   mouseCamera?: boolean; // with the analog camera: the mouse turns and tilts it too
   mouseCameraSpeed?: number; // its sensitivity in percent: 25..300 in steps of 25
   gatheringAssistance?: boolean; // nearby indicators and automatic gathering tools
-  modernCarving?: boolean; // holding Circle repeats ordinary gathering and carving
+  infiniteGatheringTools?: boolean; // temporary high-tier pickaxe, bug net, and bait without carrying them
+  modernCarving?: boolean; // holding Circle repeats gathering, carving, mining, and bug-catching
   invulnerableCarveQuest?: boolean; // ignores hits, roars and wind while carving after Quest Clear
   betterSharpness?: boolean; // segmented sharpness gauge
   keyQuestMarkers?: boolean; // a gold key beside progression quests
