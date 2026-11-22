@@ -146,3 +146,7 @@ mh_camera_aspect_culling = "executable 0x08814664 call" # the culling planes are
 mh_enemy_hp_begin      = "game_task.ovl 0x09AC9020 call" # calc_enemy_hp entry (a0 is Enemy*)
 mh_enemy_hp_computed   = "game_task.ovl 0x09AC90B0 call" # before trunc.w.s $f0, $f0 ($f0 holds base_hp * quest_hp_mult, a2 is em_id)
 mh_enemy_stagger_store = "game_task.ovl 0x09AD3C50 call" # before sh v1, 0x580(a0) (v1 is stagger, s2 is Enemy*, s1 is part, a3 is em_id)
+
+# Call patches registered by --invulnerable-carve-quest: Player::process_damage and Player::process_roar_wind_tremor in Player::update.
+mh_carve_invuln_damage    = "game_task.ovl 0x09A665E4 call" # jal Player::process_damage (a0 is Player*)
+mh_carve_invuln_roar_wind = "game_task.ovl 0x09A666D4 call" # jal Player::process_roar_wind_tremor (a0 is Player*)

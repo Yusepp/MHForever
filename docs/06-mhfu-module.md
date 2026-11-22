@@ -270,6 +270,16 @@ remains available. Releasing Circle, changing targets, opening a menu or exhaust
 bug-catching are unchanged; the game's own item and reward routines still run. The action is faster and the hunter stays crouched between repeats. Available for Europe, North America, Japan and
 FU Complete. Off by default.
 
+### Invulnerable post-quest carving
+
+The optional **Invulnerable post-quest carving** setting (`--invulnerable-carve-quest`, launcher and in-game Game tab)
+makes the local hunter immune to incoming hits, status buildup, roars, wind pressure and tremors during the carving
+animation after **Quest Clear** (during the post-quest countdown), so small monsters cannot interrupt carving. Two call
+filters in `game_task.ovl` (`mh_carve_invuln_damage`, `mh_carve_invuln_roar_wind`) gate the player's damage and
+roar/wind handlers solely on live quest-clear and carving state without setting any persistent invulnerability flag, so
+normal vulnerability resumes immediately as soon as carving ends, the quest ends or a new quest starts. Available for
+Europe, North America, Japan and FU Complete. Off by default.
+
 ## 10. Specific risks
 
 - System fonts: FU imports `sceLibFont` → free replacement fonts with compatible metrics (no PGF).

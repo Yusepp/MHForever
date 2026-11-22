@@ -80,11 +80,17 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
     // mapped for every release: then none). Widescreen: its three call patches where a camera is set up and where it
     // makes its culling planes, in every release. --guild-quest-scaling: three call patches in game_task.ovl.
     std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches, modern_carving_patches,
-        guild_scaling_patches, quest_patches;
+        carve_invuln_patches, guild_scaling_patches, quest_patches;
     std::set<std::string> sharpness_patches;
     const std::uint32_t modern_clear = disc_id == "ULES01213" ? 0x09A67DC0u
                                        : disc_id == "ULUS10391" ? 0x09A67EC0u
                                                                 : 0x09A630C0u;
+    const std::uint32_t carve_invuln_damage = disc_id == "ULES01213" ? 0x09A665E4u
+                                              : disc_id == "ULUS10391" ? 0x09A666E4u
+                                                                       : 0x09A618E4u;
+    const std::uint32_t carve_invuln_roar_wind = disc_id == "ULES01213" ? 0x09A666D4u
+                                                 : disc_id == "ULUS10391" ? 0x09A667D4u
+                                                                          : 0x09A619D4u;
     for (const auto &p : mhf::psp::recomp::region_patches(map_path)) {
         if (p.patch.name.starts_with("mh_smithy_")) {
             MHF_CHECK(p.module == "lobby_task.ovl");
@@ -92,6 +98,10 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_gathering_")) {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             gathering_patches.insert(p.patch.name);
+        } else if (p.patch.name.starts_with("mh_carve_invuln_")) {
+            MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+            MHF_CHECK(p.address == (p.patch.name.ends_with("damage") ? carve_invuln_damage : carve_invuln_roar_wind));
+            carve_invuln_patches.insert(p.patch.name);
         } else if (p.patch.name.starts_with("mh_modern_carving_")) {
             if (p.patch.name.ends_with("animation_sample") || p.patch.name.ends_with("animation_update")) {
                 const bool japan = disc_id == "ULJM05500" || disc_id == "ULJM05500-FUC";
@@ -132,6 +142,7 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
                                                                 "mh_modern_carving_animation_sample",
                                                                 "mh_modern_carving_animation_update",
                                                                 "mh_modern_carving_pose_choice"}));
+    MHF_CHECK(carve_invuln_patches == std::set<std::string>({"mh_carve_invuln_damage", "mh_carve_invuln_roar_wind"}));
     MHF_CHECK(quest_patches == std::set<std::string>({"mh_quest_markers_begin", "mh_quest_markers_title", "mh_quest_markers_end"}));
     MHF_CHECK(smithy_patches.size() == 9);
     MHF_CHECK(camera_patches == (camera_mapped ? std::set<std::string>({"mh_camera_buttons_copied",

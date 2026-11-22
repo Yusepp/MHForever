@@ -7,7 +7,7 @@
 //             [--smithy-browse [--smithy-layout]]
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
 //             [--mouse-camera [--mouse-camera-speed 25-300]]
-//             [--gathering-indicators] [--auto-gathering-tools] [--modern-carving]
+//             [--gathering-indicators] [--auto-gathering-tools] [--modern-carving] [--invulnerable-carve-quest]
 //             [--key-quest-markers] [--better-sharpness]
 //             [--horn-songs [--horn-songs-place next-to-sheet|top-middle|under-names|bottom-left|custom:X,Y]]
 //             [--guild-quest-scaling]
@@ -40,6 +40,7 @@
 #error "mhfu_region_data.hpp is missing from MHF_MHFU_GENERATED: re-run games/mhfu/tools/prepare.py"
 #endif
 #include "mhfu_region_data.hpp" // generated from this release's regions/<disc>/symbols.toml [data]
+#include "carve_invulnerability.hpp"
 #include "quest_autoclear.hpp"
 
 #include <algorithm>
@@ -94,6 +95,19 @@ bool preserve_modern_carving_action(Runtime &rt, Context &ctx) { return g_gather
 void choose_modern_carving_pose(Runtime &rt, Context &ctx) { g_gathering.choose_crouched_pose(rt, ctx); }
 bool modern_carving_animation_sample(Runtime &rt, Context &ctx) { g_gathering.animation_sample(rt, ctx); return false; }
 bool modern_carving_animation_update(Runtime &rt, Context &ctx) { g_gathering.animation_update(rt, ctx); return false; }
+
+constexpr mhf::mhfu::CarveInvulnerabilitySymbols kCarveInvulnSymbols{
+    region::mh_quest_manager, region::mh_game_sys, region::mh_player_manager};
+constexpr bool kCarveInvulnMapped = kCarveInvulnSymbols.complete();
+std::atomic<bool> g_invulnerable_carve_quest{false};
+bool filter_carve_invuln_damage(Runtime &rt, Context &ctx) {
+    return mhf::mhfu::filter_post_quest_carve_damage(rt.memory(), kCarveInvulnSymbols, ctx.gpr[4],
+                                                     g_invulnerable_carve_quest.load(std::memory_order_relaxed));
+}
+bool filter_carve_invuln_roar_wind(Runtime &rt, Context &ctx) {
+    return mhf::mhfu::filter_post_quest_carve_roar_wind(rt.memory(), kCarveInvulnSymbols, ctx.gpr[4],
+                                                        g_invulnerable_carve_quest.load(std::memory_order_relaxed));
+}
 
 bool g_log_overlays = true;
 std::atomic<bool> g_key_quest_markers{false};
@@ -1101,6 +1115,7 @@ int main(int argc, char **argv) {
         else if (a == "--gathering-indicators") g_gathering.indicators = true;
         else if (a == "--auto-gathering-tools") g_gathering.automatic_tools = true;
         else if (a == "--modern-carving") g_gathering.modern_carving = true;
+        else if (a == "--invulnerable-carve-quest") g_invulnerable_carve_quest = true; // enhancement, off by default
         else if (a == "--better-sharpness") better_sharpness = true;
         else if (a == "--key-quest-markers") g_key_quest_markers = true; // enhancement
         else if (a == "--horn-songs") horn_songs = true; // enhancement
@@ -1259,6 +1274,10 @@ int main(int argc, char **argv) {
             runtime.register_hook("mh_camera_turn_buttons_test", &on_camera_turn_buttons_test);
             runtime.register_hook("mh_camera_turn_amount_chosen", &on_camera_turn_amount_chosen);
             runtime.register_hook("mh_camera_tilt_preset_chosen", &on_camera_tilt_preset_chosen);
+        }
+        if constexpr (kCarveInvulnMapped) {
+            runtime.register_call_filter("mh_carve_invuln_damage", &filter_carve_invuln_damage);
+            runtime.register_call_filter("mh_carve_invuln_roar_wind", &filter_carve_invuln_roar_wind);
         }
         std::function<void()> extra;
         if (!dump_folder.empty() || seconds > 0 || !script.empty() || language_pick) {
@@ -1446,6 +1465,12 @@ int main(int argc, char **argv) {
                     "Hold Circle to repeat gathering and carving at the same spot.",
                     false, g_gathering.modern_carving ? 1 : 0, 0, 1, 1, "",
                     [](int v) { g_gathering.modern_carving = v != 0; }});
+            }
+            if constexpr (kCarveInvulnMapped) {
+                frontend.add_game_option({"invulnerableCarveQuest", "Invulnerable post-quest carving",
+                    "Ignores hits, roars and wind while carving after Quest Clear.",
+                    false, g_invulnerable_carve_quest.load() ? 1 : 0, 0, 1, 1, "",
+                    [](int v) { g_invulnerable_carve_quest = v != 0; }});
             }
             extra = [&frontend, previous = std::move(extra), shown = std::optional<mhf::mhfu::QuestMarker>{},
                      image = std::shared_ptr<const std::vector<std::uint32_t>>{}]() mutable {
