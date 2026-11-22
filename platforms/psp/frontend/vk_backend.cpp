@@ -1432,7 +1432,14 @@ void VkBackend::render_interpolated_subframe(float phase) {
         } else if (partner == interpolation::Matching::kFollowCamera && last_cam_motion_.valid) {
             eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, phase);
         }
-        const auto mvp = interpolation::multiply(older.projection, eye_blend);
+        // v.world is already in world space (older.world * local_pos), so map world -> interpolated eye via
+        // eye_blend * inverse(older.world), avoiding applying older.world twice!
+        interpolation::Matrix inv_world;
+        interpolation::Matrix world_to_eye = older.view;
+        if (interpolation::affine_inverse(older.world, inv_world)) {
+            world_to_eye = interpolation::multiply(eye_blend, inv_world);
+        }
+        const auto mvp = interpolation::multiply(older.projection, world_to_eye);
         std::copy_n(mvp.data(), 16, transforms[i].mvp);
         const auto &vp = blend_older_.viewports[i];
         transforms[i].vp_scale[0] = vp[0];
@@ -1635,7 +1642,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
 
     const std::uint32_t off = (address & 0x1FFFFFFFu) & 0x001FFFFFu;
     auto it = targets_.find(off);
-    if (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_) {
+    bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
+    if (have_gpu_frame) {
         RenderTarget &rt = it->second;
         ensure_recording();
         end_render_pass();
@@ -1647,7 +1655,6 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         last_shown_uv_[0] = uv_x;
         last_shown_uv_[1] = uv_y;
         last_shown_linear_ = true;
-        show_to_swapchain(last_shown_slot_, uv_x, uv_y, true);
     } else {
         // CPU-drawn screen (boot logos, PSMF intro videos): upload from guest VRAM.
         const std::uint32_t s = stride > 0 ? stride : 512u;
@@ -1665,7 +1672,6 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         last_shown_uv_[0] = 1.0f;
         last_shown_uv_[1] = 1.0f;
         last_shown_linear_ = true;
-        show_to_swapchain(last_shown_slot_, 1.0f, 1.0f, true);
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -1691,7 +1697,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             cur_snap_ = InterpSnapshot{};
             cur_raw_batch_start_ = 0;
 
-            if (!blend_older_.raw_verts.empty() && interpolator_.ready()) {
+            if (have_gpu_frame && !blend_older_.raw_verts.empty() && interpolator_.ready()) {
                 interpolation::CutThresholds thr{};
                 last_matching_ = interpolator_.matcher().match(blend_older_.summaries, blend_newer_.summaries, thr);
                 if (last_matching_.cut == nullptr) {
@@ -1730,10 +1736,17 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             cur_raw_batch_start_ = 0;
             have_newer_snap_ = true;
         }
-        // Schedule remaining subframes (1 .. subframes_-1) at even intervals across flip_period_.
+        // Monotonic forward motion: show t = 0.0 (older frame) now, then t = 1/N .. (N-1)/N in tick()!
+        if (interp_can_blend_) {
+            render_interpolated_subframe(0.0f);
+        } else {
+            show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
+        }
         interp_active_ = true;
         next_subframe_ = 1;
         next_subframe_at_ = now + flip_period_ / subframes_;
+    } else {
+        show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
     }
 
     last_menu_draw_ = now;

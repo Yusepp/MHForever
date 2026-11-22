@@ -3,8 +3,8 @@
 #extension GL_EXT_scalar_block_layout : require
 
 // Phase 5 GPU Compute Frame Interpolation (place_v2 on GPU):
-// Re-projects raw 3D world-space vertices through each draw's interpolated eye/projection matrix and viewport
-// directly into a device-local GpuVertex buffer — zero CPU re-projection and zero CPU->GPU uploads at 120/180 fps!
+// Processes 1 triangle (3 vertices) per thread so triangles behind the near plane (w <= 0) are culled cleanly
+// without exploding across the screen.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -19,7 +19,7 @@ struct RawGpuVertex {
 };
 
 struct DrawTransform {
-    mat4 mvp;       // proj * blended_eye
+    mat4 mvp;       // proj * blended_eye * inverse(older_world)
     vec4 vp_scale;  // x_scale, y_scale, z_scale, unused
     vec4 vp_center; // x_center - off_x, y_center - off_y, z_center, overlay_stretch
 };
@@ -52,30 +52,50 @@ layout(push_constant) uniform PlacePush {
 } pc;
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= pc.vertex_count) return;
+    uint tri = gl_GlobalInvocationID.x;
+    uint base = tri * 3u;
+    if (base + 2u >= pc.vertex_count) return;
 
-    RawGpuVertex rv = pc.raw_verts.items[idx];
-    DrawTransform tr = pc.transforms.items[rv.draw_idx];
+    RawGpuVertex rv0 = pc.raw_verts.items[base + 0u];
+    RawGpuVertex rv1 = pc.raw_verts.items[base + 1u];
+    RawGpuVertex rv2 = pc.raw_verts.items[base + 2u];
+    DrawTransform tr = pc.transforms.items[rv0.draw_idx];
 
-    vec4 clip = tr.mvp * vec4(rv.world_pos, 1.0);
-    float inv_w = abs(clip.w) > 1e-6 ? (1.0 / clip.w) : 1.0;
-    float sx = clip.x * inv_w * tr.vp_scale.x + tr.vp_center.x;
-    float sy = clip.y * inv_w * tr.vp_scale.y + tr.vp_center.y;
-    float sz = clamp(clip.z * inv_w * tr.vp_scale.z + tr.vp_center.z, 0.0, 65535.0);
-    if (tr.vp_center.w > 1.0) {
-        sx = 240.0 + (sx - 240.0) * tr.vp_center.w;
+    vec4 c0 = tr.mvp * vec4(rv0.world_pos, 1.0);
+    vec4 c1 = tr.mvp * vec4(rv1.world_pos, 1.0);
+    vec4 c2 = tr.mvp * vec4(rv2.world_pos, 1.0);
+
+    // Cull triangles crossing behind the camera (w <= 0) to prevent screen-spanning artifacts.
+    if (c0.w <= 1e-4 || c1.w <= 1e-4 || c2.w <= 1e-4) {
+        GpuVertexOut deg;
+        deg.x = 0.0; deg.y = 0.0; deg.z = 0.0; deg.inv_w = 1.0;
+        deg.u = 0.0; deg.v = 0.0; deg.color_rgba = 0u; deg.spec_rgba = 0u; deg.fog = 1.0;
+        pc.out_verts.items[base + 0u] = deg;
+        pc.out_verts.items[base + 1u] = deg;
+        pc.out_verts.items[base + 2u] = deg;
+        return;
     }
 
-    GpuVertexOut o;
-    o.x = sx;
-    o.y = sy;
-    o.z = sz;
-    o.inv_w = inv_w;
-    o.u = rv.uv.x;
-    o.v = rv.uv.y;
-    o.color_rgba = rv.color_rgba;
-    o.spec_rgba = rv.spec_rgba;
-    o.fog = rv.fog;
-    pc.out_verts.items[idx] = o;
+    RawGpuVertex rvs[3] = RawGpuVertex[3](rv0, rv1, rv2);
+    vec4 cs[3] = vec4[3](c0, c1, c2);
+    for (uint k = 0u; k < 3u; ++k) {
+        float inv_w = 1.0 / cs[k].w;
+        float sx = cs[k].x * inv_w * tr.vp_scale.x + tr.vp_center.x;
+        float sy = cs[k].y * inv_w * tr.vp_scale.y + tr.vp_center.y;
+        float sz = clamp(cs[k].z * inv_w * tr.vp_scale.z + tr.vp_center.z, 0.0, 65535.0);
+        if (tr.vp_center.w > 1.0) {
+            sx = 240.0 + (sx - 240.0) * tr.vp_center.w;
+        }
+        GpuVertexOut o;
+        o.x = sx;
+        o.y = sy;
+        o.z = sz;
+        o.inv_w = inv_w;
+        o.u = rvs[k].uv.x;
+        o.v = rvs[k].uv.y;
+        o.color_rgba = rvs[k].color_rgba;
+        o.spec_rgba = rvs[k].spec_rgba;
+        o.fog = rvs[k].fog;
+        pc.out_verts.items[base + k] = o;
+    }
 }

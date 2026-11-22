@@ -67,7 +67,8 @@ void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);
     PlacePush push{raw_verts_bda, transforms_bda, out_addr_, count};
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    vkCmdDispatch(cmd, (count + 63u) / 64u, 1u, 1u);
+    const std::uint32_t tri_count = count / 3u;
+    vkCmdDispatch(cmd, (tri_count + 63u) / 64u, 1u, 1u);
 
     VkBufferMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
