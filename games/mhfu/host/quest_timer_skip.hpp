@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mhf/psp/host.hpp"
-#include "psprecomp/memory.hpp"
+#include "psprecomp/guest_memory.hpp"
 
 #include <cstdint>
 #include <optional>

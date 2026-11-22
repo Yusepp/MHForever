@@ -1,5 +1,5 @@
 #include "target_lock.hpp"
-#include "test_support.hpp"
+#include "check.hpp"
 
 #include <bit>
 #include <cstdint>

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "monster_tracker.hpp"
-#include "psprecomp/memory.hpp"
+#include "psprecomp/guest_memory.hpp"
 
 #include <array>
 #include <cstdint>

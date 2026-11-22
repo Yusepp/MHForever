@@ -1,6 +1,6 @@
 #pragma once
 
-#include "psprecomp/memory.hpp"
+#include "psprecomp/guest_memory.hpp"
 
 #include <array>
 #include <cstddef>

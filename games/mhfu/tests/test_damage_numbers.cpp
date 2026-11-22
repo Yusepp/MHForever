@@ -1,5 +1,5 @@
 #include "damage_numbers.hpp"
-#include "test_support.hpp"
+#include "check.hpp"
 
 #include <bit>
 #include <cstdint>

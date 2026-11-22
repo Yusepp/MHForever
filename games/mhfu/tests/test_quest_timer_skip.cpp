@@ -1,5 +1,5 @@
 #include "quest_timer_skip.hpp"
-#include "test_support.hpp"
+#include "check.hpp"
 
 #include <cstdint>
 
