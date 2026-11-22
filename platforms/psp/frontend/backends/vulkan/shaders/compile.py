@@ -32,6 +32,7 @@ SHADERS = [
     ("kSsgiBounceCompSpv", "ssgi_bounce.comp"),
     ("kGlowBlurCompSpv", "glow_blur.comp"),
     ("kLightingCompositeCompSpv", "lighting_composite.comp"),
+    ("kFxaaPrehudCompSpv", "fxaa_prehud.comp"),
 ]
 
 

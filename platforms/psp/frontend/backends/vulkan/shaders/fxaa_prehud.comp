@@ -1,0 +1,109 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Full-resolution Pre-HUD Edge-Aware Anti-Aliasing (FXAA 3.11 Quality-Lite):
+// Smooths jagged 3D silhouettes (weapon blades, bowguns, fences, armor trim, branches)
+// strictly BEFORE 2D HUD draws so UI icons and HD text remain 100% razor-sharp!
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba8) uniform writeonly image2D u_aa_out;
+
+struct LightingParams {
+    vec4 proj_info;
+    vec4 vz_and_size;
+    vec4 sun_dir_view;
+    vec4 sun_screen;
+    vec4 shadow_tint;
+    vec4 fog_color;
+    vec4 scatter_color;
+    vec4 bloom_rim;
+    vec4 world_up_view;
+    vec4 ground_bounce;
+    vec4 spec_contact;
+    uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
+    uvec4 aux_slots;    // x = lit_src_slot, y = linear_sampler, z = out_w, w = out_h
+    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+vec4 sample_src(uint slot, uint samp, vec2 uv) {
+    return texture(sampler2D(u_textures[nonuniformEXT(slot)],
+                             u_samplers[nonuniformEXT(samp)]),
+                   clamp(uv, vec2(0.0005), vec2(0.9995)));
+}
+
+void main() {
+    LightingParams p = pc.buf.p;
+    ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = ivec2(p.aux_slots.zw);
+    if (ip.x >= sz.x || ip.y >= sz.y) return;
+
+    vec2 inv_sz = 1.0 / vec2(sz);
+    vec2 uv = (vec2(ip) + 0.5) * inv_sz;
+    uint src = p.aux_slots.x;
+    uint samp = p.aux_slots.y;
+
+    vec4 cM = sample_src(src, samp, uv);
+    float lM = luma(cM.rgb);
+    float lN = luma(sample_src(src, samp, uv + vec2(0.0, -inv_sz.y)).rgb);
+    float lS = luma(sample_src(src, samp, uv + vec2(0.0,  inv_sz.y)).rgb);
+    float lW = luma(sample_src(src, samp, uv + vec2(-inv_sz.x, 0.0)).rgb);
+    float lE = luma(sample_src(src, samp, uv + vec2( inv_sz.x, 0.0)).rgb);
+
+    float lMin = min(lM, min(min(lN, lS), min(lW, lE)));
+    float lMax = max(lM, max(max(lN, lS), max(lW, lE)));
+    float range = lMax - lMin;
+
+    // Early out on flat / low-contrast regions (preserves crisp HD texture detail!).
+    if (range < max(0.045, lMax * 0.125)) {
+        imageStore(u_aa_out, ip, cM);
+        return;
+    }
+
+    float lNW = luma(sample_src(src, samp, uv + vec2(-inv_sz.x, -inv_sz.y)).rgb);
+    float lNE = luma(sample_src(src, samp, uv + vec2( inv_sz.x, -inv_sz.y)).rgb);
+    float lSW = luma(sample_src(src, samp, uv + vec2(-inv_sz.x,  inv_sz.y)).rgb);
+    float lSE = luma(sample_src(src, samp, uv + vec2( inv_sz.x,  inv_sz.y)).rgb);
+
+    float lL = 0.25 * (lN + lS + lW + lE);
+    float subpix = clamp(abs(lL - lM) / range, 0.0, 1.0);
+    subpix = smoothstep(0.0, 1.0, subpix);
+    subpix = subpix * subpix * 0.65;
+
+    float edgeH = abs(lNW + lNE - 2.0 * lN) + 2.0 * abs(lW + lE - 2.0 * lM) + abs(lSW + lSE - 2.0 * lS);
+    float edgeV = abs(lNW + lSW - 2.0 * lW) + 2.0 * abs(lN + lS - 2.0 * lM) + abs(lNE + lSE - 2.0 * lE);
+    bool isH = (edgeH >= edgeV);
+
+    float l1 = isH ? lN : lW;
+    float l2 = isH ? lS : lE;
+    float grad1 = abs(l1 - lM);
+    float grad2 = abs(l2 - lM);
+    float step_sign = (grad1 >= grad2) ? -1.0 : 1.0;
+
+    vec2 step_uv = isH ? vec2(0.0, inv_sz.y * step_sign) : vec2(inv_sz.x * step_sign, 0.0);
+    vec2 tang_uv = isH ? vec2(inv_sz.x, 0.0) : vec2(0.0, inv_sz.y);
+
+    // 2-tap directional span blend along the detected edge.
+    vec3 blend_a = sample_src(src, samp, uv + step_uv * subpix).rgb;
+    vec3 blend_b = 0.5 * (sample_src(src, samp, uv + step_uv * 0.5 + tang_uv * 0.5).rgb +
+                          sample_src(src, samp, uv + step_uv * 0.5 - tang_uv * 0.5).rgb);
+    float lB = luma(blend_b);
+    vec3 out_rgb = (lB < lMin || lB > lMax) ? blend_a : mix(blend_a, blend_b, 0.45);
+    imageStore(u_aa_out, ip, vec4(out_rgb, cM.a));
+}
