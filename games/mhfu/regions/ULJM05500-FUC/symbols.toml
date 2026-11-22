@@ -40,6 +40,8 @@ mh_gathering_items_file = 5323 # item atlas is image 0
 # Target layout, tool IDs and action codes are unchanged.
 mh_gathering_probe = 0x09A6A690 # (Player*, u16* type, float* position) -> static node index
 mh_gathering_interact = 0x09AA2040 # stock validated interaction (mode 2 for tools)
+mh_fishing_probe = 0x09AA1CE8 # (Player*, float* pos, u16* yaw, u8* flag) -> 23 when standing at a fishing spot
+mh_item_use = 0x09AA2750 # (Player*, mode=0): stock item-use handler (starts fishing action 0x4F with bait)
 mh_gathering_dynamic_nodes = 0x09A4ADA0 # pointer; 20 nodes at +4, stride32
 mh_stage_manager = 0x08A5DD4C # StageManager*
 mh_stage_gathering_nodes = 0x08869568 # (StageManager*, stage id) -> static nodes, stride24

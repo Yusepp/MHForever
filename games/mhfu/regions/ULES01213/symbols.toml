@@ -37,6 +37,8 @@ mh_gathering_items_file = 5355 # item atlas is image 0
 # Gathering assistance: checked against the EU executable and game_task overlay.
 mh_gathering_probe = 0x09A6F390 # (Player*, u16* type, float* position) -> node index, FFFF when absent
 mh_gathering_interact = 0x09AA6D70 # (Player*, mode=2): stock gathering, validates state and starts the normal action
+mh_fishing_probe = 0x09AA6A18 # (Player*, float* pos, u16* yaw, u8* flag) -> 23 when standing at a fishing spot
+mh_item_use = 0x09AA7480 # (Player*, mode=0): stock item-use handler (starts fishing action 0x4F with bait)
 # Read-only target detection; checked against EU executable consumers 0886CF78/0886CFA0.
 mh_gathering_dynamic_nodes = 0x09A4F060 # pointer; 20 dynamic nodes at +4, stride32 (corpse/tail targets)
 mh_stage_manager = 0x08A62C7C # StageManager*; static gathering lists
