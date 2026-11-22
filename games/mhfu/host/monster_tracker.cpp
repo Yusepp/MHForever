@@ -24,7 +24,8 @@ constexpr std::uint32_t kEnemySpeciesId = 0x1E8u;
 constexpr std::uint32_t kEnemyPos = 0x200u;
 constexpr std::uint32_t kEnemyArea = 0x29Au;
 constexpr std::uint32_t kEnemyCurrentHp = 0x2E4u;
-constexpr std::uint32_t kEnemyPaintballTimer = 0x414u;
+constexpr std::uint32_t kEnemyPaintballActive = 0x3D0u; // u8: 1 while paintballed on minimap
+constexpr std::uint32_t kEnemyPaintballTimer = 0x3D2u;  // u16: remaining frames (18000 = 10 min, 1800 = 60s)
 constexpr std::uint32_t kEnemyMaxHp = 0x41Eu;
 constexpr std::uint32_t kEnemyMinSize = kEnemyMaxHp + 2u;
 
@@ -154,7 +155,8 @@ void MonsterTracker::poll(psprecomp::GuestMemory &memory, bool quest_start_track
     for (std::size_t i = 0; i < kMaxEnemySlots; ++i) {
         const std::uint32_t enemy = memory.load32(enemy_mgr + kEnemyManagerSlots + static_cast<std::uint32_t>(i) * 4u);
         if (enemy == 0u || (enemy & 3u) != 0u || !memory.contains(enemy, kEnemyMinSize)) continue;
-        if ((memory.load32(enemy + kEnemyFlags) & 1u) != 0u) continue;
+        // Bit 0 of Enemy+0x04 is set while the enemy slot is active/alive (0 = pending destroy/inactive).
+        if ((memory.load32(enemy + kEnemyFlags) & 1u) == 0u) continue;
 
         const std::uint8_t species = memory.load8(enemy + kEnemySpeciesId);
         if (!is_large_species(memory, *symbols_.enemy_species_table, species)) continue;
@@ -185,9 +187,11 @@ void MonsterTracker::poll(psprecomp::GuestMemory &memory, bool quest_start_track
 
         // Quest-start tracker: paint large monsters for the first 60 seconds (1800 frames), once per quest.
         if (quest_start_tracker && !quest_start_applied_) {
-            const std::uint32_t cur_timer = memory.load32(enemy + kEnemyPaintballTimer);
-            if (cur_timer < kQuestStartTrackFrames) {
-                memory.store32(enemy + kEnemyPaintballTimer, kQuestStartTrackFrames);
+            const std::uint8_t active = memory.load8(enemy + kEnemyPaintballActive);
+            const std::uint16_t cur_timer = memory.load16(enemy + kEnemyPaintballTimer);
+            if (active == 0u || cur_timer < kQuestStartTrackFrames) {
+                memory.store8(enemy + kEnemyPaintballActive, 1u);
+                memory.store16(enemy + kEnemyPaintballTimer, static_cast<std::uint16_t>(kQuestStartTrackFrames));
             }
             marked_any = true;
         }

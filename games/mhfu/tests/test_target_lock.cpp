@@ -40,7 +40,7 @@ void setup_two_monsters(psprecomp::GuestMemory &mem) {
 
     auto init_enemy = [&](std::uint32_t slot, std::uint32_t e, std::uint8_t sp, float x, float z) {
         mem.store32(kEnemyMgr + 0x1220u + slot * 4u, e);
-        mem.store32(e + 0x04u, 0u);
+        mem.store32(e + 0x04u, 1u); // bit 0 = active
         mem.store8(e + 0x1E8u, sp);
         mem.store16(e + 0x29Au, 5u);
         mem.store16(e + 0x2E4u, 800u);
