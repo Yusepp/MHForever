@@ -41,7 +41,7 @@ target_link_libraries(mhf_texture_images PRIVATE mhf_basisu mhf_stb_image)
 mhf_target_warnings(mhf_texture_images)
 
 if(MHF_WITH_SDL)
-    add_library(mhf_psp_frontend STATIC frontend/psp_frontend.cpp frontend/gl_backend.cpp frontend/dialog_overlay.cpp)
+    add_library(mhf_psp_frontend STATIC frontend/psp_frontend.cpp frontend/gl_backend.cpp frontend/vk_backend.cpp frontend/dialog_overlay.cpp)
     target_include_directories(mhf_psp_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
                                PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
     # mhf_overlay is public: psp_frontend.hpp takes the horn's song panel (overlay/song_panel.hpp).

@@ -80,13 +80,20 @@ bool SdlHost::open(const HostOptions &options) {
     // Debugging: MHF_WINDOW_HIDDEN=1 keeps the window hidden (unattended runs that dump what it shows).
     const bool hidden = options.hidden || std::getenv("MHF_WINDOW_HIDDEN") != nullptr;
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | (hidden ? SDL_WINDOW_HIDDEN : 0);
-    if (options.opengl) {
-        flags |= SDL_WINDOW_OPENGL;
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    const GraphicsApi api = (options.graphics_api != GraphicsApi::Software)
+                                ? options.graphics_api
+                                : (options.opengl ? GraphicsApi::OpenGL : GraphicsApi::Software);
+    if (api == GraphicsApi::OpenGL || api == GraphicsApi::Vulkan) {
+        if (api == GraphicsApi::OpenGL) {
+            flags |= SDL_WINDOW_OPENGL;
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+        } else {
+            flags |= SDL_WINDOW_VULKAN;
+        }
         // Debugging: MHF_WINDOW_SIZE=<width>x<height> opens the window at that size (a wide window, say, to see the
         // widescreen setting without a wide screen).
         int width = options.width * options.scale, height = options.height * options.scale;

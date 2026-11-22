@@ -131,6 +131,7 @@ std::optional<std::string> sha1_file(const fs::path &path, std::uint64_t size, c
 Json default_settings() {
     Json s;
     s["scale"] = 4;
+    s["graphicsBackend"] = "opengl"; // opengl, vulkan (experimental) or software
     s["fullscreen"] = false;
     s["smoothTextures"] = false;
     s["packMipmaps"] = false; // texture packs: mip levels made for images that ship none (softer far away, no shimmer)
@@ -1153,6 +1154,10 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     if (partial["hornSongsPlace"].is_string() && overlay::parse_song_spot(partial["hornSongsPlace"].as_string())) {
         s["hornSongsPlace"] = partial["hornSongsPlace"];
     }
+    if (partial["graphicsBackend"].is_string()) {
+        const std::string backend = partial["graphicsBackend"].as_string();
+        if (backend == "opengl" || backend == "vulkan" || backend == "software") s["graphicsBackend"] = backend;
+    }
     if (partial["language"].is_string()) {
         const std::string language = partial["language"].as_string();
         for (const char *known : {"", "en", "fr", "de", "es", "it"}) {
@@ -1533,6 +1538,15 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
         }
     } else if (s["trueWeaponValues"].as_bool()) {
         plan.args.push_back("--true-weapon-values");
+    }
+    if (s["graphicsBackend"].is_string()) {
+        const std::string backend = s["graphicsBackend"].as_string();
+        if (backend == "vulkan") {
+            plan.args.push_back("--backend");
+            plan.args.push_back("vulkan");
+        } else if (backend == "software") {
+            plan.args.push_back("--software");
+        }
     }
     if (s["fastSupplyBox"].as_bool()) plan.args.push_back("--fast-supply-box");
     if (std::string_view(entry->game) == "mhfu" && s["guildQuestScaling"].as_bool()) plan.args.push_back("--guild-quest-scaling");

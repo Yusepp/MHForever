@@ -17,13 +17,26 @@
 #include <vector>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace mhf::psp {
+
+enum class GraphicsBackend { OpenGL, Vulkan, Software };
+
+[[nodiscard]] inline std::optional<GraphicsBackend> parse_graphics_backend(std::string_view name) noexcept {
+    if (name == "opengl" || name == "gl") return GraphicsBackend::OpenGL;
+    if (name == "vulkan" || name == "vk") return GraphicsBackend::Vulkan;
+    if (name == "software" || name == "sw") return GraphicsBackend::Software;
+    return std::nullopt;
+}
 
 class Frontend {
 public:
     Frontend();
     ~Frontend();
+
+    // Chooses the rendering backend before open() (default: OpenGL when gpu=true, Software when gpu=false).
+    void set_graphics_backend(GraphicsBackend backend);
 
     // Opens the window (hidden = no visible window, for tests). Returns false when no display is available.
     // With `gpu`, the GE draws through OpenGL at `render_scale` times the PSP resolution (software rendering is the

@@ -2,6 +2,7 @@
 
 #include "dialog_overlay.hpp"
 #include "gl_backend.hpp"
+#include "vk_backend.hpp"
 #include "game_overlay_policy.hpp"
 #include "host/keymap.hpp"
 #include "host/padmap.hpp"
@@ -125,6 +126,8 @@ struct Frontend::Impl {
     LiveSettings live; // what the menu changes while the game runs
     bool open{};
     bool gpu{};
+    std::optional<GraphicsBackend> requested_backend;
+    GraphicsBackend backend{GraphicsBackend::OpenGL};
     int render_scale{4};
     bool smooth_textures{};
     int target_fps{30};
@@ -343,14 +346,22 @@ Frontend::~Frontend() {
     if (impl_->runtime != nullptr && impl_->gpu) stop_gpu_backend(*impl_->runtime);
 }
 
+void Frontend::set_graphics_backend(GraphicsBackend backend) { impl_->requested_backend = backend; }
+
 bool Frontend::open(const char *title, bool hidden, int scale, bool gpu, int render_scale, bool fullscreen,
                     bool smooth_textures, int target_fps) {
+    const GraphicsBackend chosen =
+        impl_->requested_backend.value_or(gpu ? GraphicsBackend::OpenGL : GraphicsBackend::Software);
     host::HostOptions o;
     o.title = title;
     o.hidden = hidden;
     o.scale = scale;
-    o.opengl = gpu;
-    impl_->gpu = gpu;
+    o.graphics_api = chosen == GraphicsBackend::Vulkan   ? host::GraphicsApi::Vulkan
+                     : chosen == GraphicsBackend::OpenGL ? host::GraphicsApi::OpenGL
+                                                         : host::GraphicsApi::Software;
+    o.opengl = (chosen == GraphicsBackend::OpenGL);
+    impl_->backend = chosen;
+    impl_->gpu = (chosen != GraphicsBackend::Software);
     impl_->render_scale = render_scale;
     impl_->smooth_textures = smooth_textures;
     impl_->target_fps = target_fps;
@@ -1967,10 +1978,18 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
     }
     if (impl->gpu && impl->open) {
         set_gpu_backend_factory(rt, [impl, runtime]() -> std::unique_ptr<gpu::Backend> {
-            auto backend = make_gl_backend(static_cast<SDL_Window *>(impl->host.window_handle()), impl->render_scale,
-                                           runtime->memory(), impl->smooth_textures, &impl->overlay, impl->target_fps,
-                                           &impl->live);
-            if (!backend) std::fprintf(stderr, "[frontend] no OpenGL 3.3: using the software renderer\n");
+            std::unique_ptr<gpu::Backend> backend;
+            if (impl->backend == GraphicsBackend::Vulkan) {
+                backend = make_vk_backend(static_cast<SDL_Window *>(impl->host.window_handle()), impl->render_scale,
+                                          runtime->memory(), impl->smooth_textures, &impl->overlay, impl->target_fps,
+                                          &impl->live);
+                if (!backend) std::fprintf(stderr, "[frontend] Vulkan 1.3 unavailable: using the software renderer\n");
+            } else {
+                backend = make_gl_backend(static_cast<SDL_Window *>(impl->host.window_handle()), impl->render_scale,
+                                          runtime->memory(), impl->smooth_textures, &impl->overlay, impl->target_fps,
+                                          &impl->live);
+                if (!backend) std::fprintf(stderr, "[frontend] no OpenGL 3.3: using the software renderer\n");
+            }
             impl->gpu_state = backend ? 1 : 2;
             return backend;
         });

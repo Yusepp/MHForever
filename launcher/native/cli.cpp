@@ -146,6 +146,9 @@ void print_copies(Launcher &launcher) {
     for (const char *name : kBoolSettings) {
         if (s[name].is_bool()) std::printf("  %-18s %s\n", name, s[name].as_bool() ? "true" : "false");
     }
+    if (s["graphicsBackend"].is_string()) {
+        std::printf("  %-18s %s\n", "graphicsBackend", s["graphicsBackend"].as_string().c_str());
+    }
 }
 
 // `--list`.
@@ -188,6 +191,12 @@ int set(const std::vector<std::string> &args) {
                 return 2;
             }
             partial[name] = static_cast<double>(number);
+        } else if (name == "graphicsBackend") {
+            if (value == "opengl" || value == "vulkan" || value == "software") partial[name] = value;
+            else {
+                std::fprintf(stderr, "error: graphicsBackend is opengl, vulkan or software\n");
+                return 2;
+            }
         } else {
             std::fprintf(stderr, "error: unknown setting '%s'\n", name.c_str());
             return 2;
