@@ -37,9 +37,17 @@ private:
         std::uint8_t action = 0;
         bool armed = false, working = false;
     };
+    struct ToolRepeat {
+        std::uint32_t player = 0;
+        std::uint32_t target = 0xffff;
+        std::uint16_t type = 0, area = 0;
+        std::uint8_t action = 0;
+        bool active = false;
+    };
     bool repeat_available(psp::Runtime &rt, psp::Context &ctx, std::uint32_t player);
     std::optional<Selection> selection_;
     Repeat repeat_{};
+    ToolRepeat tool_repeat_{};
     bool held_ = false, busy_ = false;
     std::uint32_t scratch_ = 0;
     std::uint64_t updated_ = 0;

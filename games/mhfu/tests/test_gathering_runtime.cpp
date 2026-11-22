@@ -19,6 +19,7 @@ std::uint16_t probed_type = 3;
 constexpr std::uint32_t nodes = 0x08897000, dynamic_nodes = 0x08898000;
 bool reject_action = false, throw_action = false;
 std::uint8_t started_action = 0x51;
+std::uint16_t expected_tool_slot = 2;
 void probe(Runtime &rt, Context &c) {
     ++probes;
     MHF_CHECK(c.gpr[4] == player);
@@ -37,7 +38,7 @@ void interact(Runtime &rt, Context &c) {
     if (reject_action) return;
     ++actions;
     MHF_CHECK(c.gpr[4] == player && c.gpr[5] == 2);
-    MHF_CHECK(rt.memory().load16(player + 0x648) == 2);
+    MHF_CHECK(rt.memory().load16(player + 0x648) == expected_tool_slot);
     rt.memory().store8(player + 0x299, started_action);
     c.gpr[16] = 123;
 }
@@ -258,6 +259,76 @@ int main() {
             MHF_CHECK(std::memcmp(&ctx, &saved, sizeof ctx) == 0);
         }
     }
+    // Continuous mining and bug-catching while holding Circle (modern_carving + automatic_tools).
+    for (std::uint16_t type : {std::uint16_t{3}, std::uint16_t{4}}) {
+        started_action = type == 3 ? std::uint8_t{0x51} : std::uint8_t{0x52};
+        probed_type = type;
+        static_target = true;
+        m.store16(nodes + 20, type);
+        m.store16(nodes + 18, std::uint16_t{5});
+        m.store32(manager + 0x0c, player);
+        m.store8(player + 0x299, std::uint8_t{0});
+        m.store16(player + 0x648, std::uint16_t{4}); // original item slot (e.g. Potion)
+        m.store16(bag + 8, type == 3 ? std::uint16_t{0x90} : std::uint16_t{0x94});  // slot 2: Old Pickaxe / Bug Net
+        m.store16(bag + 10, std::uint16_t{1});
+        m.store16(bag + 20, type == 3 ? std::uint16_t{0x91} : std::uint16_t{0x95}); // slot 5: Iron Pickaxe / Bug Net
+        m.store16(bag + 22, std::uint16_t{2});
+
+        mhf::mhfu::Gathering hold;
+        hold.indicators = hold.automatic_tools = hold.modern_carving = true;
+        set_controller_state(rt, {});
+        hold.update(rt, ctx);
+
+        // Press and hold Circle: swing #1 starts with slot 2.
+        expected_tool_slot = 2;
+        const int start_actions = actions;
+        set_controller_state(rt, pad);
+        hold.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 1 && m.load16(player + 0x648) == 2);
+
+        // While animation is still playing, holding Circle does not re-trigger.
+        hold.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 1);
+
+        // Swing #1 ends with 1-frame recovery rejection: original slot restored, latch stays active.
+        m.store8(player + 0x299, std::uint8_t{0});
+        reject_action = true;
+        hold.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 1 && m.load16(player + 0x648) == 4);
+        reject_action = false;
+
+        // First tool breaks (slot 2 -> 0); next ready frame automatically switches to backup slot 5!
+        m.store16(bag + 10, std::uint16_t{0});
+        expected_tool_slot = 5;
+        hold.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 2 && m.load16(player + 0x648) == 5);
+
+        // Node depletes as swing #2 ends: stops cleanly and restores original slot 4.
+        m.store8(player + 0x299, std::uint8_t{0});
+        m.store16(nodes + 18, std::uint16_t{0});
+        hold.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 2 && m.load16(player + 0x648) == 4);
+
+        // Without modern_carving, holding Circle does NOT repeat after swing #1 finishes.
+        m.store16(nodes + 18, std::uint16_t{5});
+        m.store16(bag + 10, std::uint16_t{2});
+        m.store16(bag + 22, std::uint16_t{0});
+        expected_tool_slot = 2;
+        mhf::mhfu::Gathering single;
+        single.indicators = single.automatic_tools = true;
+        single.modern_carving = false;
+        set_controller_state(rt, {});
+        single.update(rt, ctx);
+        set_controller_state(rt, pad);
+        single.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 3);
+        m.store8(player + 0x299, std::uint8_t{0});
+        single.update(rt, ctx);
+        MHF_CHECK(actions == start_actions + 3 && m.load16(player + 0x648) == 4);
+    }
+    expected_tool_slot = 2;
+    m.store16(bag + 20, std::uint16_t{0});
+    m.store16(bag + 22, std::uint16_t{0});
     started_action = 0x51;
     probed_type = 3;
     m.store16(nodes + 20, std::uint16_t{3});

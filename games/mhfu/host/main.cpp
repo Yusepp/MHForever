@@ -1483,7 +1483,7 @@ int main(int argc, char **argv) {
                         g_gathering.indicators = g_gathering.automatic_tools = v != 0;
                     }});
                 frontend.add_game_option({"modernCarving", "Modern carving",
-                    "Hold Circle to repeat gathering and carving at the same spot.",
+                    "Hold Circle to repeat gathering, carving, mining, and bug-catching.",
                     false, g_gathering.modern_carving ? 1 : 0, 0, 1, 1, "",
                     [](int v) { g_gathering.modern_carving = v != 0; }});
             }

@@ -129,6 +129,7 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         if (!overlay || !std::string_view(overlay->name).ends_with("_ovl_game_task")) {
             selection_.reset();
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         auto &m = rt.memory();
@@ -136,18 +137,21 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
         if (!m.contains(sys, 0x29) || !m.contains(manager, 0x24)) {
             selection_.reset();
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         const auto slot = m.load8(sys + kGameSysPlayerSlot);
         if (slot >= kPlayerSlots) {
             selection_.reset();
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         const auto player = m.load32(manager + kPlayerManagerPlayers + slot * 4u);
         if (!m.contains(player, 0x696)) {
             selection_.reset();
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         // Keep the tool selected until the game has finished consuming it. Never undo a later selection or write
@@ -161,20 +165,27 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
                 selection_.reset();
             }
         }
-        if (!modern_carving || !circle) repeat_ = {};
+        if (!modern_carving || !circle) {
+            repeat_ = {};
+            tool_repeat_ = {};
+        }
+        if (!automatic_tools) tool_repeat_ = {};
         if (!indicators && !automatic_tools && !modern_carving) return;
         if ((input_blocked && input_blocked()) || psp::current_dialog(rt).kind != psp::DialogView::Kind::None) {
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         const auto cockpit = m.load32(*region::mh_cockpit);
         if (!m.contains(cockpit, 0x605) || m.load8(sys + kGameSysMenu) != 0 || m.load8(cockpit + kCockpitMenu) != 0 ||
             m.load8(cockpit + kCockpitWindow) != 0) {
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         if (m.load8(player + kPlayerReady) > 1) {
             repeat_ = {};
+            tool_repeat_ = {};
             return;
         }
         if (!scratch_) {
@@ -218,7 +229,10 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             // Arm on the same target before the game's first action starts.
             repeat_ = {player, target->index, target->type, area, repeat_action, true, false};
         }
-        if (!target) return;
+        if (!target) {
+            tool_repeat_ = {};
+            return;
+        }
         const auto [index, type, remaining, carving] = *target;
         if (repeat_.working && modern_carving) {
             if (repeat_target_ != index) { repeat_target_ = index; repeat_remaining_ = remaining; reward_received_ = false; }
@@ -264,7 +278,20 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             } else if (!hint_.empty())
                 hint_ = "○  " + hint_;
         }
-        if (!automatic_tools || !pressed || !decision.tool_slot || !decision.available) return;
+        const auto expected_action = decision.kind == GatheringKind::mining ? kMiningAction : kBugAction;
+        if (tool_repeat_.active) {
+            const bool same_tool_target = tool_repeat_.player == player && tool_repeat_.area == area &&
+                                          tool_repeat_.target == index && tool_repeat_.type == type;
+            if (!same_tool_target || !decision.available || !decision.tool_slot ||
+                (action != tool_repeat_.action && action != 0)) {
+                tool_repeat_ = {};
+            }
+        } else if (modern_carving && automatic_tools && circle && decision.available && decision.tool_slot &&
+                   action == expected_action) {
+            tool_repeat_ = ToolRepeat{player, index, type, area, expected_action, true};
+        }
+        const bool want_tool = pressed || (tool_repeat_.active && circle && action == 0);
+        if (!automatic_tools || !want_tool || !decision.tool_slot || !decision.available) return;
         if (action == kMiningAction || action == kBugAction) return;
         const auto previous_slot = m.load16(player + kPlayerSelectedItem);
         m.store16(player + kPlayerSelectedItem, *decision.tool_slot);
@@ -277,11 +304,12 @@ void Gathering::update(psp::Runtime &rt, psp::Context &ctx) {
             m.store16(player + kPlayerSelectedItem, previous_slot);
             throw;
         }
-        const auto expected_action = decision.kind == GatheringKind::mining ? kMiningAction : kBugAction;
-        if (m.load8(player + kPlayerAction) != expected_action)
+        if (m.load8(player + kPlayerAction) != expected_action) {
             m.store16(player + kPlayerSelectedItem, previous_slot);
-        else
+        } else {
             selection_ = Selection{player, previous_slot, *decision.tool_slot, expected_action};
+            if (modern_carving) tool_repeat_ = ToolRepeat{player, index, type, area, expected_action, true};
+        }
     }
 }
 

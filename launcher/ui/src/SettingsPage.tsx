@@ -678,7 +678,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.gatheringAssistance ?? false} onToggle={() => onChange({ gatheringAssistance: !(s.gatheringAssistance ?? false) })} label="Gathering assistance" />
         </div>
         <div className="srow">
-          <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat ordinary gathering and carving at the same spot.</span></div>
+          <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat gathering, carving, mining, and bug-catching at the same spot.</span></div>
           <Toggle on={s.modernCarving ?? false} onToggle={() => onChange({ modernCarving: !(s.modernCarving ?? false) })} label="Modern carving" />
         </div>
         <div className="srow">
