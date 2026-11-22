@@ -702,10 +702,6 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.betterSharpness ?? false} onToggle={() => onChange({ betterSharpness: !(s.betterSharpness ?? false) })} label="Better sharpness gauge" />
         </div>
         <div className="srow">
-          <div className="slabel"><b>Target lock-on camera (R3)</b><span>Press R3 (or Tab / Middle-Click) to lock onto or cycle large monsters in your area.</span></div>
-          <Toggle on={s.targetLockCamera ?? false} onToggle={() => onChange({ targetLockCamera: !(s.targetLockCamera ?? false) })} label="Target lock-on camera (R3)" />
-        </div>
-        <div className="srow">
           <div className="slabel"><b>Floating damage numbers</b><span>Displays World/Rise/Wilds-style floating damage numbers when hitting monsters.</span></div>
           <Toggle on={s.damageNumbers ?? false} onToggle={() => onChange({ damageNumbers: !(s.damageNumbers ?? false) })} label="Floating damage numbers" />
         </div>

@@ -47,7 +47,6 @@ export interface Settings {
   hornSongs?: boolean; // the hunting horn's songs over the quest HUD
   hornSongsPlace?: string; // and where: 'next-to-sheet', 'top-middle', 'under-names', 'bottom-left', or 'custom:X,Y' (moved in the game)
   guildQuestScaling?: boolean; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
-  targetLockCamera?: boolean; // R3 monster target lock-on camera
   skipQuestClearTimer?: boolean; // hold Select after Quest Clear to fast-forward 60s timer
   itemPouchLoadouts?: boolean; // save/load item pouch presets in Village/Hall
   capturableIndicator?: boolean; // blue skull icon when large monster is capturable

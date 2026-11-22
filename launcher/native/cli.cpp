@@ -25,7 +25,7 @@ namespace {
 constexpr const char *kBoolSettings[] = {"fullscreen", "smoothTextures", "packMipmaps", "trueWeaponValues", "fastSupplyBox",
                                          "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout", "analogCamera", "mouseCamera",
                                          "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "questBoxIcons", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
-                                         "targetLockCamera", "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
+                                         "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                                          "projectedShadows", "wholeMapShadows", "enhancedLighting",
                                          "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof", "widescreen"};
 constexpr const char *kNumberSettings[] = {"scale", "fps", "hudSize", "musicVolume", "sfxVolume",

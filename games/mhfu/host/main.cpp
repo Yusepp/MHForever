@@ -48,7 +48,6 @@
 #include "monster_tracker.hpp"
 #include "quest_autoclear.hpp"
 #include "quest_timer_skip.hpp"
-#include "target_lock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -594,7 +593,6 @@ constexpr int kRegV0 = 2, kRegV1 = 3, kRegA0 = 4, kRegA1 = 5, kRegS0 = 16, kRegS
 constexpr std::uint32_t kCameraYaw = 0x80;          // s16 in the camera: horizontal yaw angle
 
 // General QoL state (live-toggled from Esc > QoL or enabled from the launcher/CLI).
-std::atomic<bool> g_target_lock_camera{false};
 std::atomic<bool> g_skip_quest_clear_timer{false};
 std::atomic<bool> g_item_pouch_loadouts{false};
 std::atomic<bool> g_capturable_indicator{false};
@@ -612,7 +610,6 @@ mhf::mhfu::ItemLoadouts g_item_loadouts{{region::mh_game_sys, region::mh_resourc
 mhf::mhfu::MonsterTracker g_monster_tracker{
     {region::mh_game_sys, region::mh_player_manager, region::mh_enemy_manager, region::mh_enemy_species_table,
      region::mh_quest_manager}};
-mhf::mhfu::TargetLock g_target_lock;
 mhf::mhfu::DamageNumbers g_damage_numbers;
 
 void on_combine_rate_done(Runtime &rt, Context &ctx) {
@@ -886,12 +883,6 @@ void on_camera_turn_buttons_test(Runtime &rt, Context &ctx) {
         g_turn_push = std::min(std::abs(g_mouse_dx) / kMousePixelsPerPush * g_mouse_speed, kMouseMostPush);
     } else {
         g_turn_rest = 0.0f;
-    }
-    if (g_target_lock_camera.load(std::memory_order_relaxed) && g_target_lock.locked()) {
-        const bool manual_turn = g_turn_push > 0.25f;
-        if (g_target_lock.steer_camera(rt.memory(), cam_ctrl, g_monster_tracker.player_pos(), manual_turn)) {
-            g_camera_yaw.store(rt.memory().load16(cam_ctrl + kCameraYaw), std::memory_order_relaxed);
-        }
     }
     if (g_turn_push == 0.0f) return;
     const std::uint32_t buttons = ctx.gpr[kRegS4] + kCameraButtons;
@@ -1194,7 +1185,6 @@ int main(int argc, char **argv) {
         else if (a == "--quest-box-icons") g_gathering.quest_box_icons = true;
         else if (a == "--modern-carving") g_gathering.modern_carving = true;
         else if (a == "--invulnerable-carve-quest") g_invulnerable_carve_quest = true; // enhancement, off by default
-        else if (a == "--target-lock-camera") g_target_lock_camera = true;
         else if (a == "--skip-quest-clear-timer") g_skip_quest_clear_timer = true;
         else if (a == "--item-pouch-loadouts") g_item_pouch_loadouts = true;
         else if (a == "--capturable-indicator") g_capturable_indicator = true;
@@ -1535,14 +1525,11 @@ int main(int argc, char **argv) {
                     g_monster_tracker.poll(rt->memory(),
                                            g_quest_start_tracker.load(std::memory_order_relaxed),
                                            g_capturable_indicator.load(std::memory_order_relaxed));
-                    g_target_lock.update(g_monster_tracker, !frontend.game_input_blocked() && pad.right_stick_click,
-                                         g_target_lock_camera.load(std::memory_order_relaxed));
                     frontend.set_game_input_suppressed(false);
                 } else {
                     g_quest_timer_skip.clear();
                     g_infinite_consumables.clear(&rt->memory());
                     g_monster_tracker.clear();
-                    g_target_lock.clear();
                     g_damage_numbers.clear();
                     const std::uint32_t raw_btns = frontend.game_input_blocked() ? 0u : frontend.raw_buttons();
                     g_item_loadouts.poll_box_ui(rt->memory(), raw_btns, now,
@@ -1648,9 +1635,8 @@ int main(int argc, char **argv) {
                 const std::uint64_t now = rt->now_us();
                 const bool show_skip = g_skip_quest_clear_timer.load(std::memory_order_relaxed) && g_quest_timer_skip.can_skip();
                 if (g_monster_tracker.in_active_quest() || show_skip) {
-                    const bool show_lock = g_target_lock_camera.load(std::memory_order_relaxed) && g_target_lock.locked();
                     const bool show_dmg = g_damage_numbers_enabled.load(std::memory_order_relaxed) && g_damage_numbers.active_count() > 0u;
-                    if (!show_lock && !show_dmg && !show_skip) {
+                    if (!show_dmg && !show_skip) {
                         if (qol_overlay_active || image) {
                             qol_overlay_active = false;
                             image.reset();
@@ -1658,8 +1644,7 @@ int main(int argc, char **argv) {
                         }
                     } else if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
-                        const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
-                        if (show_skip && !show_lock && !show_dmg) {
+                        if (show_skip && !show_dmg) {
                             const auto [ow, oh] = frontend.overlay_size();
                             auto buf = std::make_shared<std::vector<std::uint32_t>>(
                                 static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
@@ -1676,7 +1661,6 @@ int main(int argc, char **argv) {
                                 g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
                                 qol_painter->end();
                             }
-                            if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 452, 26, pulse);
                             if (show_dmg) {
                                 const mhf::mhfu::CameraProjection cam{
                                     g_monster_tracker.player_pos(),
@@ -1803,13 +1787,6 @@ int main(int argc, char **argv) {
                                           }});
             }
             {
-                frontend.add_game_option({"targetLockCamera", "Target lock-on camera (R3)",
-                                          "Press R3 (or Tab / Middle-Click) to lock onto or cycle large monsters in your area.",
-                                          false, g_target_lock_camera.load() ? 1 : 0, 0, 1, 1, "",
-                                          [](int v) {
-                                              g_target_lock_camera = v != 0;
-                                              if (v == 0) g_target_lock.clear();
-                                          }, "Camera"});
                 frontend.add_game_option({"analogCamera", "Analog camera",
                                           "The right stick turns and tilts the camera in proportion to how far it is pushed.",
                                           false, g_analog_camera ? 1 : 0, 0, 1, 1, "",
