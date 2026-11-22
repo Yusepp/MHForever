@@ -197,6 +197,8 @@ public:
     bool init();
 
     void triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) override;
+    void triangle_unclipped(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) override;
+    void draw_started(const gpu::DrawInfo &draw) override;
     void sprite(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b) override;
     void block_transfer(std::uint32_t src, std::uint32_t src_stride, std::uint32_t sx, std::uint32_t sy,
                         std::uint32_t dst, std::uint32_t dst_stride, std::uint32_t dx, std::uint32_t dy,
@@ -226,13 +228,32 @@ private:
     void show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter);
     void submit_and_present(std::uint32_t swap_img_idx);
     void apply_live_scale();
+    void apply_live_fps();
+    void render_interpolated_subframe(float phase);
     void read_back();
+
+    struct RecordedBatch {
+        DrawSetup setup{};
+        std::uint32_t v_offset = 0;
+        std::uint32_t v_count = 0;
+        bool use_gpu_raw = false;
+    };
+    struct InterpSnapshot {
+        std::uint32_t shown_addr = 0;
+        std::uint32_t width = 512, height = 272;
+        std::vector<interpolation::DrawSummary> summaries;
+        std::vector<std::array<float, 8>> viewports;
+        std::vector<vk::RawGpuVertex> raw_verts;
+        std::vector<GpuVertex> flat_verts;
+        std::vector<RecordedBatch> batches;
+    };
 
     SDL_Window *window_ = nullptr;
     int scale_ = 4;
     psprecomp::GuestMemory &memory_;
     OverlayImage *overlay_ = nullptr;
     int target_fps_ = 30;
+    int subframes_ = 1;
     LiveSettings own_live_;
     LiveSettings *live_ = nullptr;
 
@@ -279,6 +300,30 @@ private:
     DrawSetup setup_{};
     std::vector<GpuVertex> batch_;
     std::vector<std::uint32_t> decode_buf_;
+
+    // Phase 5: GPU compute frame interpolation state (60/120/180 FPS).
+    InterpSnapshot cur_snap_;
+    InterpSnapshot blend_older_;
+    InterpSnapshot blend_newer_;
+    bool have_newer_snap_ = false;
+    std::uint32_t cur_raw_batch_start_ = 0;
+    bool cur_draw_eligible_ = false;
+    std::uint32_t cur_draw_index_ = 0;
+
+    VkBuffer snap_raw_buf_ = VK_NULL_HANDLE;
+    VmaAllocation snap_raw_alloc_ = VK_NULL_HANDLE;
+    VkDeviceAddress snap_raw_addr_ = 0;
+    std::size_t snap_raw_cap_ = 0;
+
+    RenderTarget interp_rt_;
+    bool interp_active_ = false;
+    bool interp_can_blend_ = false;
+    interpolation::Matching last_matching_{};
+    interpolation::RigidMotion last_cam_motion_{};
+    int next_subframe_ = 0;
+    std::chrono::steady_clock::time_point flip_time_{};
+    std::chrono::steady_clock::duration flip_period_{std::chrono::microseconds(33333)};
+    std::chrono::steady_clock::time_point next_subframe_at_{};
 };
 
 bool VkBackend::init() {
@@ -319,7 +364,9 @@ bool VkBackend::init() {
 
     // Initialize fallback 1x1 white image pixels on slot 0.
     batch_.reserve(65536);
-    std::fprintf(stderr, "[vk] ready, internal resolution %dx%d\n", 480 * scale_, 272 * scale_);
+    subframes_ = std::clamp((target_fps_ + 15) / 30, 1, 6);
+    std::fprintf(stderr, "[vk] ready, internal resolution %dx%d, target %d fps (%dx subframes)\n",
+                 480 * scale_, 272 * scale_, subframes_ * 30, subframes_);
     return true;
 }
 
@@ -343,6 +390,13 @@ void VkBackend::shutdown() {
     overlay_tex_.destroy_immediate(ctx_, &descriptors_);
     blur_a_.destroy_immediate(ctx_, &descriptors_);
     blur_b_.destroy_immediate(ctx_, &descriptors_);
+    interp_rt_.color.destroy_immediate(ctx_, &descriptors_);
+    interp_rt_.depth.destroy_immediate(ctx_, nullptr);
+    if (snap_raw_buf_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(ctx_.allocator, snap_raw_buf_, snap_raw_alloc_);
+        snap_raw_buf_ = VK_NULL_HANDLE;
+        snap_raw_alloc_ = VK_NULL_HANDLE;
+    }
 
     pack_streamer_.shutdown(ctx_, descriptors_);
     shadow_compute_.shutdown(ctx_, descriptors_);
@@ -863,7 +917,68 @@ void VkBackend::draw_batch() {
                        0, sizeof(push), &push);
     vkCmdDraw(cmd, static_cast<std::uint32_t>(batch_.size()), 1, 0, 0);
 
+    if (subframes_ > 1) {
+        RecordedBatch rb{};
+        rb.setup = setup_;
+        const std::uint32_t raw_cnt = static_cast<std::uint32_t>(cur_snap_.raw_verts.size()) - cur_raw_batch_start_;
+        if (raw_cnt > 0 && !setup_.through) {
+            rb.use_gpu_raw = true;
+            rb.v_offset = cur_raw_batch_start_;
+            rb.v_count = raw_cnt;
+            cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
+        } else {
+            rb.use_gpu_raw = false;
+            rb.v_offset = static_cast<std::uint32_t>(cur_snap_.flat_verts.size());
+            rb.v_count = static_cast<std::uint32_t>(batch_.size());
+            cur_snap_.flat_verts.insert(cur_snap_.flat_verts.end(), batch_.begin(), batch_.end());
+        }
+        cur_snap_.batches.push_back(rb);
+    }
+
     batch_.clear();
+}
+
+void VkBackend::draw_started(const gpu::DrawInfo &draw) {
+    if (subframes_ <= 1) return;
+    cur_draw_index_ = static_cast<std::uint32_t>(cur_snap_.summaries.size());
+    cur_snap_.summaries.push_back(interpolation::summarize(draw));
+    cur_snap_.viewports.push_back(draw.viewport);
+    cur_draw_eligible_ = !draw.through && !draw.clear && cur_snap_.summaries.back().perspective;
+}
+
+void VkBackend::triangle_unclipped(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) {
+    if (subframes_ <= 1 || !cur_draw_eligible_ || cur_snap_.summaries.empty()) return;
+    apply_state(ge);
+    auto &sum = cur_snap_.summaries.back();
+    auto push_raw = [&](const gpu::Vertex &v) {
+        if (v.has_world) {
+            sum.world_sum[0] += v.world[0];
+            sum.world_sum[1] += v.world[1];
+            sum.world_sum[2] += v.world[2];
+            ++sum.world_points;
+        }
+        vk::RawGpuVertex rv{};
+        rv.world_pos[0] = v.world[0];
+        rv.world_pos[1] = v.world[1];
+        rv.world_pos[2] = v.world[2];
+        rv.draw_idx = cur_draw_index_;
+        rv.uv[0] = v.u;
+        rv.uv[1] = v.v;
+        const std::uint32_t r = static_cast<std::uint32_t>(std::clamp(v.r, 0.0f, 255.0f));
+        const std::uint32_t g = static_cast<std::uint32_t>(std::clamp(v.g, 0.0f, 255.0f));
+        const std::uint32_t bl = static_cast<std::uint32_t>(std::clamp(v.b, 0.0f, 255.0f));
+        const std::uint32_t al = static_cast<std::uint32_t>(std::clamp(v.a, 0.0f, 255.0f));
+        rv.color_rgba = r | (g << 8u) | (bl << 16u) | (al << 24u);
+        const std::uint32_t sr = static_cast<std::uint32_t>(std::clamp(v.sr, 0.0f, 255.0f));
+        const std::uint32_t sg = static_cast<std::uint32_t>(std::clamp(v.sg, 0.0f, 255.0f));
+        const std::uint32_t sb = static_cast<std::uint32_t>(std::clamp(v.sb, 0.0f, 255.0f));
+        rv.spec_rgba = sr | (sg << 8u) | (sb << 16u) | (255u << 24u);
+        rv.fog = v.fog;
+        cur_snap_.raw_verts.push_back(rv);
+    };
+    push_raw(a);
+    push_raw(b);
+    push_raw(c);
 }
 
 void VkBackend::triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) {
@@ -1239,8 +1354,278 @@ void VkBackend::apply_live_scale() {
             retire_image(rt.depth);
         }
         targets_.clear();
+        retire_image(interp_rt_.color);
+        retire_image(interp_rt_.depth);
         retire_image(copy_tex_);
     }
+}
+
+void VkBackend::apply_live_fps() {
+    const int req = live_->fps.exchange(0, std::memory_order_relaxed);
+    if (req >= 30 && req <= 180) {
+        target_fps_ = req;
+        subframes_ = std::clamp((target_fps_ + 15) / 30, 1, 6);
+        if (subframes_ <= 1) {
+            interp_active_ = false;
+            have_newer_snap_ = false;
+            cur_snap_ = InterpSnapshot{};
+            blend_older_ = InterpSnapshot{};
+            blend_newer_ = InterpSnapshot{};
+            cur_raw_batch_start_ = 0;
+        }
+    }
+}
+
+void VkBackend::render_interpolated_subframe(float phase) {
+    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || snap_raw_buf_ == VK_NULL_HANDLE) {
+        // Cut / 2D / movie screen: present latest rendered frame at target cadence so pacing & MangoHUD stay locked.
+        if (last_shown_slot_ != 0) {
+            show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
+        }
+        return;
+    }
+
+    ensure_recording();
+    end_render_pass();
+
+    const std::uint32_t pw = blend_older_.width * static_cast<std::uint32_t>(scale_);
+    const std::uint32_t ph = blend_older_.height * static_cast<std::uint32_t>(scale_);
+    if (interp_rt_.color.image == VK_NULL_HANDLE || interp_rt_.color.width != pw || interp_rt_.color.height != ph) {
+        retire_image(interp_rt_.color);
+        retire_image(interp_rt_.depth);
+        interp_rt_.address = blend_older_.shown_addr;
+        interp_rt_.width = blend_older_.width;
+        interp_rt_.height = blend_older_.height;
+        interp_rt_.stride = blend_older_.width;
+        interp_rt_.color.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT);
+        interp_rt_.depth.create(ctx_, nullptr, pw, ph, VK_FORMAT_D32_SFLOAT,
+                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
+
+    // 1. Build per-draw interpolated DrawTransform array (tiny CPU loop: ~100-300 draws, <0.05 ms).
+    FrameSlice &f = frames_[frame_slot_];
+    const std::size_t ndraws = blend_older_.summaries.size();
+    auto tslice = f.params.allocate(ndraws * sizeof(vk::DrawTransform), 16);
+    if (!tslice.ptr) {
+        show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
+        return;
+    }
+    auto *transforms = reinterpret_cast<vk::DrawTransform *>(tslice.ptr);
+    for (std::size_t i = 0; i < ndraws; ++i) {
+        const auto &older = blend_older_.summaries[i];
+        const auto eye_old = interpolation::multiply(older.view, older.world);
+        interpolation::Matrix eye_blend = eye_old;
+        const std::int32_t partner = (i < last_matching_.newer_of.size()) ? last_matching_.newer_of[i] : interpolation::Matching::kNoPartner;
+        if (partner >= 0 && static_cast<std::size_t>(partner) < blend_newer_.summaries.size()) {
+            const auto &newer = blend_newer_.summaries[static_cast<std::size_t>(partner)];
+            const auto eye_new = interpolation::multiply(newer.view, newer.world);
+            interpolation::RigidMotion rm;
+            if (interpolation::rigid_between(eye_old, eye_new, rm)) {
+                eye_blend = interpolation::follow_rigid(eye_old, rm, phase);
+            } else if (last_cam_motion_.valid) {
+                eye_blend = interpolation::blend_eye(eye_old, eye_new, last_cam_motion_, phase);
+            } else {
+                eye_blend = interpolation::blend_affine(eye_old, eye_new, phase);
+            }
+        } else if (partner == interpolation::Matching::kFollowCamera && last_cam_motion_.valid) {
+            eye_blend = interpolation::follow_rigid(eye_old, last_cam_motion_, phase);
+        }
+        const auto mvp = interpolation::multiply(older.projection, eye_blend);
+        std::copy_n(mvp.data(), 16, transforms[i].mvp);
+        const auto &vp = blend_older_.viewports[i];
+        transforms[i].vp_scale[0] = vp[0];
+        transforms[i].vp_scale[1] = vp[1];
+        transforms[i].vp_scale[2] = vp[2];
+        transforms[i].vp_scale[3] = 0.0f;
+        transforms[i].vp_center[0] = vp[3] - vp[6];
+        transforms[i].vp_center[1] = vp[4] - vp[7];
+        transforms[i].vp_center[2] = vp[5];
+        transforms[i].vp_center[3] = 1.0f;
+    }
+
+    // 2. GPU Compute: re-project all raw 3D vertices directly into device-local GpuVertex buffer!
+    const std::uint32_t raw_count = static_cast<std::uint32_t>(blend_older_.raw_verts.size());
+    interpolator_.dispatch_place_v2(f.cmd, snap_raw_addr_, tslice.address, raw_count);
+
+    // 3. Render interpolated 3D + 2D batches into interp_rt_ via Dynamic Rendering.
+    transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    transition_resource(interp_rt_.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+    VkRenderingAttachmentInfo color_att{};
+    color_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color_att.imageView = interp_rt_.color.view;
+    color_att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_att.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+
+    VkRenderingAttachmentInfo depth_att{};
+    depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    depth_att.imageView = interp_rt_.depth.view;
+    depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_att.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_att.clearValue.depthStencil = {1.0f, 0u};
+
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO, nullptr, 0, {{0, 0}, {pw, ph}}, 1, 0, 1, &color_att, &depth_att, nullptr};
+    vkCmdBeginRendering(f.cmd, &ri);
+
+    // Upload 2D/flat vertices once for this subframe.
+    VkDeviceSize flat_base_off = 0;
+    if (!blend_older_.flat_verts.empty()) {
+        const std::size_t fb = blend_older_.flat_verts.size() * sizeof(GpuVertex);
+        auto vsl = f.vertices.allocate(fb, 16);
+        if (vsl.ptr) {
+            std::memcpy(vsl.ptr, blend_older_.flat_verts.data(), fb);
+            flat_base_off = vsl.offset;
+        }
+    }
+
+    VkDescriptorSet set0 = descriptors_.set();
+    VkViewport vp_full{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph), 0.0f, 1.0f};
+    vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
+
+    for (const auto &rb : blend_older_.batches) {
+        if (rb.v_count == 0 || rb.setup.target != blend_older_.shown_addr) continue;
+        auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
+        if (!pslice.ptr) break;
+
+        const auto R = [&](std::uint32_t reg) { return key_reg(rb.setup.key, reg); };
+        const bool clear = (R(kClearMode) & 1u) != 0;
+        const bool textured = !clear && (R(kTextureMapEnable) & 1u) != 0;
+        const bool fog = !clear && !rb.setup.through && (R(kFogEnable) & 1u) != 0;
+        const bool alpha_test = !clear && (R(kAlphaTestEnable) & 1u) != 0;
+        const std::uint32_t minz = R(kMinZ) & 0xFFFFu, maxz = R(kMaxZ) & 0xFFFFu;
+        const bool zrange = !clear && !rb.setup.through && maxz != 0 && (minz != 0 || maxz != 0xFFFFu);
+        const bool linear = ((R(kTexFilter) & 0x100u) != 0) ||
+                            (live_->smooth_textures.load(std::memory_order_relaxed) && !rb.setup.through) ||
+                            rb.setup.linear_override;
+        const int aniso = std::clamp(live_->texture_pack_anisotropy.load(std::memory_order_relaxed), 1, 16);
+
+        vk::DrawParams dp{};
+        std::copy_n(rb.setup.uv_xform, 4, dp.uv_xform);
+        unpack_rgb(R(kTexEnvColor), dp.env_and_flags);
+        unpack_rgb(R(kFogColor), dp.fog_and_zmin);
+        dp.fog_and_zmin[3] = static_cast<float>(minz);
+        dp.target_size[0] = static_cast<float>(blend_older_.width);
+        dp.target_size[1] = static_cast<float>(blend_older_.height);
+        dp.zmax_pad[0] = static_cast<float>(maxz);
+        dp.tex_idx = textured ? rb.setup.tex_slot : 0u;
+        dp.sampler_idx = vk::BindlessDescriptors::sampler_index(
+            linear, rb.setup.texture_mips, (R(kTexWrap) & 1u) != 0, (R(kTexWrap) & 0x100u) != 0, aniso);
+        const std::uint32_t func = R(kTexFunc);
+        dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
+                           (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
+        dp.alpha_bits = alpha_test ? (R(kAlphaTest) & 0xFFFFFFu) : 1u;
+        std::memcpy(pslice.ptr, &dp, sizeof(dp));
+
+        vk::GePipelineKey pkey{};
+        pkey.spec_clear = clear ? 1u : 0u;
+        pkey.spec_textured = textured ? 1u : 0u;
+        pkey.spec_alpha_test = alpha_test ? 1u : 0u;
+
+        VkBool32 blend_en = VK_FALSE;
+        VkColorBlendEquationEXT blend_eq{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+                                         VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD};
+        float blend_const[4]{1.0f, 1.0f, 1.0f, 1.0f};
+        VkColorComponentFlags write_mask = 0xFu;
+        if (clear) {
+            const std::uint32_t cm = R(kClearMode);
+            write_mask = ((cm & 0x100u) ? 7u : 0u) | ((cm & 0x200u) ? 8u : 0u);
+        } else {
+            if ((R(kAlphaBlendEnable) & 1u) != 0) {
+                blend_en = VK_TRUE;
+                const std::uint32_t mode = R(kBlendMode);
+                bool ca = false, cb = false;
+                const std::uint32_t fa = R(kBlendFixedA), fb = R(kBlendFixedB);
+                VkBlendFactor src = psp_blend_factor(mode & 0xFu, true, fa, ca);
+                VkBlendFactor dst = psp_blend_factor((mode >> 4u) & 0xFu, false, fb, cb);
+                std::uint32_t cval = ca ? fa : fb;
+                if (ca && cb && (fa & 0xFFFFFFu) != (fb & 0xFFFFFFu)) { dst = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR; cval = fa; }
+                if (ca || cb) unpack_rgb(cval, blend_const);
+                static constexpr VkBlendOp kOps[6] = {VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT,
+                                                      VK_BLEND_OP_MIN, VK_BLEND_OP_MAX, VK_BLEND_OP_MAX};
+                blend_eq.srcColorBlendFactor = src;
+                blend_eq.dstColorBlendFactor = dst;
+                blend_eq.colorBlendOp = kOps[std::min<std::uint32_t>((mode >> 8u) & 0xFu, 5u)];
+            }
+            const std::uint32_t mask = R(kMaskRgb);
+            const bool keep_a = (R(kStencilTestEnable) & 1u) != 0 || (R(kMaskAlpha) & 0xFFu) == 0xFFu;
+            write_mask = ((mask & 0xFFu) != 0xFFu ? 1u : 0u) | (((mask >> 8u) & 0xFFu) != 0xFFu ? 2u : 0u) |
+                         (((mask >> 16u) & 0xFFu) != 0xFFu ? 4u : 0u) | (!keep_a ? 8u : 0u);
+        }
+        pkey.blend_enable = blend_en ? 1u : 0u;
+        pkey.color_op = static_cast<std::uint8_t>(blend_eq.colorBlendOp);
+        pkey.src_factor = static_cast<std::uint8_t>(blend_eq.srcColorBlendFactor);
+        pkey.dst_factor = static_cast<std::uint8_t>(blend_eq.dstColorBlendFactor);
+        pkey.color_mask = static_cast<std::uint8_t>(write_mask);
+        VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
+        if (!pipe) continue;
+
+        vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+
+        const std::uint32_t sx1 = R(kScissor1) & 0x3FFu, sy1 = (R(kScissor1) >> 10u) & 0x3FFu;
+        const std::uint32_t sx2 = std::min(R(kScissor2) & 0x3FFu, blend_older_.width - 1u);
+        const std::uint32_t sy2 = std::min((R(kScissor2) >> 10u) & 0x3FFu, blend_older_.height - 1u);
+        VkRect2D sc{{0, 0}, {0, 0}};
+        if (sx1 <= sx2 && sy1 <= sy2) {
+            sc.offset = {static_cast<std::int32_t>(sx1) * scale_, static_cast<std::int32_t>(sy1) * scale_};
+            sc.extent = {(sx2 - sx1 + 1u) * static_cast<std::uint32_t>(scale_),
+                         (sy2 - sy1 + 1u) * static_cast<std::uint32_t>(scale_)};
+        }
+        vkCmdSetScissor(f.cmd, 0, 1, &sc);
+
+        if (clear) {
+            vkCmdSetDepthTestEnable(f.cmd, VK_TRUE);
+            vkCmdSetDepthCompareOp(f.cmd, VK_COMPARE_OP_ALWAYS);
+            vkCmdSetDepthWriteEnable(f.cmd, (R(kClearMode) & 0x400u) ? VK_TRUE : VK_FALSE);
+        } else if ((R(kZTestEnable) & 1u) != 0) {
+            static constexpr VkCompareOp kOps[8] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL,
+                                                    VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL,
+                                                    VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL};
+            vkCmdSetDepthTestEnable(f.cmd, VK_TRUE);
+            vkCmdSetDepthCompareOp(f.cmd, kOps[R(kZTest) & 7u]);
+            vkCmdSetDepthWriteEnable(f.cmd, (R(kZWriteDisable) & 1u) == 0 ? VK_TRUE : VK_FALSE);
+        } else {
+            vkCmdSetDepthTestEnable(f.cmd, VK_FALSE);
+            vkCmdSetDepthWriteEnable(f.cmd, VK_FALSE);
+            vkCmdSetDepthCompareOp(f.cmd, VK_COMPARE_OP_ALWAYS);
+        }
+        vkCmdSetBlendConstants(f.cmd, blend_const);
+        if (ctx_.caps.extended_dynamic_state3) {
+            vkCmdSetColorBlendEnableEXT(f.cmd, 0, 1, &blend_en);
+            vkCmdSetColorBlendEquationEXT(f.cmd, 0, 1, &blend_eq);
+            vkCmdSetColorWriteMaskEXT(f.cmd, 0, 1, &write_mask);
+        }
+
+        if (rb.use_gpu_raw) {
+            VkBuffer gpu_vb = interpolator_.out_vertex_buffer();
+            const VkDeviceSize off = static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
+            vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &off);
+        } else {
+            const VkDeviceSize off = flat_base_off + static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
+            vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &off);
+        }
+        vk::DrawPush push{pslice.address, 0u};
+        vkCmdPushConstants(f.cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDraw(f.cmd, rb.v_count, 1, 0, 0);
+    }
+
+    vkCmdEndRendering(f.cmd);
+    transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+    const float uv_x = std::min(1.0f, 480.0f / static_cast<float>(blend_older_.width));
+    const float uv_y = std::min(1.0f, 272.0f / static_cast<float>(blend_older_.height));
+    show_to_swapchain(interp_rt_.color.bindless_slot, uv_x, uv_y, true);
 }
 
 void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32_t pixel_format) {
@@ -1283,14 +1668,86 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         show_to_swapchain(last_shown_slot_, 1.0f, 1.0f, true);
     }
 
-    last_menu_draw_ = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (flip_time_.time_since_epoch().count() != 0) {
+        const auto dt = now - flip_time_;
+        if (dt >= std::chrono::milliseconds(10) && dt <= std::chrono::milliseconds(100)) {
+            flip_period_ = dt;
+        }
+    }
+    flip_time_ = now;
+
+    if (subframes_ > 1) {
+        cur_snap_.shown_addr = off;
+        if (it != targets_.end()) {
+            cur_snap_.width = it->second.width;
+            cur_snap_.height = it->second.height;
+        }
+        interpolation::mark_eligible(cur_snap_.summaries, off);
+        interp_can_blend_ = false;
+        if (have_newer_snap_) {
+            blend_older_ = std::move(blend_newer_);
+            blend_newer_ = std::move(cur_snap_);
+            cur_snap_ = InterpSnapshot{};
+            cur_raw_batch_start_ = 0;
+
+            if (!blend_older_.raw_verts.empty() && interpolator_.ready()) {
+                interpolation::CutThresholds thr{};
+                last_matching_ = interpolator_.matcher().match(blend_older_.summaries, blend_newer_.summaries, thr);
+                if (last_matching_.cut == nullptr) {
+                    last_cam_motion_ = last_matching_.camera_found ? interpolation::rigid_motion(last_matching_.camera)
+                                                                   : interpolation::RigidMotion{};
+                    const std::size_t rbytes = blend_older_.raw_verts.size() * sizeof(vk::RawGpuVertex);
+                    if (snap_raw_cap_ < rbytes) {
+                        ctx_.wait_idle();
+                        if (snap_raw_buf_ != VK_NULL_HANDLE) vmaDestroyBuffer(ctx_.allocator, snap_raw_buf_, snap_raw_alloc_);
+                        snap_raw_cap_ = std::max(rbytes, std::size_t{4u << 20});
+                        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, snap_raw_cap_,
+                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                               VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+                        VmaAllocationCreateInfo vaci{};
+                        vaci.usage = VMA_MEMORY_USAGE_AUTO;
+                        vaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                        VmaAllocationInfo rinfo{};
+                        if (vmaCreateBuffer(ctx_.allocator, &bci, &vaci, &snap_raw_buf_, &snap_raw_alloc_, &rinfo) == VK_SUCCESS) {
+                            VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, snap_raw_buf_};
+                            snap_raw_addr_ = vkGetBufferDeviceAddress(ctx_.device, &bdai);
+                        }
+                    }
+                    if (snap_raw_buf_ != VK_NULL_HANDLE) {
+                        void *mapped = nullptr;
+                        if (vmaMapMemory(ctx_.allocator, snap_raw_alloc_, &mapped) == VK_SUCCESS) {
+                            std::memcpy(mapped, blend_older_.raw_verts.data(), rbytes);
+                            vmaUnmapMemory(ctx_.allocator, snap_raw_alloc_);
+                            interp_can_blend_ = true;
+                        }
+                    }
+                }
+            }
+        } else {
+            blend_newer_ = std::move(cur_snap_);
+            cur_snap_ = InterpSnapshot{};
+            cur_raw_batch_start_ = 0;
+            have_newer_snap_ = true;
+        }
+        // Schedule remaining subframes (1 .. subframes_-1) at even intervals across flip_period_.
+        interp_active_ = true;
+        next_subframe_ = 1;
+        next_subframe_at_ = now + flip_period_ / subframes_;
+    }
+
+    last_menu_draw_ = now;
     if ((frame_number_ % 60u) == 0u) {
         pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + 1u);
     }
     apply_live_scale();
+    apply_live_fps();
 }
 
 std::optional<std::chrono::steady_clock::time_point> VkBackend::next_wakeup() const {
+    if (interp_active_ && subframes_ > 1 && next_subframe_ < subframes_) {
+        return next_subframe_at_;
+    }
     if (overlay_visible_ && overlay_continuous_) {
         return last_menu_draw_ + std::chrono::milliseconds(16);
     }
@@ -1298,9 +1755,22 @@ std::optional<std::chrono::steady_clock::time_point> VkBackend::next_wakeup() co
 }
 
 void VkBackend::tick() {
+    const auto now = std::chrono::steady_clock::now();
+    if (interp_active_ && subframes_ > 1 && next_subframe_ < subframes_ && now >= next_subframe_at_) {
+        const float phase = static_cast<float>(next_subframe_) / static_cast<float>(subframes_);
+        render_interpolated_subframe(phase);
+        ++next_subframe_;
+        if (next_subframe_ < subframes_) {
+            next_subframe_at_ = flip_time_ + (flip_period_ * next_subframe_) / subframes_;
+        } else {
+            interp_active_ = false;
+        }
+        last_menu_draw_ = now;
+        return;
+    }
     if (overlay_visible_ && overlay_continuous_ && last_shown_slot_ != 0) {
         show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
-        last_menu_draw_ = std::chrono::steady_clock::now();
+        last_menu_draw_ = now;
     }
 }
 
