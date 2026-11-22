@@ -100,7 +100,7 @@ bool BindlessDescriptors::init(const Context &ctx) {
         return false;
     }
 
-    // 4. Create 1x1 fallback white image at slot 0.
+    // 4. Create 1x1 fallback white image at slot 0, cleared & transitioned to SHADER_READ_ONLY_OPTIMAL.
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
@@ -117,6 +117,49 @@ bool BindlessDescriptors::init(const Context &ctx) {
         shutdown(ctx);
         return false;
     }
+
+    // One-time clear to opaque white + transition UNDEFINED -> SHADER_READ_ONLY_OPTIMAL so slot 0 is always valid.
+    VkCommandPool tmp_pool = VK_NULL_HANDLE;
+    VkCommandBuffer tmp_cmd = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr,
+                                 VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, ctx.families.graphics};
+    if (vkCreateCommandPool(ctx.device, &cpci, nullptr, &tmp_pool) == VK_SUCCESS) {
+        VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr,
+                                         tmp_pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+        if (vkAllocateCommandBuffers(ctx.device, &cbai, &tmp_cmd) == VK_SUCCESS) {
+            VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
+                                        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
+            vkBeginCommandBuffer(tmp_cmd, &bi);
+            Context::cmd_transition_image(tmp_cmd, fallback_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+                                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                          VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkClearColorValue white{{1.0f, 1.0f, 1.0f, 1.0f}};
+            VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(tmp_cmd, fallback_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &range);
+            Context::cmd_transition_image(tmp_cmd, fallback_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            vkEndCommandBuffer(tmp_cmd);
+
+            VkFence fence = VK_NULL_HANDLE;
+            VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
+            if (vkCreateFence(ctx.device, &fci, nullptr, &fence) == VK_SUCCESS) {
+                VkCommandBufferSubmitInfo cbsi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, tmp_cmd, 0};
+                VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cbsi, 0, nullptr};
+                {
+                    std::lock_guard lock(const_cast<Context &>(ctx).graphics_queue_mutex);
+                    vkQueueSubmit2(ctx.graphics_queue, 1, &si, fence);
+                }
+                vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+                vkDestroyFence(ctx.device, fence, nullptr);
+            }
+        }
+        vkDestroyCommandPool(ctx.device, tmp_pool, nullptr);
+    }
+
     VkImageViewCreateInfo ivci{};
     ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     ivci.image = fallback_image_;

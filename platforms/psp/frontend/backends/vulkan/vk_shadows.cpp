@@ -29,16 +29,21 @@ bool ShadowCompute::init(const Context &ctx, VkDescriptorSetLayout bindless_layo
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 2, 1, &ps};
+    constexpr std::uint32_t kTotalSets = 1u + static_cast<std::uint32_t>(kSceneSetCount);
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
 
-    std::array<VkDescriptorSetLayout, 2> dsls = {storage_layout_, storage_layout_};
-    std::array<VkDescriptorSet, 2> sets{};
-    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, storage_pool_, 2, dsls.data()};
+    std::array<VkDescriptorSetLayout, kTotalSets> dsls{};
+    dsls.fill(storage_layout_);
+    std::array<VkDescriptorSet, kTotalSets> sets{};
+    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, storage_pool_, kTotalSets, dsls.data()};
     if (vkAllocateDescriptorSets(ctx.device, &dsai, sets.data()) != VK_SUCCESS) return false;
     factor_storage_set_ = sets[0];
-    scene_storage_set_ = sets[1];
+    for (std::size_t i = 0; i < kSceneSetCount; ++i) {
+        scene_storage_sets_[i] = sets[1 + i];
+    }
+    scene_set_cursor_ = 0;
 
     std::array<VkDescriptorSetLayout, 2> pipe_sets = {bindless_layout, storage_layout_};
     VkPushConstantRange fpcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkDeviceAddress)};
@@ -132,14 +137,17 @@ void ShadowCompute::dispatch_factor_and_apply(VkCommandBuffer cmd, const Context
                                               int down) {
     if (!ready() || factor_image_ == VK_NULL_HANDLE) return;
 
+    const VkDescriptorSet scene_set = scene_storage_sets_[scene_set_cursor_];
+    scene_set_cursor_ = (scene_set_cursor_ + 1u) % kSceneSetCount;
     VkDescriptorImageInfo sii{VK_NULL_HANDLE, scene_color_view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_storage_set_, 0, 0, 1,
+    VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set, 0, 0, 1,
                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
     vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
 
     Context::cmd_transition_image(cmd, factor_image_, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
     std::array<VkDescriptorSet, 2> fsets = {desc.set(), factor_storage_set_};
@@ -158,7 +166,7 @@ void ShadowCompute::dispatch_factor_and_apply(VkCommandBuffer cmd, const Context
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    std::array<VkDescriptorSet, 2> asets = {desc.set(), scene_storage_set_};
+    std::array<VkDescriptorSet, 2> asets = {desc.set(), scene_set};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, apply_pipe_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, apply_layout_, 0, 2, asets.data(), 0, nullptr);
     ShadowApplyPush ap{factor_slot_, scene_depth_slot, scene_w, scene_h, 1, std::max(down, 1)};

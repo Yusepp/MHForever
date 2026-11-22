@@ -5,6 +5,7 @@
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
 
+#include <array>
 #include <cstdint>
 
 namespace mhf::psp::vk {
@@ -54,10 +55,13 @@ public:
     [[nodiscard]] bool ready() const noexcept { return factor_pipe_ != VK_NULL_HANDLE && apply_pipe_ != VK_NULL_HANDLE; }
 
 private:
+    static constexpr std::size_t kSceneSetCount = 16;
+
     VkDescriptorSetLayout storage_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool storage_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet factor_storage_set_ = VK_NULL_HANDLE;
-    VkDescriptorSet scene_storage_set_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kSceneSetCount> scene_storage_sets_{};
+    std::size_t scene_set_cursor_ = 0;
 
     VkPipelineLayout factor_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout apply_layout_ = VK_NULL_HANDLE;
