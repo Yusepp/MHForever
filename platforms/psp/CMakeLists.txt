@@ -41,12 +41,21 @@ target_link_libraries(mhf_texture_images PRIVATE mhf_basisu mhf_stb_image)
 mhf_target_warnings(mhf_texture_images)
 
 if(MHF_WITH_SDL)
-    add_library(mhf_psp_frontend STATIC frontend/psp_frontend.cpp frontend/gl_backend.cpp frontend/vk_backend.cpp frontend/dialog_overlay.cpp)
+    add_library(mhf_psp_frontend STATIC
+        frontend/psp_frontend.cpp
+        frontend/gl_backend.cpp
+        frontend/vk_backend.cpp
+        frontend/vulkan/vk_context.cpp
+        frontend/vulkan/vk_swapchain.cpp
+        frontend/vulkan/vk_descriptors.cpp
+        frontend/vulkan/vk_buffers.cpp
+        frontend/vulkan/vk_pipelines.cpp
+        frontend/dialog_overlay.cpp)
     target_include_directories(mhf_psp_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
                                PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
     # mhf_overlay is public: psp_frontend.hpp takes the horn's song panel (overlay/song_panel.hpp).
     target_link_libraries(mhf_psp_frontend PUBLIC mhf_psp_runtime mhf_overlay PRIVATE mhf_core_host mhf_stb_truetype mhf_psp_interpolation
-                                                                    mhf_texture_pack mhf_texture_images)
+                                                                    mhf_texture_pack mhf_texture_images mhf_vulkan_deps)
     target_compile_definitions(mhf_psp_frontend PUBLIC MHF_HAS_FRONTEND=1)
     mhf_target_warnings(mhf_psp_frontend)
 endif()
