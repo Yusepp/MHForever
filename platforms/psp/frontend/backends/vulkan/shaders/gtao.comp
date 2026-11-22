@@ -153,17 +153,18 @@ void main() {
     float ao = clamp(visibility / float(kDirs), 0.0, 1.0);
     ao = mix(1.0, pow(ao, 1.1), p.shadow_tint.a);
 
-    // Screen-Space Contact Shadows: 6-step IGN-jittered raymarch toward world-locked sun direction.
-    // Grounds hunter/monster feet, claws, weapons, and armor crevices; auto-disabled in caves/indoors.
+    // Screen-Space Contact Shadows: 6-step IGN-jittered raymarch toward world-locked sun / overhead indoor light.
+    // Grounds hunter/monster feet, claws, weapons, NPCs, and props onto terrain & floors.
     float contact = 1.0;
-    if (p.spec_contact.z > 0.01 && p.sun_dir_view.w < 0.5) {
+    if (p.spec_contact.z > 0.01) {
         vec3 L = normalize(p.sun_dir_view.xyz);
-        // Only march surfaces that aren't already facing completely away from the sun.
+        // Only march surfaces that aren't already facing completely away from the light.
         float ndotl = dot(N, L);
         if (ndotl > 0.02) {
-            float ray_len = clamp(z0 * 0.045, 0.8, 18.0);
-            float min_bias = max(z0 * 0.0045, 0.08);
-            float max_thick = clamp(z0 * 0.075, 0.9, 12.0);
+            bool indoor = (p.sun_dir_view.w > 0.5);
+            float ray_len = indoor ? clamp(z0 * 0.028, 0.5, 9.0) : clamp(z0 * 0.048, 0.9, 20.0);
+            float min_bias = max(z0 * 0.0040, 0.07);
+            float max_thick = indoor ? clamp(z0 * 0.055, 0.7, 8.0) : clamp(z0 * 0.080, 0.9, 13.0);
             float jitter = fract(noise * 17.3 + 0.25);
             float occ_max = 0.0;
 

@@ -297,9 +297,12 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.vz_and_size[0] = in.vz_scale;
     p.vz_and_size[1] = in.vz_center;
 
-    // World-space sun direction: prefer live PSP GE directional light 0, or fall back to zone sun elevation/turn.
+    // World-space light direction: overhead indoor light for caves/halls (grounds hunter & props onto floor),
+    // otherwise live PSP GE directional light 0 or zone sun elevation/azimuth.
     float wx = 0.34f, wy = 0.78f, wz = 0.52f;
-    if (in.has_light0) {
+    if (active_is_cave_) {
+        wx = 0.14f; wy = 0.95f; wz = 0.28f;
+    } else if (in.has_light0) {
         wx = in.light0_dir[0];
         wy = in.light0_dir[1];
         wz = in.light0_dir[2];
@@ -372,7 +375,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     float hemi_str = 0.09f;
     float spec_str = 0.12f;
     float spec_gloss = 28.0f;
-    float contact_str = 0.42f;
+    float contact_str = 0.52f;
     float ssgi_str = 0.22f;
     float vibrance = 0.06f;
 
@@ -390,7 +393,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         ground_rgb[0] = 0.80f; ground_rgb[1] = 0.88f; ground_rgb[2] = 0.98f;
         hemi_str = 0.10f;
         spec_str = 0.16f; spec_gloss = 38.0f;
-        contact_str = 0.45f;
+        contact_str = 0.54f;
         ssgi_str = 0.18f;
         vibrance = 0.05f;
         break;
@@ -407,7 +410,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         ground_rgb[0] = 0.86f; ground_rgb[1] = 0.72f; ground_rgb[2] = 0.50f;
         hemi_str = 0.11f;
         spec_str = 0.13f; spec_gloss = 26.0f;
-        contact_str = 0.48f;
+        contact_str = 0.58f;
         ssgi_str = 0.20f;
         vibrance = 0.07f;
         break;
@@ -424,7 +427,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         ground_rgb[0] = 0.36f; ground_rgb[1] = 0.54f; ground_rgb[2] = 0.34f;
         hemi_str = 0.10f;
         spec_str = 0.18f; spec_gloss = 42.0f; // rain-slick wet sheen
-        contact_str = 0.44f;
+        contact_str = 0.54f;
         ssgi_str = 0.24f;
         vibrance = 0.08f;
         break;
@@ -441,7 +444,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         ground_rgb[0] = 0.32f; ground_rgb[1] = 0.42f; ground_rgb[2] = 0.46f;
         hemi_str = 0.09f;
         spec_str = 0.19f; spec_gloss = 44.0f; // damp/rainy specular
-        contact_str = 0.40f;
+        contact_str = 0.48f;
         ssgi_str = 0.24f;
         vibrance = 0.05f;
         break;
@@ -458,7 +461,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         ground_rgb[0] = 1.00f; ground_rgb[1] = 0.38f; ground_rgb[2] = 0.12f; // magma under-glow!
         hemi_str = 0.16f;
         spec_str = 0.16f; spec_gloss = 30.0f;
-        contact_str = 0.38f;
+        contact_str = 0.46f;
         ssgi_str = 0.38f; // strong lava & fireball bounce!
         vibrance = 0.08f;
         break;
@@ -476,7 +479,7 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         ground_rgb[0] = 0.42f; ground_rgb[1] = 0.34f; ground_rgb[2] = 0.28f;
         hemi_str = 0.07f;
         spec_str = 0.13f; spec_gloss = 34.0f; // damp cave rock / warm wood
-        contact_str = 0.0f; // no directional sun inside caves/indoors
+        contact_str = 0.34f; // soft overhead grounding contact shadows for hunter, NPCs, tables & pots
         ssgi_str = 0.36f; // campfires, torches, Khezu lightning illuminate walls & hunter!
         vibrance = 0.05f;
         break;
