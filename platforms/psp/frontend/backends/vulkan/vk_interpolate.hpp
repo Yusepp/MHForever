@@ -51,25 +51,28 @@ public:
 
     [[nodiscard]] bool ready() const noexcept { return pipe_ != VK_NULL_HANDLE; }
 
-    // Dispatches place_v2.comp to transform & clip `vertex_count` raw vertices into `out_vertex_buffer()`
+    // Dispatches place_v2.comp to transform & clip `vertex_count` raw vertices into `out_vertex_buffer(slot)`
     // (2x output vertices per input triangle for deterministic Sutherland-Hodgman near-plane clipping),
     // inserting a Synchronization2 COMPUTE -> VERTEX_ATTRIBUTE_READ barrier.
-    void dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw_verts_old_bda, VkDeviceAddress raw_verts_new_bda,
-                           VkDeviceAddress transforms_bda, std::uint32_t vertex_count, float phase);
+    void dispatch_place_v2(VkCommandBuffer cmd, int slot, VkDeviceAddress raw_verts_old_bda,
+                           VkDeviceAddress raw_verts_new_bda, VkDeviceAddress transforms_bda,
+                           std::uint32_t vertex_count, float phase);
 
-    [[nodiscard]] VkBuffer out_vertex_buffer() const noexcept { return out_buf_; }
-    [[nodiscard]] VkDeviceAddress out_vertex_address() const noexcept { return out_addr_; }
+    [[nodiscard]] VkBuffer out_vertex_buffer(int slot) const noexcept { return out_buf_[slot & 1]; }
+    [[nodiscard]] VkDeviceAddress out_vertex_address(int slot) const noexcept { return out_addr_[slot & 1]; }
     [[nodiscard]] std::uint32_t max_in_vertices() const noexcept { return max_in_vertices_; }
 
     interpolation::Matcher &matcher() noexcept { return matcher_; }
 
 private:
+    static constexpr int kOutSlots = 2;
+
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipe_ = VK_NULL_HANDLE;
-    VkBuffer out_buf_ = VK_NULL_HANDLE;
-    VmaAllocation out_alloc_ = VK_NULL_HANDLE;
-    VkDeviceAddress out_addr_ = 0;
-    std::uint32_t max_in_vertices_ = 262144u; // 256K input verts -> 512K output verts (~18.8 MB device-local)
+    VkBuffer out_buf_[kOutSlots]{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VmaAllocation out_alloc_[kOutSlots]{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceAddress out_addr_[kOutSlots]{0, 0};
+    std::uint32_t max_in_vertices_ = 262144u; // 256K input verts -> 512K output verts (~18.8 MB device-local per slot)
     interpolation::Matcher matcher_;
 };
 

@@ -25,7 +25,8 @@ bool GpuInterpolator::init(const Context &ctx) {
     vkDestroyShaderModule(ctx.device, mod, nullptr);
     if (r != VK_SUCCESS) return false;
 
-    // 2x output vertex capacity for deterministic Sutherland-Hodgman near-plane clipping (2 tris per input tri).
+    // Double-buffered 2x output vertex capacity (one per frame-in-flight) so consecutive 120/180 Hz
+    // subframes never overwrite each other's vertex stream and can overlap asynchronously on the GPU.
     const std::size_t out_bytes = static_cast<std::size_t>(max_in_vertices_) * 2u * sizeof(gpu_common::GpuVertex);
     VkBufferCreateInfo bci{};
     bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -34,21 +35,29 @@ bool GpuInterpolator::init(const Context &ctx) {
     bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VmaAllocationCreateInfo vaci{};
     vaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    if (vmaCreateBuffer(ctx.allocator, &bci, &vaci, &out_buf_, &out_alloc_, nullptr) != VK_SUCCESS) {
-        shutdown(ctx);
-        return false;
+    for (int i = 0; i < kOutSlots; ++i) {
+        if (vmaCreateBuffer(ctx.allocator, &bci, &vaci, &out_buf_[i], &out_alloc_[i], nullptr) != VK_SUCCESS) {
+            shutdown(ctx);
+            return false;
+        }
+        VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, out_buf_[i]};
+        out_addr_[i] = vkGetBufferDeviceAddress(ctx.device, &bdai);
+        if (out_addr_[i] == 0) {
+            shutdown(ctx);
+            return false;
+        }
     }
-    VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, out_buf_};
-    out_addr_ = vkGetBufferDeviceAddress(ctx.device, &bdai);
-    return out_addr_ != 0;
+    return true;
 }
 
 void GpuInterpolator::shutdown(const Context &ctx) {
-    if (out_buf_ != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(ctx.allocator, out_buf_, out_alloc_);
-        out_buf_ = VK_NULL_HANDLE;
-        out_alloc_ = VK_NULL_HANDLE;
-        out_addr_ = 0;
+    for (int i = 0; i < kOutSlots; ++i) {
+        if (out_buf_[i] != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx.allocator, out_buf_[i], out_alloc_[i]);
+            out_buf_[i] = VK_NULL_HANDLE;
+            out_alloc_[i] = VK_NULL_HANDLE;
+            out_addr_[i] = 0;
+        }
     }
     if (pipe_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(ctx.device, pipe_, nullptr);
@@ -60,15 +69,16 @@ void GpuInterpolator::shutdown(const Context &ctx) {
     }
 }
 
-void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw_verts_old_bda,
+void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, int slot, VkDeviceAddress raw_verts_old_bda,
                                         VkDeviceAddress raw_verts_new_bda, VkDeviceAddress transforms_bda,
                                         std::uint32_t vertex_count, float phase) {
     if (!ready() || vertex_count == 0) return;
+    const int s = slot & 1;
     const std::uint32_t count = vertex_count <= max_in_vertices_ ? vertex_count : max_in_vertices_;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);
     PlacePush push{raw_verts_old_bda, raw_verts_new_bda ? raw_verts_new_bda : raw_verts_old_bda,
-                   transforms_bda, out_addr_, count, phase};
+                   transforms_bda, out_addr_[s], count, phase};
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     const std::uint32_t tri_count = count / 3u;
     vkCmdDispatch(cmd, (tri_count + 63u) / 64u, 1u, 1u);
@@ -81,7 +91,7 @@ void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw
     barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.buffer = out_buf_;
+    barrier.buffer = out_buf_[s];
     barrier.offset = 0;
     barrier.size = static_cast<VkDeviceSize>(count) * 2u * sizeof(gpu_common::GpuVertex);
 

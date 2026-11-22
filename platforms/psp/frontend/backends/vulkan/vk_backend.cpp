@@ -2253,7 +2253,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
     const std::uint32_t raw_count = static_cast<std::uint32_t>(blend_older_.raw_verts.size());
-    interpolator_.dispatch_place_v2(f.cmd, cur_old_buf.addr, cur_new_buf.addr, tslice.address, raw_count, scene_phase);
+    interpolator_.dispatch_place_v2(f.cmd, frame_slot_, cur_old_buf.addr, cur_new_buf.addr, tslice.address, raw_count, scene_phase);
     cur_old_buf.last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
     cur_new_buf.last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
 
@@ -2448,7 +2448,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
         std::uint32_t draw_vcount = rb.v_count;
         if (rb.use_gpu_raw) {
             if (static_cast<std::uint64_t>(rb.v_offset) + rb.v_count > interpolator_.max_in_vertices()) continue;
-            VkBuffer gpu_vb = interpolator_.out_vertex_buffer();
+            VkBuffer gpu_vb = interpolator_.out_vertex_buffer(frame_slot_);
             // place_v2.comp emits 2 clipped triangles (6 verts) per input triangle (3 verts).
             const VkDeviceSize off = static_cast<VkDeviceSize>(rb.v_offset) * 2u * sizeof(GpuVertex);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &off);
