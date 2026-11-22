@@ -63,7 +63,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    constexpr std::uint32_t kTotalSets = 3u + static_cast<std::uint32_t>(kSceneSetCount);
+    constexpr std::uint32_t kTotalSets = 5u + static_cast<std::uint32_t>(kSceneSetCount);
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
@@ -74,10 +74,12 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, storage_pool_, kTotalSets, dsls.data()};
     if (vkAllocateDescriptorSets(ctx.device, &dsai, sets.data()) != VK_SUCCESS) return false;
     gtao_set_ = sets[0];
-    vol_set_ = sets[1];
-    bloom_set_ = sets[2];
+    gtao_blur_set_ = sets[1];
+    vol_set_ = sets[2];
+    bloom_set_ = sets[3];
+    ssgi_set_ = sets[4];
     for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        scene_sets_[i] = sets[3 + i];
+        scene_sets_[i] = sets[5 + i];
     }
     scene_set_cursor_ = 0;
 
@@ -100,8 +102,10 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     };
 
     gtao_pipe_ = make_pipe(shaders::kGtaoCompSpv);
+    gtao_denoise_pipe_ = make_pipe(shaders::kGtaoDenoiseCompSpv);
     vol_pipe_ = make_pipe(shaders::kVolumetricFogCompSpv);
     bloom_pipe_ = make_pipe(shaders::kBloomExtractCompSpv);
+    ssgi_pipe_ = make_pipe(shaders::kSsgiBounceCompSpv);
     comp_pipe_ = make_pipe(shaders::kLightingCompositeCompSpv);
 
     // Build fast zone & biome lookup tables from LiveSettings (supports MHFU zones + graceful MHF1 fallback).
@@ -139,8 +143,10 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
 
 void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     gtao_tex_.destroy(ctx, desc);
+    gtao_blur_tex_.destroy(ctx, desc);
     vol_tex_.destroy(ctx, desc);
     bloom_tex_.destroy(ctx, desc);
+    ssgi_tex_.destroy(ctx, desc);
     auto kill_pipe = [&](VkPipeline &p) {
         if (p != VK_NULL_HANDLE) {
             vkDestroyPipeline(ctx.device, p, nullptr);
@@ -148,8 +154,10 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
         }
     };
     kill_pipe(gtao_pipe_);
+    kill_pipe(gtao_denoise_pipe_);
     kill_pipe(vol_pipe_);
     kill_pipe(bloom_pipe_);
+    kill_pipe(ssgi_pipe_);
     kill_pipe(comp_pipe_);
     if (pipe_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(ctx.device, pipe_layout_, nullptr);
@@ -264,8 +272,10 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
     };
 
     return make_target(gtao_tex_, hw, hh, VK_FORMAT_R8G8B8A8_UNORM, gtao_set_) &&
+           make_target(gtao_blur_tex_, hw, hh, VK_FORMAT_R8G8B8A8_UNORM, gtao_blur_set_) &&
            make_target(vol_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, vol_set_) &&
-           make_target(bloom_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, bloom_set_);
+           make_target(bloom_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, bloom_set_) &&
+           make_target(ssgi_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_set_);
 }
 
 void LightingPipeline::fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) const noexcept {
@@ -526,37 +536,45 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     base.vz_and_size[3] = static_cast<float>(scene_h);
     base.tex_slots[0] = scene_color_slot;
     base.tex_slots[1] = scene_depth_slot;
-    base.tex_slots[2] = gtao_tex_.slot;
+    base.tex_slots[2] = gtao_blur_tex_.slot;
     base.tex_slots[3] = vol_tex_.slot;
     base.aux_slots[0] = bloom_tex_.slot;
     base.aux_slots[1] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
+    base.ext_slots[0] = ssgi_tex_.slot;
+    base.ext_slots[1] = gtao_tex_.slot;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
-    slots[0] = base; slots[0].aux_slots[2] = gtao_tex_.w;  slots[0].aux_slots[3] = gtao_tex_.h;
-    slots[1] = base; slots[1].aux_slots[2] = vol_tex_.w;   slots[1].aux_slots[3] = vol_tex_.h;
-    slots[2] = base; slots[2].aux_slots[2] = bloom_tex_.w; slots[2].aux_slots[3] = bloom_tex_.h;
-    slots[3] = base; slots[3].aux_slots[2] = scene_w;      slots[3].aux_slots[3] = scene_h;
+    slots[0] = base; slots[0].aux_slots[2] = gtao_tex_.w;      slots[0].aux_slots[3] = gtao_tex_.h;
+    slots[1] = base; slots[1].aux_slots[2] = vol_tex_.w;       slots[1].aux_slots[3] = vol_tex_.h;
+    slots[2] = base; slots[2].aux_slots[2] = bloom_tex_.w;     slots[2].aux_slots[3] = bloom_tex_.h;
+    slots[3] = base; slots[3].aux_slots[2] = ssgi_tex_.w;      slots[3].aux_slots[3] = ssgi_tex_.h;
+    slots[4] = base; slots[4].aux_slots[2] = gtao_blur_tex_.w; slots[4].aux_slots[3] = gtao_blur_tex_.h;
+    slots[5] = base; slots[5].aux_slots[2] = scene_w;          slots[5].aux_slots[3] = scene_h;
 
     // Transition intermediate targets -> GENERAL for compute writes, waiting for any prior
-    // composite pass's sampled reads to finish so back-to-back dispatches never race!
-    Context::cmd_transition_image(cmd, gtao_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    Context::cmd_transition_image(cmd, vol_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    Context::cmd_transition_image(cmd, bloom_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    // composite/denoise pass's sampled reads to finish so back-to-back dispatches never race!
+    auto to_general = [&](VkImage img) {
+        Context::cmd_transition_image(cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    };
+    auto to_read = [&](VkImage img) {
+        Context::cmd_transition_image(cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    };
 
-    // Passes 1, 2, 3 are independent (all read scene_depth / scene_color in SHADER_READ_ONLY_OPTIMAL) ->
-    // the GPU executes GTAO, Volumetric Fog, and Bloom in parallel across CUs with ZERO inter-pass barriers!
+    to_general(gtao_tex_.image);
+    to_general(gtao_blur_tex_.image);
+    to_general(vol_tex_.image);
+    to_general(bloom_tex_.image);
+    to_general(ssgi_tex_.image);
+
+    // Stage 1: GTAO+ContactShadows (1/2), Volumetric Fog/Shafts (1/4), Bloom (1/4), SSGI-lite (1/4)
+    // all read scene_depth/scene_color in SHADER_READ_ONLY -> execute in parallel across GPU CUs!
     auto run_pass = [&](VkPipeline pipe, VkDescriptorSet out_set, std::uint32_t w, std::uint32_t h, std::size_t idx) {
         std::array<VkDescriptorSet, 2> dsets = {desc.set(), out_set};
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
@@ -569,28 +587,25 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     run_pass(gtao_pipe_, gtao_set_, gtao_tex_.w, gtao_tex_.h, 0);
     run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, 1);
     run_pass(bloom_pipe_, bloom_set_, bloom_tex_.w, bloom_tex_.h, 2);
+    run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, 3);
 
-    // Single barrier batch: transition gtao/vol/bloom -> SHADER_READ_ONLY, scene_color -> GENERAL.
-    Context::cmd_transition_image(cmd, gtao_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    Context::cmd_transition_image(cmd, vol_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    Context::cmd_transition_image(cmd, bloom_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    // Stage 2: Bilateral denoise of GTAO + Contact Shadows (1/2 res) while vol/bloom/ssgi finish.
+    to_read(gtao_tex_.image);
+    run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, 4);
+
+    // Barrier batch: transition denoised gtao/vol/bloom/ssgi -> SHADER_READ_ONLY, scene_color -> GENERAL.
+    to_read(gtao_blur_tex_.image);
+    to_read(vol_tex_.image);
+    to_read(bloom_tex_.image);
+    to_read(ssgi_tex_.image);
     Context::cmd_transition_image(cmd, scene_color, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    // Pass 4: Unified full-res composite in-place on scene_color.
-    run_pass(comp_pipe_, scene_set, scene_w, scene_h, 3);
+    // Stage 3: Unified full-res composite in-place on scene_color.
+    run_pass(comp_pipe_, scene_set, scene_w, scene_h, 5);
 }
 
 } // namespace mhf::psp::vk

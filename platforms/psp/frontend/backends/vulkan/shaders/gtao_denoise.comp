@@ -1,0 +1,90 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Half-resolution depth-aware cross-bilateral denoiser for GTAO + Screen-Space Contact Shadows.
+// Removes IGN dither grain while preserving crisp silhouettes around hunters, monsters, and weapons.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 1, binding = 0, rgba8) uniform writeonly image2D u_gtao_blur_out;
+
+struct LightingParams {
+    vec4 proj_info;
+    vec4 vz_and_size;
+    vec4 sun_dir_view;
+    vec4 sun_screen;
+    vec4 shadow_tint;
+    vec4 fog_color;
+    vec4 scatter_color;
+    vec4 bloom_rim;
+    vec4 world_up_view;
+    vec4 ground_bounce;
+    vec4 spec_contact;
+    uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
+    uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
+    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+void main() {
+    LightingParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 gsize = ivec2(p.aux_slots.zw);
+    if (gid.x >= gsize.x || gid.y >= gsize.y) return;
+
+    ivec2 gmax = gsize - ivec2(1);
+    ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
+    uint dslot = p.tex_slots.y;
+    uint gslot = p.ext_slots.y;
+
+    vec4 center = texelFetch(u_textures[nonuniformEXT(gslot)], gid, 0);
+    ivec2 ip0 = clamp(gid * 2, ivec2(0), full_max);
+    float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip0, 0).r;
+    if (d0 >= 0.99992 || d0 <= 0.00001) {
+        imageStore(u_gtao_blur_out, gid, vec4(1.0, 0.5, 0.5, 1.0));
+        return;
+    }
+
+    // 9-tap (3x3) depth-weighted bilateral filter on AO (.r) and Contact Shadows (.a),
+    // keeping center reconstructed normal (.gb) crisp so specular & rim stay sharp.
+    float ao_sum = center.r * 0.25;
+    float cs_sum = center.a * 0.25;
+    float w_sum = 0.25;
+
+    const ivec2 kOffs[8] = ivec2[8](
+        ivec2(-1,  0), ivec2( 1,  0), ivec2( 0, -1), ivec2( 0,  1),
+        ivec2(-1, -1), ivec2( 1, -1), ivec2(-1,  1), ivec2( 1,  1)
+    );
+    const float kWeights[8] = float[8](
+        0.125, 0.125, 0.125, 0.125,
+        0.0625, 0.0625, 0.0625, 0.0625
+    );
+
+    for (int i = 0; i < 8; ++i) {
+        ivec2 ng = clamp(gid + kOffs[i], ivec2(0), gmax);
+        ivec2 nip = clamp(ng * 2, ivec2(0), full_max);
+        float dn = texelFetch(u_textures[nonuniformEXT(dslot)], nip, 0).r;
+        if (dn >= 0.99992 || dn <= 0.00001) continue;
+        float dw = exp(-abs(dn - d0) * 3200.0);
+        float w = kWeights[i] * dw;
+        vec4 s = texelFetch(u_textures[nonuniformEXT(gslot)], ng, 0);
+        ao_sum += s.r * w;
+        cs_sum += s.a * w;
+        w_sum += w;
+    }
+
+    float ao = clamp(ao_sum / w_sum, 0.0, 1.0);
+    float cs = clamp(cs_sum / w_sum, 0.0, 1.0);
+    imageStore(u_gtao_blur_out, gid, vec4(ao, center.g, center.b, cs));
+}

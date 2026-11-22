@@ -67,9 +67,9 @@ void main() {
     uint dslot = p.tex_slots.y;
     float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
 
-    // Skybox / empty depth: full visibility, no AO.
+    // Skybox / empty depth: full visibility, no AO, no contact shadow.
     if (d0 >= 0.99992 || d0 <= 0.00001) {
-        imageStore(u_gtao_out, gid, vec4(1.0, 0.5, 0.5, 0.0));
+        imageStore(u_gtao_out, gid, vec4(1.0, 0.5, 0.5, 1.0));
         return;
     }
 
@@ -152,5 +152,52 @@ void main() {
 
     float ao = clamp(visibility / float(kDirs), 0.0, 1.0);
     ao = mix(1.0, pow(ao, 1.1), p.shadow_tint.a);
-    imageStore(u_gtao_out, gid, vec4(ao, N.x * 0.5 + 0.5, N.y * 0.5 + 0.5, 1.0));
+
+    // Screen-Space Contact Shadows: 6-step IGN-jittered raymarch toward world-locked sun direction.
+    // Grounds hunter/monster feet, claws, weapons, and armor crevices; auto-disabled in caves/indoors.
+    float contact = 1.0;
+    if (p.spec_contact.z > 0.01 && p.sun_dir_view.w < 0.5) {
+        vec3 L = normalize(p.sun_dir_view.xyz);
+        // Only march surfaces that aren't already facing completely away from the sun.
+        float ndotl = dot(N, L);
+        if (ndotl > 0.02) {
+            float ray_len = clamp(z0 * 0.045, 0.8, 18.0);
+            float min_bias = max(z0 * 0.0045, 0.08);
+            float max_thick = clamp(z0 * 0.075, 0.9, 12.0);
+            float jitter = fract(noise * 17.3 + 0.25);
+            float occ_max = 0.0;
+
+            const int kCSteps = 6;
+            for (int s = 0; s < kCSteps; ++s) {
+                float frac = (float(s) + 0.35 + 0.65 * jitter) / float(kCSteps);
+                vec3 Q = P + L * (frac * ray_len);
+                float qz = -Q.z;
+                if (qz <= 0.15) break;
+
+                vec2 qndc = vec2(Q.x / max(qz * p.proj_info.x, 1e-4),
+                                 Q.y / max(qz * p.proj_info.y, 1e-4));
+                vec2 quv = qndc * 0.5 + 0.5;
+                if (quv.x < 0.0 || quv.x > 1.0 || quv.y < 0.0 || quv.y > 1.0) break;
+
+                ivec2 qip = clamp(ivec2(quv * p.vz_and_size.zw), ivec2(0), full_max);
+                float qd = texelFetch(u_textures[nonuniformEXT(dslot)], qip, 0).r;
+                if (qd >= 0.99992 || qd <= 0.00001) continue;
+
+                float buf_z = linear_eye_z(p, qd);
+                float dz = qz - buf_z;
+                if (dz > min_bias && dz < max_thick) {
+                    // Smooth thickness & distance fade so shadows feather naturally with zero halos.
+                    float thick_w = 1.0 - smoothstep(max_thick * 0.45, max_thick, dz);
+                    float dist_w = 1.0 - frac * 0.55;
+                    occ_max = max(occ_max, thick_w * dist_w);
+                    if (occ_max > 0.92) break;
+                }
+            }
+            // Gently attenuate near grazing ndotl so self-shadowing never flickers on curved limbs.
+            float grazing = smoothstep(0.02, 0.18, ndotl);
+            contact = 1.0 - occ_max * p.spec_contact.z * grazing;
+        }
+    }
+
+    imageStore(u_gtao_out, gid, vec4(ao, N.x * 0.5 + 0.5, N.y * 0.5 + 0.5, clamp(contact, 0.0, 1.0)));
 }
