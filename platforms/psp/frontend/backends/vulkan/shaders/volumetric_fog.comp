@@ -73,11 +73,13 @@ void main() {
     bool is_sky = (d0 >= 0.99992);
     float max_dist = is_sky ? 1400.0 : min(linear_eye_z(p, d0), 1600.0);
 
-    // 1. Atmospheric distance + gentle height-modulated fog (starts smoothly beyond foreground hunter).
-    float fog_start = p.sun_dir_view.w > 0.5 ? 55.0 : 90.0;
+    // 1. World-up-aligned Atmospheric Distance & Height Fog (starts smoothly beyond foreground hunter).
+    float fog_start = p.sun_dir_view.w > 0.5 ? 65.0 : 95.0;
     float eff_dist = max(max_dist - fog_start, 0.0);
-    // Slightly denser mist lower in the view (valley floor) and thinner high up.
-    float height_mod = clamp(1.15 - ndc.y * 0.35, 0.55, 1.35);
+    // Mist settles naturally toward the world floor (Swamp, Great Forest, Tower cloud-sea, Snowy peaks)
+    // and thins cleanly toward the sky regardless of camera pitch!
+    float ray_up = dot(ray_dir, normalize(p.world_up_view.xyz));
+    float height_mod = clamp(1.12 - ray_up * 0.55, 0.42, 1.40);
     float optical_depth = eff_dist * p.fog_color.a * height_mod;
     float transmittance = is_sky ? 1.0 : exp(-optical_depth);
     // Keep foreground and mid-ground clear so combat visibility is never compromised.

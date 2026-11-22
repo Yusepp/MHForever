@@ -112,7 +112,7 @@ public:
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
-    void fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) const noexcept;
+    void fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept;
 
     struct Target2D {
         VkImage image = VK_NULL_HANDLE;
@@ -172,6 +172,19 @@ private:
     std::uint32_t pending_zone_streak_ = 0;
     BiomeKind active_biome_ = BiomeKind::DefaultOutdoor;
     bool active_is_cave_ = false;
+
+    // Smoothly interpolated mood state (prevents abrupt lighting pops on outdoor <-> cave transitions).
+    struct SmoothedMood {
+        bool valid = false;
+        std::uint64_t last_frame = UINT64_MAX;
+        float shadow_tint[4]{};
+        float fog_color[4]{};
+        float scatter_color[4]{};
+        float bloom_rim[4]{};
+        float ground_bounce[4]{};
+        float spec_contact[4]{};
+        float ssgi_str = 0.0f;
+    } mood_{};
 };
 
 } // namespace mhf::psp::vk

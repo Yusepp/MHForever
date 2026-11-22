@@ -319,7 +319,7 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
            make_target(ssgi_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_blur_set_);
 }
 
-void LightingPipeline::fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) const noexcept {
+void LightingPipeline::fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept {
     // Projection info for view-space reconstruction.
     const float p00 = std::fabs(in.proj[0]) > 1e-4f ? in.proj[0] : 1.0f;
     const float p11 = std::fabs(in.proj[5]) > 1e-4f ? in.proj[5] : 1.76f;
@@ -700,23 +700,47 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
         }
     }
 
-    p.shadow_tint[0] = shadow_rgb[0]; p.shadow_tint[1] = shadow_rgb[1]; p.shadow_tint[2] = shadow_rgb[2];
-    p.shadow_tint[3] = ao_str;
-    p.fog_color[0] = fog_rgb[0]; p.fog_color[1] = fog_rgb[1]; p.fog_color[2] = fog_rgb[2];
-    p.fog_color[3] = fog_dens;
-    p.scatter_color[0] = scat_rgb[0]; p.scatter_color[1] = scat_rgb[1]; p.scatter_color[2] = scat_rgb[2];
-    p.scatter_color[3] = scat_str;
-    p.bloom_rim[0] = bloom_th;
-    p.bloom_rim[1] = bloom_str;
-    p.bloom_rim[2] = rim_str;
-    p.bloom_rim[3] = key_str;
-    p.world_up_view[3] = ssgi_str;
-    p.ground_bounce[0] = ground_rgb[0]; p.ground_bounce[1] = ground_rgb[1]; p.ground_bounce[2] = ground_rgb[2];
-    p.ground_bounce[3] = hemi_str;
-    p.spec_contact[0] = spec_str;
-    p.spec_contact[1] = spec_gloss;
-    p.spec_contact[2] = contact_str;
-    p.spec_contact[3] = vibrance;
+    // Smooth temporal mood blending (~0.3s transition on outdoor <-> cave / biome changes,
+    // advancing once per 30 Hz game frame so all 120/180 Hz subframes stay 100% identical).
+    float tgt_shadow[4]{shadow_rgb[0], shadow_rgb[1], shadow_rgb[2], ao_str};
+    float tgt_fog[4]{fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_dens};
+    float tgt_scat[4]{scat_rgb[0], scat_rgb[1], scat_rgb[2], scat_str};
+    float tgt_bloom[4]{bloom_th, bloom_str, rim_str, key_str};
+    float tgt_ground[4]{ground_rgb[0], ground_rgb[1], ground_rgb[2], hemi_str};
+    float tgt_spec[4]{spec_str, spec_gloss, contact_str, vibrance};
+
+    if (!mood_.valid) {
+        std::memcpy(mood_.shadow_tint, tgt_shadow, sizeof(tgt_shadow));
+        std::memcpy(mood_.fog_color, tgt_fog, sizeof(tgt_fog));
+        std::memcpy(mood_.scatter_color, tgt_scat, sizeof(tgt_scat));
+        std::memcpy(mood_.bloom_rim, tgt_bloom, sizeof(tgt_bloom));
+        std::memcpy(mood_.ground_bounce, tgt_ground, sizeof(tgt_ground));
+        std::memcpy(mood_.spec_contact, tgt_spec, sizeof(tgt_spec));
+        mood_.ssgi_str = ssgi_str;
+        mood_.last_frame = in.frame_index;
+        mood_.valid = true;
+    } else if (in.frame_index != mood_.last_frame) {
+        constexpr float kAlpha = 0.16f;
+        auto blend4 = [&](float cur[4], const float tgt[4]) {
+            for (int c = 0; c < 4; ++c) cur[c] += (tgt[c] - cur[c]) * kAlpha;
+        };
+        blend4(mood_.shadow_tint, tgt_shadow);
+        blend4(mood_.fog_color, tgt_fog);
+        blend4(mood_.scatter_color, tgt_scat);
+        blend4(mood_.bloom_rim, tgt_bloom);
+        blend4(mood_.ground_bounce, tgt_ground);
+        blend4(mood_.spec_contact, tgt_spec);
+        mood_.ssgi_str += (ssgi_str - mood_.ssgi_str) * kAlpha;
+        mood_.last_frame = in.frame_index;
+    }
+
+    std::memcpy(p.shadow_tint, mood_.shadow_tint, sizeof(p.shadow_tint));
+    std::memcpy(p.fog_color, mood_.fog_color, sizeof(p.fog_color));
+    std::memcpy(p.scatter_color, mood_.scatter_color, sizeof(p.scatter_color));
+    std::memcpy(p.bloom_rim, mood_.bloom_rim, sizeof(p.bloom_rim));
+    p.world_up_view[3] = mood_.ssgi_str;
+    std::memcpy(p.ground_bounce, mood_.ground_bounce, sizeof(p.ground_bounce));
+    std::memcpy(p.spec_contact, mood_.spec_contact, sizeof(p.spec_contact));
     p.ext_slots[2] = static_cast<std::uint32_t>(active_biome_);
     p.ext_slots[3] = active_is_cave_ ? 1u : 0u;
 }
