@@ -541,10 +541,6 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           </div>
         </div>
         <div className="srow">
-          <div className="slabel"><b>Enhanced Vulkan lighting</b><span>Adds GTAO ambient occlusion, zone-aware volumetric fog/sun shafts, emissive bloom, and rim lighting (Vulkan backend).</span></div>
-          <Toggle on={!!s.enhancedLighting} onToggle={() => onChange({ enhancedLighting: !s.enhancedLighting })} label="Enhanced Vulkan lighting" />
-        </div>
-        <div className="srow">
           <div className="slabel"><b>Internal resolution</b><span>{resolutions[s.scale - 1]}{s.scale === 4 ? ' (recommended)' : ''}</span></div>
           <div className="seg wide" role="radiogroup" aria-label="Internal resolution" style={{ '--n': resolutions.length } as CSSProperties}>
             <span className="pill" style={{ transform: `translateX(${(s.scale - 1) * 100}%)` }} />
@@ -601,6 +597,35 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           </div>
         </div>}
       </motion.div>
+      {(s.graphicsBackend ?? 'opengl') === 'vulkan' && <motion.div className="glass section" {...rise(0.062)}>
+        <h3>Vulkan Rendering</h3>
+        <div className="srow">
+          <div className="slabel"><b>Enhanced lighting</b><span>Enables modern Vulkan lighting, shadows, and visual effects. Can also be adjusted live in-game from the Esc menu.</span></div>
+          <Toggle on={!!s.enhancedLighting} onToggle={() => onChange({ enhancedLighting: !s.enhancedLighting })} label="Enhanced lighting" />
+        </div>
+        {s.enhancedLighting && (
+          <>
+            {([
+              ['vkAo', 'Ambient occlusion', 'Multi-bounce horizon shading inside crevices and corners.'],
+              ['vkContactShadows', 'Contact & sun shadows', 'Short-range contact grounding and long projected sun shadows.'],
+              ['vkSsgi', 'Indirect bounce & flash', 'Colored firelight/lava bounce and dynamic explosion flashes.'],
+              ['vkSpecular', 'Specular & sky bounce', 'Biome specular sheen, Fresnel rim light, and hemisphere bounce.'],
+              ['vkVolumetricFog', 'Volumetric fog & shafts', 'Biome height fog, outdoor sun shafts, and cave doorway rays.'],
+              ['vkBloom', 'Emissive bloom & shimmer', 'Selective glow on fire, lava, and lightning with rising heat haze.'],
+              ['vkSoftParticles', 'Soft 3D particles', 'Depth-softened smoke, snow, fire, and monster breath.'],
+              ['vkFxaa', 'Pre-HUD anti-aliasing', 'Smooths 3D edges before the 2D HUD is drawn.'],
+              ['vkVignette', 'Moody vignette', 'Subtle edge framing in caves, swamps, volcanoes, and sieges.'],
+              ['vkKillcamDof', 'Killcam depth of field', 'Peripheral bokeh blur during the monster killcam.'],
+            ] as const).map(([key, label, help]) => (
+              <div className="srow" key={key}>
+                <div className="slabel"><b>{label}</b><span>{help}</span></div>
+                <Toggle on={s[key] ?? true} onToggle={() => onChange({ [key]: !(s[key] ?? true) })} label={label} />
+              </div>
+            ))}
+          </>
+        )}
+      </motion.div>}
+
       {enhanced && <motion.div className="glass section" {...rise(0.065)}>
         <h3>Game</h3>
         <div className="srow">

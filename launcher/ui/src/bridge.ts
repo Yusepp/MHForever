@@ -91,6 +91,16 @@ export interface Settings {
   texturePackEnabled?: boolean;
   texturePackSummary?: string;
   enhancedLighting?: boolean;
+  vkAo?: boolean;
+  vkContactShadows?: boolean;
+  vkVolumetricFog?: boolean;
+  vkBloom?: boolean;
+  vkSsgi?: boolean;
+  vkSpecular?: boolean;
+  vkSoftParticles?: boolean;
+  vkFxaa?: boolean;
+  vkVignette?: boolean;
+  vkKillcamDof?: boolean;
   // This copy's text font: MHForever's copy of a font file the player chose, and its file name (missing: the default,
   // Liberation Sans with the HD text).
   textFont?: string;
