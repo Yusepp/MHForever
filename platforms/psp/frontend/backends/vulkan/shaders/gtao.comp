@@ -153,8 +153,10 @@ void main() {
     float ao = clamp(visibility / float(kDirs), 0.0, 1.0);
     ao = mix(1.0, pow(ao, 1.1), p.shadow_tint.a);
 
-    // Screen-Space Contact Shadows: 6-step IGN-jittered raymarch toward world-locked sun / overhead indoor light.
-    // Grounds hunter/monster feet, claws, weapons, NPCs, and props onto terrain & floors.
+    // Two-Scale Screen-Space Sun Shadows:
+    // 1) Short-range Contact Shadows (6 steps, 0.9..20u): razor-sharp grounding under feet, claws, armor & props.
+    // 2) Long-range Projected Sun Shadows (6 coarse steps, 22..220u, outdoors only): casts long directional shadows
+    //    from monsters, hunters, trees, and cliffs across terrain with soft penumbra falloff!
     float contact = 1.0;
     if (p.spec_contact.z > 0.01) {
         vec3 L = normalize(p.sun_dir_view.xyz);
@@ -187,16 +189,53 @@ void main() {
                 float buf_z = linear_eye_z(p, qd);
                 float dz = qz - buf_z;
                 if (dz > min_bias && dz < max_thick) {
-                    // Smooth thickness & distance fade so shadows feather naturally with zero halos.
                     float thick_w = 1.0 - smoothstep(max_thick * 0.45, max_thick, dz);
                     float dist_w = 1.0 - frac * 0.55;
                     occ_max = max(occ_max, thick_w * dist_w);
                     if (occ_max > 0.92) break;
                 }
             }
+
+            // Long-range projected sun shadow march (outdoors only, softer penumbra for monster/cliff silhouettes).
+            float long_occ = 0.0;
+            if (!indoor && occ_max < 0.85) {
+                float long_start = ray_len * 0.95;
+                float long_span = clamp(z0 * 0.36, 20.0, 210.0);
+                float long_bias = max(z0 * 0.012, 0.35);
+                float long_thick = clamp(z0 * 0.24, 6.0, 75.0);
+                const int kLSteps = 6;
+                for (int s = 0; s < kLSteps; ++s) {
+                    float frac = (float(s) + 0.30 + 0.70 * jitter) / float(kLSteps);
+                    // Quadratic spacing gives finer detail near caster and long reach toward sky.
+                    float dist = long_start + (frac * frac) * long_span;
+                    vec3 Q = P + L * dist;
+                    float qz = -Q.z;
+                    if (qz <= 0.2) break;
+
+                    vec2 qndc = vec2(Q.x / max(qz * p.proj_info.x, 1e-4),
+                                     Q.y / max(qz * p.proj_info.y, 1e-4));
+                    vec2 quv = qndc * 0.5 + 0.5;
+                    if (quv.x < 0.0 || quv.x > 1.0 || quv.y < 0.0 || quv.y > 1.0) break;
+
+                    ivec2 qip = clamp(ivec2(quv * p.vz_and_size.zw), ivec2(0), full_max);
+                    float qd = texelFetch(u_textures[nonuniformEXT(dslot)], qip, 0).r;
+                    if (qd >= 0.99992 || qd <= 0.00001) continue;
+
+                    float buf_z = linear_eye_z(p, qd);
+                    float dz = qz - buf_z;
+                    if (dz > long_bias && dz < long_thick) {
+                        float thick_w = 1.0 - smoothstep(long_thick * 0.40, long_thick, dz);
+                        float dist_w = (1.0 - frac * 0.65) * 0.72; // softer penumbra than tight contact shadows
+                        long_occ = max(long_occ, thick_w * dist_w);
+                        if (long_occ > 0.70) break;
+                    }
+                }
+            }
+
             // Gently attenuate near grazing ndotl so self-shadowing never flickers on curved limbs.
             float grazing = smoothstep(0.02, 0.18, ndotl);
-            contact = 1.0 - occ_max * p.spec_contact.z * grazing;
+            float combined_occ = max(occ_max, long_occ);
+            contact = 1.0 - combined_occ * p.spec_contact.z * grazing;
         }
     }
 
