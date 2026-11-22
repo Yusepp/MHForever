@@ -1191,6 +1191,7 @@ int main(int argc, char **argv) {
         else if (a == "--gathering-indicators") g_gathering.indicators = true;
         else if (a == "--auto-gathering-tools") g_gathering.automatic_tools = true;
         else if (a == "--infinite-gathering-tools") g_gathering.infinite_tools = true;
+        else if (a == "--quest-box-icons") g_gathering.quest_box_icons = true;
         else if (a == "--modern-carving") g_gathering.modern_carving = true;
         else if (a == "--invulnerable-carve-quest") g_invulnerable_carve_quest = true; // enhancement, off by default
         else if (a == "--target-lock-camera") g_target_lock_camera = true;
@@ -1324,7 +1325,9 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "[gathering] icons: %s (%u/2 pack atlases, originals for the rest)\n",
                          gathering_icons, gathering_pack_atlases);
         };
-        if (g_gathering.indicators || g_gathering.automatic_tools || g_gathering.infinite_tools) load_gathering_icons();
+        if (g_gathering.indicators || g_gathering.automatic_tools || g_gathering.infinite_tools ||
+            g_gathering.quest_box_icons)
+            load_gathering_icons();
         runtime.register_hook("mh_gathering_prompt_update", &on_gathering_update);
         g_guild_quest_scaling = guild_quest_scaling && kGuildScalingMapped;
         if constexpr (kGuildScalingMapped) {
@@ -1616,6 +1619,13 @@ int main(int argc, char **argv) {
                     [&load_gathering_icons](int v) {
                         if (v != 0) load_gathering_icons();
                         g_gathering.infinite_tools = v != 0;
+                    }, "Gathering & Carving"});
+                frontend.add_game_option({"questBoxIcons", "Quest camp box icons",
+                    "Shows contextual icons near the camp Blue Supply Box and Red Delivery Box (with a red X when carrying nothing to deliver).",
+                    false, g_gathering.quest_box_icons ? 1 : 0, 0, 1, 1, "",
+                    [&load_gathering_icons](int v) {
+                        if (v != 0) load_gathering_icons();
+                        g_gathering.quest_box_icons = v != 0;
                     }, "Gathering & Carving"});
                 frontend.add_game_option({"modernCarving", "Modern carving",
                     "Hold Circle to repeat gathering, carving, mining, and bug-catching.",

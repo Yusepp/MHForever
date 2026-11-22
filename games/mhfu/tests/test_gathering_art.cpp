@@ -37,7 +37,8 @@ int main() {
     auto fish = gathering_sprites(art, GatheringKind::fishing, 255, true);
     MHF_CHECK(fish.size() == 3 && fish[1].pixels == art[5].pixels);
     auto supply = gathering_sprites(art, GatheringKind::supply_box, 255, true, false);
-    MHF_CHECK(supply.size() == 3 && supply[1].size == 32 && supply[2].pixels == art[1].pixels);
+    MHF_CHECK(supply.size() == 3 && supply[1].size == 24 && supply[1].pixels->size() == 32u * 32u &&
+              supply[2].pixels == art[1].pixels);
     auto delivery_ok = gathering_sprites(art, GatheringKind::delivery_box, 255, true, false);
     MHF_CHECK(delivery_ok.size() == 3 && delivery_ok[1].pixels != supply[1].pixels &&
               delivery_ok[2].pixels == art[1].pixels);

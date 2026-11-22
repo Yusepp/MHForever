@@ -682,6 +682,10 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.infiniteGatheringTools ?? false} onToggle={() => onChange({ infiniteGatheringTools: !(s.infiniteGatheringTools ?? false) })} label="Infinite gathering tools" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Quest camp box icons</b><span>Shows contextual gathering-style icons near the camp Blue Supply Box and Red Delivery Box (red X when carrying nothing to deliver).</span></div>
+          <Toggle on={s.questBoxIcons ?? false} onToggle={() => onChange({ questBoxIcons: !(s.questBoxIcons ?? false) })} label="Quest camp box icons" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat gathering, carving, mining, and bug-catching at the same spot.</span></div>
           <Toggle on={s.modernCarving ?? false} onToggle={() => onChange({ modernCarving: !(s.modernCarving ?? false) })} label="Modern carving" />
         </div>

@@ -55,7 +55,8 @@ export interface Settings {
   infiniteWhetstone?: boolean; // sharpen without consuming Whetstones
   damageNumbers?: boolean; // World/Rise/Wilds-style floating damage numbers
   comboBooksFromBox?: boolean; // 100% combine rate once all 5 Books of Combos are owned
-  infinitePaintballs?: boolean; // carrying >= 1 Paintball gives unlimited throws
+  infinitePaintballs?: boolean; // throw Paintballs without consuming them
+  questBoxIcons?: boolean; // contextual icons near camp Blue Supply Box and Red Delivery Box
   // The language the game speaks and reads: 'en', 'fr', 'de', 'es', 'it'; '' keeps the game's own language screen.
   language: string;
   // FUComplete's own options, for FUComplete copies (launcher/native/fuc_config.hpp); its true raw display follows
