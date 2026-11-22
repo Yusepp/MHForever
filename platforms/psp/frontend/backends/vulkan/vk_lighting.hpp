@@ -26,12 +26,21 @@ namespace mhf::psp::vk {
 
 enum class BiomeKind : std::uint8_t {
     DefaultOutdoor = 0,
-    Snowy,
+    PokkeVillage,
+    SnowyPeak,
+    IceCave,
+    CozyIndoor,
+    DarkCave,
     Desert,
-    JungleForest,
+    DesertSandstorm,
+    ForestHills,
+    GreatForest,
+    Jungle,
     Swamp,
     Volcano,
-    CaveIndoor,
+    Tower,
+    FortressSiege,
+    Arena,
 };
 
 struct alignas(16) LightingComputeParams {
@@ -150,6 +159,7 @@ private:
         BiomeKind biome = BiomeKind::DefaultOutdoor;
         bool is_cave = false;
         float sun_height_deg = -1.0f;
+        float sun_darkness = -1.0f;
         float sun_turn = 0.0f;
     };
     std::vector<ZoneInfo> zones_;

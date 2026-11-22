@@ -18,19 +18,51 @@ VkShaderModule make_mod(const Context &ctx, const std::array<std::uint32_t, N> &
     return m;
 }
 
-BiomeKind classify_zone_name(const std::string &name, bool is_cave) {
-    if (is_cave) return BiomeKind::CaveIndoor;
-    if (name.find("snowy") != std::string::npos || name.find("pokke/village") != std::string::npos) {
-        return BiomeKind::Snowy;
+BiomeKind classify_zone_name(const std::string &name, bool &is_cave) {
+    // Pokke Farm is open-air alpine outdoors (unlike Hall/House/Kitchen).
+    if (name.find("pokke/farm") != std::string::npos || name.find("pokke/village") != std::string::npos) {
+        is_cave = false;
+        return BiomeKind::PokkeVillage;
     }
-    if (name.find("desert") != std::string::npos) return BiomeKind::Desert;
+    if (name.find("pokke/hall") != std::string::npos || name.find("pokke/house") != std::string::npos ||
+        name.find("pokke/kitchen") != std::string::npos) {
+        is_cave = true;
+        return BiomeKind::CozyIndoor;
+    }
+    // Volcano & Battleground (even volcano/area5 is a glowing magma cavern, not a dark cold cave!).
     if (name.find("volcano") != std::string::npos || name.find("battleground") != std::string::npos) {
         return BiomeKind::Volcano;
     }
-    if (name.find("swamp") != std::string::npos) return BiomeKind::Swamp;
-    if (name.find("jungle") != std::string::npos || name.find("forest") != std::string::npos) {
-        return BiomeKind::JungleForest;
+    // Snowy Mountains: distinguish Ice Caves (areas 3-5), high peaks (6-8 & Peak), and lower valley (base/1/2).
+    if (name.find("snowy_mountains") != std::string::npos) {
+        if (is_cave) return BiomeKind::IceCave;
+        if (name.find("peak") != std::string::npos || name.find("area6") != std::string::npos ||
+            name.find("area7") != std::string::npos || name.find("area8") != std::string::npos) {
+            return BiomeKind::SnowyPeak;
+        }
+        return BiomeKind::PokkeVillage;
     }
+    // Remaining caves (Swamp, Old Swamp, Desert area10, Great Forest 7/8, Old Jungle 4/9/10).
+    if (is_cave && name.find("fortress") == std::string::npos &&
+        name.find("castle_schrade") == std::string::npos && name.find("tower") == std::string::npos) {
+        return BiomeKind::DarkCave;
+    }
+    if (name.find("desert/area2") != std::string::npos) return BiomeKind::DesertSandstorm;
+    if (name.find("desert") != std::string::npos) return BiomeKind::Desert;
+    if (name.find("great_forest") != std::string::npos) return BiomeKind::GreatForest;
+    if (name.find("forestandhills") != std::string::npos) return BiomeKind::ForestHills;
+    if (name.find("jungle") != std::string::npos) return BiomeKind::Jungle;
+    if (name.find("swamp") != std::string::npos) return BiomeKind::Swamp;
+    if (name.find("tower") != std::string::npos) {
+        is_cave = false; // Tower is high ancient ruins above the clouds!
+        return BiomeKind::Tower;
+    }
+    if (name.find("castle_schrade") != std::string::npos || name.find("fortress") != std::string::npos ||
+        name.find("town") != std::string::npos) {
+        is_cave = false; // Open-air dramatic siege / fortress skies
+        return BiomeKind::FortressSiege;
+    }
+    if (name.find("arena") != std::string::npos) return BiomeKind::Arena;
     return BiomeKind::DefaultOutdoor;
 }
 
@@ -122,11 +154,12 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
         zone_votes_.assign(zones_.size(), 0u);
         for (std::size_t i = 0; i < zones_.size(); ++i) {
             const std::string &zname = live->shadow_zone_names[i];
-            const bool is_cave = caves.count(zname) > 0;
-            zones_[i].is_cave = is_cave;
+            bool is_cave = caves.count(zname) > 0;
             zones_[i].biome = classify_zone_name(zname, is_cave);
+            zones_[i].is_cave = is_cave;
             if (auto it = suns.find(zname); it != suns.end()) {
                 zones_[i].sun_height_deg = it->second[0];
+                zones_[i].sun_darkness = it->second[1];
                 zones_[i].sun_turn = it->second[2];
             }
         }
@@ -380,111 +413,274 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     float vibrance = 0.06f;
 
     switch (active_biome_) {
-    case BiomeKind::Snowy:
-        // Pokke Village & Snowy Mountains: crisp alpine sky bounce, bright snow ground bounce, icy specular glint.
-        shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.82f; shadow_rgb[2] = 0.96f;
-        ao_str = 0.58f;
+    case BiomeKind::PokkeVillage:
+        // Pokke Village, Pokke Farm & Lower Snowy Valley: crisp alpine sky, clean visibility, subtle warm hearth glow.
+        shadow_rgb[0] = 0.74f; shadow_rgb[1] = 0.83f; shadow_rgb[2] = 0.96f;
+        ao_str = 0.56f;
         fog_rgb[0] = 0.80f; fog_rgb[1] = 0.88f; fog_rgb[2] = 0.96f;
-        fog_dens = 0.00042f;
-        scat_rgb[0] = 0.94f; scat_rgb[1] = 0.97f; scat_rgb[2] = 1.00f;
-        scat_str = 0.20f;
+        fog_dens = 0.00032f;
+        scat_rgb[0] = 0.96f; scat_rgb[1] = 0.97f; scat_rgb[2] = 1.00f;
+        scat_str = 0.22f;
         bloom_th = 0.84f; bloom_str = 0.26f;
-        rim_str = 0.15f; key_str = 0.14f;
-        ground_rgb[0] = 0.80f; ground_rgb[1] = 0.88f; ground_rgb[2] = 0.98f;
+        rim_str = 0.14f; key_str = 0.14f;
+        ground_rgb[0] = 0.82f; ground_rgb[1] = 0.88f; ground_rgb[2] = 0.96f;
         hemi_str = 0.10f;
-        spec_str = 0.16f; spec_gloss = 38.0f;
+        spec_str = 0.15f; spec_gloss = 36.0f;
+        contact_str = 0.52f;
+        ssgi_str = 0.20f;
+        vibrance = 0.05f;
+        break;
+    case BiomeKind::SnowyPeak:
+        // Snowy Mountains high slopes (Areas 6-8 & Peak): crisp blizzard mist, dazzling snow bounce, icy specular glint.
+        shadow_rgb[0] = 0.68f; shadow_rgb[1] = 0.80f; shadow_rgb[2] = 0.98f;
+        ao_str = 0.56f;
+        fog_rgb[0] = 0.82f; fog_rgb[1] = 0.89f; fog_rgb[2] = 0.98f;
+        fog_dens = 0.00046f;
+        scat_rgb[0] = 0.92f; scat_rgb[1] = 0.97f; scat_rgb[2] = 1.00f;
+        scat_str = 0.24f;
+        bloom_th = 0.85f; bloom_str = 0.24f;
+        rim_str = 0.17f; key_str = 0.14f;
+        ground_rgb[0] = 0.84f; ground_rgb[1] = 0.91f; ground_rgb[2] = 1.00f;
+        hemi_str = 0.11f;
+        spec_str = 0.19f; spec_gloss = 44.0f; // crisp alpine ice glint
         contact_str = 0.54f;
-        ssgi_str = 0.18f;
+        ssgi_str = 0.16f;
+        vibrance = 0.04f;
+        break;
+    case BiomeKind::IceCave:
+        // Snowy Mountains Ice Caves (Areas 3-5, Khezu): glacial cyan-blue shadows, icy wall sheen, strong lightning bounce.
+        shadow_rgb[0] = 0.62f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.96f;
+        ao_str = 0.68f;
+        fog_rgb[0] = 0.34f; fog_rgb[1] = 0.46f; fog_rgb[2] = 0.58f;
+        fog_dens = 0.00034f;
+        scat_rgb[0] = 0.78f; scat_rgb[1] = 0.92f; scat_rgb[2] = 1.00f;
+        scat_str = 0.0f;
+        bloom_th = 0.76f; bloom_str = 0.32f;
+        rim_str = 0.12f; key_str = 0.09f;
+        ground_rgb[0] = 0.46f; ground_rgb[1] = 0.66f; ground_rgb[2] = 0.82f; // ice floor bounce
+        hemi_str = 0.10f;
+        spec_str = 0.22f; spec_gloss = 48.0f; // crystalline ice walls
+        contact_str = 0.36f;
+        ssgi_str = 0.38f; // Khezu electric-blue lightning illuminates ice walls!
+        vibrance = 0.06f;
+        break;
+    case BiomeKind::CozyIndoor:
+        // Pokke Gathering Hall, House, Kitchen: warm timber & hearth amber bounce, cozy fire SSGI, doorway light.
+        shadow_rgb[0] = 0.76f; shadow_rgb[1] = 0.70f; shadow_rgb[2] = 0.66f;
+        ao_str = 0.68f;
+        fog_rgb[0] = 0.32f; fog_rgb[1] = 0.26f; fog_rgb[2] = 0.22f;
+        fog_dens = 0.00022f;
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.84f; scat_rgb[2] = 0.62f;
+        scat_str = 0.0f;
+        bloom_th = 0.75f; bloom_str = 0.30f;
+        rim_str = 0.09f; key_str = 0.08f;
+        ground_rgb[0] = 0.56f; ground_rgb[1] = 0.38f; ground_rgb[2] = 0.22f; // warm wood/hearth bounce
+        hemi_str = 0.09f;
+        spec_str = 0.13f; spec_gloss = 32.0f;
+        contact_str = 0.34f;
+        ssgi_str = 0.36f;
+        vibrance = 0.05f;
+        break;
+    case BiomeKind::DarkCave:
+        // Damp rock caves (Swamp, Desert Area 10, Old Jungle, Great Forest 7/8): rich stone AO, torch & glow bounce.
+        shadow_rgb[0] = 0.68f; shadow_rgb[1] = 0.72f; shadow_rgb[2] = 0.78f;
+        ao_str = 0.72f;
+        fog_rgb[0] = 0.24f; fog_rgb[1] = 0.28f; fog_rgb[2] = 0.34f;
+        fog_dens = 0.00032f;
+        scat_rgb[0] = 0.90f; scat_rgb[1] = 0.84f; scat_rgb[2] = 0.72f;
+        scat_str = 0.0f;
+        bloom_th = 0.74f; bloom_str = 0.32f;
+        rim_str = 0.09f; key_str = 0.08f;
+        ground_rgb[0] = 0.34f; ground_rgb[1] = 0.34f; ground_rgb[2] = 0.38f;
+        hemi_str = 0.07f;
+        spec_str = 0.16f; spec_gloss = 38.0f; // damp cavern rock
+        contact_str = 0.36f;
+        ssgi_str = 0.38f;
         vibrance = 0.05f;
         break;
     case BiomeKind::Desert:
-        // Desert / Old Desert: golden sunlight, warm sand ground bounce, crisp sunlit contact shadows.
-        shadow_rgb[0] = 0.84f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.70f;
+        // Desert & Old Desert: harsh golden sun, warm sand ground bounce, crisp sunlit contact shadows.
+        shadow_rgb[0] = 0.82f; shadow_rgb[1] = 0.76f; shadow_rgb[2] = 0.70f;
         ao_str = 0.56f;
-        fog_rgb[0] = 0.90f; fog_rgb[1] = 0.82f; fog_rgb[2] = 0.68f;
-        fog_dens = 0.00036f;
-        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.90f; scat_rgb[2] = 0.70f;
-        scat_str = 0.24f;
+        fog_rgb[0] = 0.92f; fog_rgb[1] = 0.83f; fog_rgb[2] = 0.66f;
+        fog_dens = 0.00034f;
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.90f; scat_rgb[2] = 0.68f;
+        scat_str = 0.26f;
         bloom_th = 0.82f; bloom_str = 0.24f;
-        rim_str = 0.15f; key_str = 0.16f;
-        ground_rgb[0] = 0.86f; ground_rgb[1] = 0.72f; ground_rgb[2] = 0.50f;
-        hemi_str = 0.11f;
+        rim_str = 0.16f; key_str = 0.17f;
+        ground_rgb[0] = 0.88f; ground_rgb[1] = 0.72f; ground_rgb[2] = 0.48f;
+        hemi_str = 0.12f;
         spec_str = 0.13f; spec_gloss = 26.0f;
         contact_str = 0.58f;
         ssgi_str = 0.20f;
         vibrance = 0.07f;
         break;
-    case BiomeKind::JungleForest:
-        // Jungle / Forest & Hills / Great Forest: lush canopy sun shafts, humid wet-rock specular sheen.
-        shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.82f; shadow_rgb[2] = 0.76f;
-        ao_str = 0.64f;
-        fog_rgb[0] = 0.70f; fog_rgb[1] = 0.80f; fog_rgb[2] = 0.74f;
-        fog_dens = 0.00048f;
-        scat_rgb[0] = 0.96f; scat_rgb[1] = 0.98f; scat_rgb[2] = 0.80f;
-        scat_str = 0.28f;
-        bloom_th = 0.80f; bloom_str = 0.25f;
-        rim_str = 0.15f; key_str = 0.14f;
-        ground_rgb[0] = 0.36f; ground_rgb[1] = 0.54f; ground_rgb[2] = 0.34f;
+    case BiomeKind::DesertSandstorm:
+        // Desert Area 2 Sandstorm: thicker warm ochre dust haze, diffused soft shadows, glowing dust scatter.
+        shadow_rgb[0] = 0.86f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.64f;
+        ao_str = 0.52f;
+        fog_rgb[0] = 0.88f; fog_rgb[1] = 0.76f; fog_rgb[2] = 0.56f;
+        fog_dens = 0.00072f;
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.86f; scat_rgb[2] = 0.62f;
+        scat_str = 0.30f;
+        bloom_th = 0.82f; bloom_str = 0.22f;
+        rim_str = 0.13f; key_str = 0.11f;
+        ground_rgb[0] = 0.86f; ground_rgb[1] = 0.72f; ground_rgb[2] = 0.50f;
+        hemi_str = 0.12f;
+        spec_str = 0.09f; spec_gloss = 20.0f;
+        contact_str = 0.34f; // diffused sandstorm light
+        ssgi_str = 0.18f;
+        vibrance = 0.04f;
+        break;
+    case BiomeKind::ForestHills:
+        // Forest & Hills: classic sunlit meadows & cliffs, clear distance, warm golden-green sunbeams.
+        shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.80f; shadow_rgb[2] = 0.86f;
+        ao_str = 0.60f;
+        fog_rgb[0] = 0.74f; fog_rgb[1] = 0.84f; fog_rgb[2] = 0.88f;
+        fog_dens = 0.00034f;
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.96f; scat_rgb[2] = 0.80f;
+        scat_str = 0.26f;
+        bloom_th = 0.82f; bloom_str = 0.24f;
+        rim_str = 0.15f; key_str = 0.16f;
+        ground_rgb[0] = 0.44f; ground_rgb[1] = 0.62f; ground_rgb[2] = 0.34f;
         hemi_str = 0.10f;
-        spec_str = 0.18f; spec_gloss = 42.0f; // rain-slick wet sheen
+        spec_str = 0.13f; spec_gloss = 30.0f;
+        contact_str = 0.56f;
+        ssgi_str = 0.20f;
+        vibrance = 0.08f;
+        break;
+    case BiomeKind::GreatForest:
+        // Great Forest (Nargacuga / Chameleos): dense ancient canopy, strong cathedral god-rays, mossy AO & humid mist.
+        shadow_rgb[0] = 0.68f; shadow_rgb[1] = 0.80f; shadow_rgb[2] = 0.72f;
+        ao_str = 0.66f;
+        fog_rgb[0] = 0.66f; fog_rgb[1] = 0.78f; fog_rgb[2] = 0.68f;
+        fog_dens = 0.00054f;
+        scat_rgb[0] = 0.94f; scat_rgb[1] = 1.00f; scat_rgb[2] = 0.76f;
+        scat_str = 0.36f; // signature cathedral canopy sun shafts!
+        bloom_th = 0.80f; bloom_str = 0.26f;
+        rim_str = 0.16f; key_str = 0.15f;
+        ground_rgb[0] = 0.34f; ground_rgb[1] = 0.56f; ground_rgb[2] = 0.32f;
+        hemi_str = 0.11f;
+        spec_str = 0.17f; spec_gloss = 40.0f;
         contact_str = 0.54f;
         ssgi_str = 0.24f;
+        vibrance = 0.09f;
+        break;
+    case BiomeKind::Jungle:
+        // Jungle & Old Jungle: humid tropical palms & coastal cliffs, wet-rock specular sheen, bright canopy shafts.
+        shadow_rgb[0] = 0.70f; shadow_rgb[1] = 0.82f; shadow_rgb[2] = 0.78f;
+        ao_str = 0.64f;
+        fog_rgb[0] = 0.70f; fog_rgb[1] = 0.82f; fog_rgb[2] = 0.78f;
+        fog_dens = 0.00046f;
+        scat_rgb[0] = 0.96f; scat_rgb[1] = 0.98f; scat_rgb[2] = 0.82f;
+        scat_str = 0.30f;
+        bloom_th = 0.80f; bloom_str = 0.25f;
+        rim_str = 0.15f; key_str = 0.15f;
+        ground_rgb[0] = 0.38f; ground_rgb[1] = 0.56f; ground_rgb[2] = 0.38f;
+        hemi_str = 0.10f;
+        spec_str = 0.20f; spec_gloss = 44.0f; // rain-slick coastal stone & monster scales
+        contact_str = 0.54f;
+        ssgi_str = 0.22f;
         vibrance = 0.08f;
         break;
     case BiomeKind::Swamp:
-        // Swamp / Old Swamp: misty teal/violet fog, wet sheen on stone & monster scales.
-        shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.86f;
-        ao_str = 0.64f;
-        fog_rgb[0] = 0.64f; fog_rgb[1] = 0.72f; fog_rgb[2] = 0.78f;
-        fog_dens = 0.00064f;
-        scat_rgb[0] = 0.82f; scat_rgb[1] = 0.90f; scat_rgb[2] = 0.94f;
-        scat_str = 0.22f;
-        bloom_th = 0.78f; bloom_str = 0.24f;
+        // Swamp & Old Swamp: moody teal/violet marsh mist, damp specular on stone & scales, eerie low shafts.
+        shadow_rgb[0] = 0.70f; shadow_rgb[1] = 0.76f; shadow_rgb[2] = 0.88f;
+        ao_str = 0.66f;
+        fog_rgb[0] = 0.60f; fog_rgb[1] = 0.68f; fog_rgb[2] = 0.78f;
+        fog_dens = 0.00066f;
+        scat_rgb[0] = 0.80f; scat_rgb[1] = 0.88f; scat_rgb[2] = 0.96f;
+        scat_str = 0.24f;
+        bloom_th = 0.78f; bloom_str = 0.26f;
         rim_str = 0.14f; key_str = 0.12f;
-        ground_rgb[0] = 0.32f; ground_rgb[1] = 0.42f; ground_rgb[2] = 0.46f;
+        ground_rgb[0] = 0.30f; ground_rgb[1] = 0.40f; ground_rgb[2] = 0.48f;
         hemi_str = 0.09f;
-        spec_str = 0.19f; spec_gloss = 44.0f; // damp/rainy specular
-        contact_str = 0.48f;
-        ssgi_str = 0.24f;
+        spec_str = 0.21f; spec_gloss = 46.0f; // wet marsh sheen
+        contact_str = 0.46f;
+        ssgi_str = 0.26f;
         vibrance = 0.05f;
         break;
     case BiomeKind::Volcano:
-        // Volcano / Battleground: warm magma under-glow from below, fiery ember bloom & strong SSGI lava bounce.
-        shadow_rgb[0] = 0.80f; shadow_rgb[1] = 0.68f; shadow_rgb[2] = 0.64f;
-        ao_str = 0.62f;
-        fog_rgb[0] = 0.62f; fog_rgb[1] = 0.36f; fog_rgb[2] = 0.24f;
-        fog_dens = 0.00050f;
-        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.62f; scat_rgb[2] = 0.32f;
-        scat_str = 0.26f;
+        // Volcano, Old Volcano & Battleground: intense magma under-glow from below, fiery ember bloom & strong lava SSGI.
+        shadow_rgb[0] = 0.80f; shadow_rgb[1] = 0.66f; shadow_rgb[2] = 0.62f;
+        ao_str = 0.64f;
+        fog_rgb[0] = 0.60f; fog_rgb[1] = 0.34f; fog_rgb[2] = 0.22f;
+        fog_dens = 0.00048f;
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.60f; scat_rgb[2] = 0.28f;
+        scat_str = active_is_cave_ ? 0.0f : 0.28f;
         bloom_th = 0.70f; bloom_str = 0.38f;
-        rim_str = 0.18f; key_str = 0.14f;
-        ground_rgb[0] = 1.00f; ground_rgb[1] = 0.38f; ground_rgb[2] = 0.12f; // magma under-glow!
-        hemi_str = 0.16f;
+        rim_str = 0.19f; key_str = 0.14f;
+        ground_rgb[0] = 1.00f; ground_rgb[1] = 0.36f; ground_rgb[2] = 0.10f; // glowing magma under-light!
+        hemi_str = 0.18f;
         spec_str = 0.16f; spec_gloss = 30.0f;
-        contact_str = 0.46f;
-        ssgi_str = 0.38f; // strong lava & fireball bounce!
+        contact_str = active_is_cave_ ? 0.38f : 0.48f;
+        ssgi_str = 0.40f; // rich lava & fireball indirect glow!
         vibrance = 0.08f;
         break;
-    case BiomeKind::CaveIndoor:
-        // Caves & Pokke indoors (House, Hall, Kitchen, Farm): ZERO sun shafts/sun contact shadows,
-        // rich architectural AO, warm torch/campfire SSGI bounce!
-        shadow_rgb[0] = 0.72f; shadow_rgb[1] = 0.74f; shadow_rgb[2] = 0.80f;
-        ao_str = 0.70f;
-        fog_rgb[0] = 0.28f; fog_rgb[1] = 0.30f; fog_rgb[2] = 0.36f;
-        fog_dens = 0.00028f;
-        scat_rgb[0] = 0.95f; scat_rgb[1] = 0.82f; scat_rgb[2] = 0.66f;
-        scat_str = 0.0f;
-        bloom_th = 0.76f; bloom_str = 0.30f;
-        rim_str = 0.08f; key_str = 0.08f;
-        ground_rgb[0] = 0.42f; ground_rgb[1] = 0.34f; ground_rgb[2] = 0.28f;
-        hemi_str = 0.07f;
-        spec_str = 0.13f; spec_gloss = 34.0f; // damp cave rock / warm wood
-        contact_str = 0.34f; // soft overhead grounding contact shadows for hunter, NPCs, tables & pots
-        ssgi_str = 0.36f; // campfires, torches, Khezu lightning illuminate walls & hunter!
+    case BiomeKind::Tower:
+        // Ancient Tower (1/2/3): golden sandstone ruins above the clouds, dramatic sunlit god-rays & cloud-sea mist.
+        shadow_rgb[0] = 0.78f; shadow_rgb[1] = 0.76f; shadow_rgb[2] = 0.86f;
+        ao_str = 0.64f;
+        fog_rgb[0] = 0.88f; fog_rgb[1] = 0.86f; fog_rgb[2] = 0.82f;
+        fog_dens = 0.00044f;
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.92f; scat_rgb[2] = 0.72f;
+        scat_str = 0.36f; // epic golden temple god-rays!
+        bloom_th = 0.78f; bloom_str = 0.28f;
+        rim_str = 0.18f; key_str = 0.16f;
+        ground_rgb[0] = 0.78f; ground_rgb[1] = 0.70f; ground_rgb[2] = 0.56f; // warm ancient sandstone
+        hemi_str = 0.11f;
+        spec_str = 0.15f; spec_gloss = 32.0f;
+        contact_str = 0.56f;
+        ssgi_str = 0.24f;
+        vibrance = 0.07f;
+        break;
+    case BiomeKind::FortressSiege:
+        // Castle Schrade, Fortress & Town (Fatalis / Lao-Shan / Shen Gaoren): dramatic stormy stone AO & siege mist.
+        shadow_rgb[0] = 0.68f; shadow_rgb[1] = 0.72f; shadow_rgb[2] = 0.80f;
+        ao_str = 0.68f;
+        fog_rgb[0] = 0.58f; fog_rgb[1] = 0.62f; fog_rgb[2] = 0.68f;
+        fog_dens = 0.00050f;
+        scat_rgb[0] = 0.94f; scat_rgb[1] = 0.88f; scat_rgb[2] = 0.80f;
+        scat_str = 0.24f;
+        bloom_th = 0.76f; bloom_str = 0.28f;
+        rim_str = 0.17f; key_str = 0.14f;
+        ground_rgb[0] = 0.44f; ground_rgb[1] = 0.42f; ground_rgb[2] = 0.40f;
+        hemi_str = 0.09f;
+        spec_str = 0.16f; spec_gloss = 34.0f;
+        contact_str = 0.52f;
+        ssgi_str = 0.28f; // Fatalis fire & cannon flashes light up castle walls!
         vibrance = 0.05f;
+        break;
+    case BiomeKind::Arena:
+        // Arena & Great Arena: clean competitive sunlit colosseum, crisp contact shadows, minimal fog.
+        shadow_rgb[0] = 0.80f; shadow_rgb[1] = 0.78f; shadow_rgb[2] = 0.76f;
+        ao_str = 0.56f;
+        fog_rgb[0] = 0.86f; fog_rgb[1] = 0.84f; fog_rgb[2] = 0.78f;
+        fog_dens = 0.00018f; // ultra-clear combat readability
+        scat_rgb[0] = 1.00f; scat_rgb[1] = 0.94f; scat_rgb[2] = 0.80f;
+        scat_str = 0.16f;
+        bloom_th = 0.82f; bloom_str = 0.22f;
+        rim_str = 0.15f; key_str = 0.15f;
+        ground_rgb[0] = 0.78f; ground_rgb[1] = 0.70f; ground_rgb[2] = 0.56f;
+        hemi_str = 0.10f;
+        spec_str = 0.14f; spec_gloss = 30.0f;
+        contact_str = 0.56f;
+        ssgi_str = 0.18f;
+        vibrance = 0.06f;
         break;
     case BiomeKind::DefaultOutdoor:
         break;
+    }
+
+    // Modulate contact shadow & AO contrast gently using MHFU's hand-tuned per-zone sun darkness (when present).
+    if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size()) {
+        const float zd = zones_[static_cast<std::size_t>(active_zone_)].sun_darkness;
+        if (zd > 0.05f) {
+            // 0.40 is MHFU's baseline shadow darkness; scale smoothly in [0.75, 1.20].
+            const float scale = std::clamp(0.65f + zd * 0.85f, 0.75f, 1.20f);
+            contact_str = std::clamp(contact_str * scale, 0.0f, 0.72f);
+            ao_str = std::clamp(ao_str * (0.88f + zd * 0.28f), 0.45f, 0.78f);
+        }
     }
 
     // Blend with the game's live PSP kFogColor so day vs. night quests adapt automatically!
