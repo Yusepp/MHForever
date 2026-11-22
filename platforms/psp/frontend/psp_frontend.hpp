@@ -84,8 +84,9 @@ public:
     // The projected shadows as the launcher keeps them (gl_backend.hpp, LiveSettings): on, whole map, quality 0..2,
     // darkness 0..100. The Video tab changes them while playing, and the controls file keeps them for the launcher.
     void set_shadows(bool on, bool whole_map, int quality, int darkness);
-    // Vulkan compute lighting & atmosphere (GTAO, volumetric fog/sun shafts, emissive bloom, rim light).
+    // Vulkan compute lighting & atmosphere (GTAO, volumetric fog/sun shafts, emissive bloom, rim light, etc.).
     void set_enhanced_lighting(bool on);
+    void set_vulkan_effects_mask(std::uint32_t mask);
     // Turns the hunting horn's songs on (an enhancement, off unless called) at the place the player chose; the Game tab
     // of the in-game menu changes the place or lets the player drag them anywhere, and the controls file keeps the new
     // spot for the launcher.

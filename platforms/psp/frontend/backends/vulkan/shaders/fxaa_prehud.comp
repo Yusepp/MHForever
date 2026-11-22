@@ -60,6 +60,10 @@ void main() {
     uint samp = p.aux_slots.y;
 
     vec4 cM = sample_src(src, samp, uv);
+    if ((p.ext_slots.w & 4u) == 0u) {
+        imageStore(u_aa_out, ip, cM);
+        return;
+    }
     float lM = luma(cM.rgb);
     float lN = luma(sample_src(src, samp, uv + vec2(0.0, -inv_sz.y)).rgb);
     float lS = luma(sample_src(src, samp, uv + vec2(0.0,  inv_sz.y)).rgb);

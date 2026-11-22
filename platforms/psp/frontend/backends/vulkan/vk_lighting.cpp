@@ -178,6 +178,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
         }
     }
 
+    live_ = live;
     return ready();
 }
 
@@ -771,18 +772,43 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
     vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
 
+    const std::uint32_t mask = live_ ? live_->vulkan_effects_mask.load(std::memory_order_relaxed) : LiveSettings::kVkEffectAll;
+    const bool want_ao      = (mask & LiveSettings::kVkEffectAo) != 0u;
+    const bool want_contact = (mask & LiveSettings::kVkEffectContactShadows) != 0u;
+    const bool want_vol     = (mask & LiveSettings::kVkEffectVolumetricFog) != 0u;
+    const bool want_bloom   = (mask & LiveSettings::kVkEffectBloom) != 0u;
+    const bool want_ssgi    = (mask & LiveSettings::kVkEffectSsgi) != 0u;
+    const bool want_spec    = (mask & LiveSettings::kVkEffectSpecular) != 0u;
+    const bool want_fxaa    = (mask & LiveSettings::kVkEffectFxaa) != 0u;
+    const bool want_vig     = (mask & LiveSettings::kVkEffectVignette) != 0u;
+
+    const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi;
+    const bool need_bloom_src  = want_bloom || want_ssgi;
+
     LightingComputeParams base{};
     fill_biome_params(base, in);
+    if (!want_ao)      base.shadow_tint[3] = 0.0f;
+    if (!want_contact) base.spec_contact[2] = 0.0f;
+    if (!want_bloom)   base.bloom_rim[1] = 0.0f;
+    if (!want_ssgi)    base.world_up_view[3] = 0.0f;
+    if (!want_spec) {
+        base.ground_bounce[3] = 0.0f;
+        base.bloom_rim[2] = 0.0f;
+        base.bloom_rim[3] = 0.0f;
+        base.spec_contact[0] = 0.0f;
+        base.spec_contact[3] = 0.0f;
+    }
+    base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u);
     base.vz_and_size[2] = static_cast<float>(scene_w);
     base.vz_and_size[3] = static_cast<float>(scene_h);
     base.tex_slots[0] = scene_color_slot;
     base.tex_slots[1] = scene_depth_slot;
-    base.tex_slots[2] = gtao_blur_tex_.slot;
-    base.tex_slots[3] = vol_tex_.slot;
-    base.aux_slots[0] = bloom_blur_tex_.slot;
+    base.tex_slots[2] = need_gtao_pass ? gtao_blur_tex_.slot : 0u;
+    base.tex_slots[3] = want_vol ? vol_tex_.slot : 0u;
+    base.aux_slots[0] = want_bloom ? bloom_blur_tex_.slot : 0u;
     base.aux_slots[1] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
-    base.ext_slots[0] = ssgi_blur_tex_.slot;
-    base.ext_slots[1] = gtao_tex_.slot;
+    base.ext_slots[0] = want_ssgi ? ssgi_blur_tex_.slot : 0u;
+    base.ext_slots[1] = need_gtao_pass ? gtao_tex_.slot : 0u;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[0] = base; slots[0].aux_slots[2] = gtao_tex_.w;       slots[0].aux_slots[3] = gtao_tex_.h;
@@ -793,11 +819,10 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
     slots[5] = base; slots[5].aux_slots[0] = bloom_tex_.slot;   slots[5].aux_slots[2] = bloom_blur_tex_.w; slots[5].aux_slots[3] = bloom_blur_tex_.h;
     slots[6] = base; slots[6].aux_slots[0] = ssgi_tex_.slot;    slots[6].aux_slots[2] = ssgi_blur_tex_.w;  slots[6].aux_slots[3] = ssgi_blur_tex_.h;
     slots[7] = base; slots[7].aux_slots[0] = bloom_tex_.slot;   slots[7].aux_slots[2] = 4u; slots[7].aux_slots[3] = 2u;
-    slots[8] = base; slots[8].ext_slots[1] = flash_tex_.slot;   slots[8].aux_slots[2] = scene_w; slots[8].aux_slots[3] = scene_h;
+    slots[8] = base; slots[8].ext_slots[1] = want_ssgi ? flash_tex_.slot : 0u; slots[8].aux_slots[2] = scene_w; slots[8].aux_slots[3] = scene_h;
     slots[9] = base; slots[9].aux_slots[0] = lit_tmp_tex_.slot; slots[9].aux_slots[2] = scene_w; slots[9].aux_slots[3] = scene_h;
 
-    // Transition intermediate targets -> GENERAL for compute writes, waiting for any prior
-    // composite/denoise pass's sampled reads to finish so back-to-back dispatches never race!
+    // Transition only the intermediate targets needed for enabled effects -> GENERAL for compute writes.
     auto to_general = [&](VkImage img) {
         Context::cmd_transition_image(cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -812,18 +837,21 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
                                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     };
 
-    to_general(gtao_tex_.image);
-    to_general(gtao_blur_tex_.image);
-    to_general(vol_tex_.image);
-    to_general(bloom_tex_.image);
-    to_general(bloom_blur_tex_.image);
-    to_general(ssgi_tex_.image);
-    to_general(ssgi_blur_tex_.image);
-    to_general(flash_tex_.image);
+    if (need_gtao_pass) {
+        to_general(gtao_tex_.image);
+        to_general(gtao_blur_tex_.image);
+    }
+    if (want_vol)       to_general(vol_tex_.image);
+    if (need_bloom_src) to_general(bloom_tex_.image);
+    if (want_bloom)     to_general(bloom_blur_tex_.image);
+    if (want_ssgi) {
+        to_general(ssgi_tex_.image);
+        to_general(ssgi_blur_tex_.image);
+        to_general(flash_tex_.image);
+    }
     to_general(lit_tmp_tex_.image);
 
-    // Stage 1: GTAO+ContactShadows (1/2), Volumetric Fog/Shafts (1/4), Bloom (1/4), SSGI-lite (1/4)
-    // all read scene_depth/scene_color in SHADER_READ_ONLY -> execute in parallel across GPU CUs!
+    // Stage 1: Enabled half/quarter-res passes read scene_depth/scene_color in parallel across GPU CUs.
     auto run_pass = [&](VkPipeline pipe, VkDescriptorSet out_set, std::uint32_t w, std::uint32_t h, std::size_t idx) {
         std::array<VkDescriptorSet, 2> dsets = {desc.set(), out_set};
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
@@ -833,32 +861,35 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const B
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
     };
 
-    run_pass(gtao_pipe_, gtao_set_, gtao_tex_.w, gtao_tex_.h, 0);
-    run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, 1);
-    run_pass(bloom_pipe_, bloom_set_, bloom_tex_.w, bloom_tex_.h, 2);
-    run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, 3);
+    if (need_gtao_pass) run_pass(gtao_pipe_, gtao_set_, gtao_tex_.w, gtao_tex_.h, 0);
+    if (want_vol)       run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, 1);
+    if (need_bloom_src) run_pass(bloom_pipe_, bloom_set_, bloom_tex_.w, bloom_tex_.h, 2);
+    if (want_ssgi)      run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, 3);
 
-    // Stage 2: Bilateral GTAO/ContactShadow denoise (1/2) + Kawase Bloom blur (1/4) + Kawase SSGI blur (1/4)
-    // all execute in parallel!
-    to_read(gtao_tex_.image);
-    to_read(bloom_tex_.image);
-    to_read(ssgi_tex_.image);
-    run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, 4);
-    run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, 5);
-    run_pass(glow_blur_pipe_, ssgi_blur_set_, ssgi_blur_tex_.w, ssgi_blur_tex_.h, 6);
-    run_pass(flash_pipe_, flash_set_, 4u, 2u, 7);
+    // Stage 2: Bilateral GTAO/ContactShadow denoise + Kawase Bloom/SSGI blur + 4x2 dynamic flash.
+    if (need_gtao_pass) to_read(gtao_tex_.image);
+    if (need_bloom_src) to_read(bloom_tex_.image);
+    if (want_ssgi)      to_read(ssgi_tex_.image);
+    if (need_gtao_pass) run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, 4);
+    if (want_bloom)     run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, 5);
+    if (want_ssgi) {
+        run_pass(glow_blur_pipe_, ssgi_blur_set_, ssgi_blur_tex_.w, ssgi_blur_tex_.h, 6);
+        run_pass(flash_pipe_, flash_set_, 4u, 2u, 7);
+    }
 
-    // Barrier batch: transition smoothed gtao/vol/bloom/ssgi/flash -> SHADER_READ_ONLY (scene_color stays SHADER_READ_ONLY).
-    to_read(gtao_blur_tex_.image);
-    to_read(vol_tex_.image);
-    to_read(bloom_blur_tex_.image);
-    to_read(ssgi_blur_tex_.image);
-    to_read(flash_tex_.image);
+    // Barrier batch: transition produced targets -> SHADER_READ_ONLY (scene_color stays SHADER_READ_ONLY).
+    if (need_gtao_pass) to_read(gtao_blur_tex_.image);
+    if (want_vol)       to_read(vol_tex_.image);
+    if (want_bloom)     to_read(bloom_blur_tex_.image);
+    if (want_ssgi) {
+        to_read(ssgi_blur_tex_.image);
+        to_read(flash_tex_.image);
+    }
 
     // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
     run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, 8);
 
-    // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11) reading lit_tmp_tex_ -> writing back to scene_color!
+    // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11, or fast pass-through copy when disabled) -> scene_color.
     to_read(lit_tmp_tex_.image);
     Context::cmd_transition_image(cmd, scene_color, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,

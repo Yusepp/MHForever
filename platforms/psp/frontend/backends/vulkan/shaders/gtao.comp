@@ -100,58 +100,61 @@ void main() {
 
     // Horizon-based GTAO: 2 directions x 3 steps each side = 12 depth fetches (IGN-dithered).
     float noise = ign(vec2(gid) + p.sun_screen.w * 7.31);
-    float base_angle = noise * 3.14159265;
-    float radius_world = clamp(z0 * 0.065, 1.5, 42.0);
-    float radius_px = clamp((radius_world / max(z0 * p.proj_info.x, 1e-3)) * (p.vz_and_size.z * 0.5), 4.0, 28.0);
-    float inv_r2 = 1.0 / (radius_world * radius_world);
+    float ao = 1.0;
+    if (p.shadow_tint.a > 0.001) {
+        float base_angle = noise * 3.14159265;
+        float radius_world = clamp(z0 * 0.065, 1.5, 42.0);
+        float radius_px = clamp((radius_world / max(z0 * p.proj_info.x, 1e-3)) * (p.vz_and_size.z * 0.5), 4.0, 28.0);
+        float inv_r2 = 1.0 / (radius_world * radius_world);
 
-    float visibility = 0.0;
-    const int kDirs = 2;
-    const int kSteps = 3;
+        float visibility = 0.0;
+        const int kDirs = 2;
+        const int kSteps = 3;
 
-    for (int d_idx = 0; d_idx < kDirs; ++d_idx) {
-        float ang = base_angle + float(d_idx) * (3.14159265 / float(kDirs));
-        vec2 dir = vec2(cos(ang), sin(ang));
-        float max_sin1 = 0.0;
-        float max_sin2 = 0.0;
+        for (int d_idx = 0; d_idx < kDirs; ++d_idx) {
+            float ang = base_angle + float(d_idx) * (3.14159265 / float(kDirs));
+            vec2 dir = vec2(cos(ang), sin(ang));
+            float max_sin1 = 0.0;
+            float max_sin2 = 0.0;
 
-        for (int s = 1; s <= kSteps; ++s) {
-            float frac = (float(s) - 0.35 * fract(noise * 13.7 + float(d_idx) * 0.5)) / float(kSteps);
-            vec2 off = dir * (frac * radius_px);
+            for (int s = 1; s <= kSteps; ++s) {
+                float frac = (float(s) - 0.35 * fract(noise * 13.7 + float(d_idx) * 0.5)) / float(kSteps);
+                vec2 off = dir * (frac * radius_px);
 
-            ivec2 q1 = clamp(ip + ivec2(off), ivec2(0), full_max);
-            float ds1 = texelFetch(u_textures[nonuniformEXT(dslot)], q1, 0).r;
-            if (ds1 < 0.99992) {
-                vec3 S1 = view_pos_at(p, q1, ds1) - P;
-                float len2 = dot(S1, S1);
-                if (len2 > 1e-4) {
-                    float falloff = clamp(1.0 - len2 * inv_r2, 0.0, 1.0);
-                    float sin_h = dot(S1, N) * inversesqrt(len2);
-                    max_sin1 = max(max_sin1, max(sin_h - 0.12, 0.0) * falloff);
+                ivec2 q1 = clamp(ip + ivec2(off), ivec2(0), full_max);
+                float ds1 = texelFetch(u_textures[nonuniformEXT(dslot)], q1, 0).r;
+                if (ds1 < 0.99992) {
+                    vec3 S1 = view_pos_at(p, q1, ds1) - P;
+                    float len2 = dot(S1, S1);
+                    if (len2 > 1e-4) {
+                        float falloff = clamp(1.0 - len2 * inv_r2, 0.0, 1.0);
+                        float sin_h = dot(S1, N) * inversesqrt(len2);
+                        max_sin1 = max(max_sin1, max(sin_h - 0.12, 0.0) * falloff);
+                    }
+                }
+
+                ivec2 q2 = clamp(ip - ivec2(off), ivec2(0), full_max);
+                float ds2 = texelFetch(u_textures[nonuniformEXT(dslot)], q2, 0).r;
+                if (ds2 < 0.99992) {
+                    vec3 S2 = view_pos_at(p, q2, ds2) - P;
+                    float len2 = dot(S2, S2);
+                    if (len2 > 1e-4) {
+                        float falloff = clamp(1.0 - len2 * inv_r2, 0.0, 1.0);
+                        float sin_h = dot(S2, N) * inversesqrt(len2);
+                        max_sin2 = max(max_sin2, max(sin_h - 0.12, 0.0) * falloff);
+                    }
                 }
             }
 
-            ivec2 q2 = clamp(ip - ivec2(off), ivec2(0), full_max);
-            float ds2 = texelFetch(u_textures[nonuniformEXT(dslot)], q2, 0).r;
-            if (ds2 < 0.99992) {
-                vec3 S2 = view_pos_at(p, q2, ds2) - P;
-                float len2 = dot(S2, S2);
-                if (len2 > 1e-4) {
-                    float falloff = clamp(1.0 - len2 * inv_r2, 0.0, 1.0);
-                    float sin_h = dot(S2, N) * inversesqrt(len2);
-                    max_sin2 = max(max_sin2, max(sin_h - 0.12, 0.0) * falloff);
-                }
-            }
+            // Normal-oriented horizon occlusion: zero self-occlusion on flat planes at any viewing angle,
+            // crisp physically grounded contact shadows inside real crevices and corners.
+            float occ = 0.5 * (max_sin1 + max_sin2);
+            visibility += clamp(1.0 - occ * 1.15, 0.0, 1.0);
         }
 
-        // Normal-oriented horizon occlusion: zero self-occlusion on flat planes at any viewing angle,
-        // crisp physically grounded contact shadows inside real crevices and corners.
-        float occ = 0.5 * (max_sin1 + max_sin2);
-        visibility += clamp(1.0 - occ * 1.15, 0.0, 1.0);
+        ao = clamp(visibility / float(kDirs), 0.0, 1.0);
+        ao = mix(1.0, pow(ao, 1.1), p.shadow_tint.a);
     }
-
-    float ao = clamp(visibility / float(kDirs), 0.0, 1.0);
-    ao = mix(1.0, pow(ao, 1.1), p.shadow_tint.a);
 
     // Two-Scale Screen-Space Sun Shadows:
     // 1) Short-range Contact Shadows (6 steps, 0.9..20u): razor-sharp grounding under feet, claws, armor & props.

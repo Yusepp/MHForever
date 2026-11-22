@@ -1115,7 +1115,8 @@ void VkBackend::draw_batch() {
     const bool is_soft_particle = !clear && !setup_.through && is_shown_target(setup_.target) &&
                                   (R(kAlphaBlendEnable) & 1u) != 0 && (R(kZTestEnable) & 1u) != 0 &&
                                   (R(kZWriteDisable) & 1u) != 0 &&
-                                  live_->enhanced_lighting.load(std::memory_order_relaxed);
+                                  live_->enhanced_lighting.load(std::memory_order_relaxed) &&
+                                  (live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectSoftParticles) != 0u;
     if (is_soft_particle && !main_depth_snapped_) {
         snapshot_soft_depth(rt);
         main_depth_snapped_ = true;
@@ -1209,9 +1210,11 @@ void VkBackend::draw_batch() {
     dp.sampler_idx = vk::BindlessDescriptors::sampler_index(linear, setup_.texture_mips, clamp_s, clamp_t, aniso);
 
     const std::uint32_t func = R(kTexFunc);
+    const bool want_killcam_dof = setup_.is_killcam && live_->enhanced_lighting.load(std::memory_order_relaxed) &&
+                                  (live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectKillcamDof) != 0u;
     dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
                        (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u) |
-                       (setup_.is_killcam && live_->enhanced_lighting.load(std::memory_order_relaxed) ? 1024u : 0u);
+                       (want_killcam_dof ? 1024u : 0u);
     if (is_soft_particle && soft_depth_copy_.bindless_slot != 0) {
         const std::uint32_t bmode = R(kBlendMode);
         const bool is_additive_one = ((bmode & 0xFu) == 10u && ((bmode >> 4u) & 0xFu) == 10u && ((bmode >> 8u) & 0xFu) == 0u);
@@ -2385,6 +2388,7 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
 
 void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in) {
     if (!lighting_.ready() || !live_->enhanced_lighting.load(std::memory_order_relaxed)) return;
+    if ((live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectComputeMask) == 0u) return;
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE || rt.depth.bindless_slot == 0) return;
     const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     struct LightScope {
@@ -2678,7 +2682,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
         const bool is_soft_particle = !clear && !rb.setup.through &&
                                       (R(kAlphaBlendEnable) & 1u) != 0 && (R(kZTestEnable) & 1u) != 0 &&
                                       (R(kZWriteDisable) & 1u) != 0 &&
-                                      live_->enhanced_lighting.load(std::memory_order_relaxed);
+                                      live_->enhanced_lighting.load(std::memory_order_relaxed) &&
+                                      (live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectSoftParticles) != 0u;
         if (is_soft_particle && !interp_depth_snapped) {
             vkCmdEndRendering(f.cmd);
             snapshot_soft_depth(interp_rt_);
@@ -2739,9 +2744,11 @@ void VkBackend::render_interpolated_subframe(float phase) {
         dp.sampler_idx = vk::BindlessDescriptors::sampler_index(
             linear, rb.setup.texture_mips, (R(kTexWrap) & 1u) != 0, (R(kTexWrap) & 0x100u) != 0, aniso);
         const std::uint32_t func = R(kTexFunc);
+        const bool want_killcam_dof = rb.setup.is_killcam && live_->enhanced_lighting.load(std::memory_order_relaxed) &&
+                                      (live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectKillcamDof) != 0u;
         dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
                            (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u) |
-                           (rb.setup.is_killcam && live_->enhanced_lighting.load(std::memory_order_relaxed) ? 1024u : 0u);
+                           (want_killcam_dof ? 1024u : 0u);
         if (is_soft_particle && soft_depth_copy_.bindless_slot != 0) {
             const std::uint32_t bmode = R(kBlendMode);
             const bool is_additive_one = ((bmode & 0xFu) == 10u && ((bmode >> 4u) & 0xFu) == 10u && ((bmode >> 8u) & 0xFu) == 0u);

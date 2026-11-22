@@ -418,6 +418,10 @@ void Frontend::set_enhanced_lighting(bool on) {
     impl_->live.enhanced_lighting.store(on, std::memory_order_relaxed);
 }
 
+void Frontend::set_vulkan_effects_mask(std::uint32_t mask) {
+    impl_->live.vulkan_effects_mask.store(mask & LiveSettings::kVkEffectAll, std::memory_order_relaxed);
+}
+
 void Frontend::set_song_spot(overlay::SongSpot spot) { impl_->song_spot = spot; }
 
 void Frontend::offer_songs(bool on, overlay::SongSpot spot) {

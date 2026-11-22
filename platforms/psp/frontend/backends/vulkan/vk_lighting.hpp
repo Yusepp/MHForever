@@ -161,6 +161,7 @@ private:
     Target2D flash_tex_;      // 4x2 RGBA16F (coarse dynamic emissive flash light-field)
     Target2D lit_tmp_tex_;    // full-res RGBA8 (composite output -> FXAA input)
 
+    const LiveSettings *live_ = nullptr;
     // Zone & biome classification tables (populated once from LiveSettings).
     struct ZoneInfo {
         BiomeKind biome = BiomeKind::DefaultOutdoor;

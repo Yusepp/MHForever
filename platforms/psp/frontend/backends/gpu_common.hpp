@@ -82,9 +82,27 @@ struct LiveSettings {
     // Written by the drawing thread at every flip: that flip drew the quest HUD (its clock). The hunting horn's song
     // panel is only shown over it.
     std::atomic<bool> quest_hud{false};
-    // Next-gen Vulkan lighting & atmosphere (multi-bounce GTAO, zone-aware volumetric fog/sun shafts,
-    // selective emissive bloom, per-pixel sun key/rim, and soft filmic highlight rolloff).
+    // Next-gen Vulkan lighting & atmosphere (multi-bounce GTAO, contact & projected sun shadows,
+    // zone-aware volumetric fog/sun shafts, selective emissive bloom, SSGI bounce/flash, specular sheen,
+    // soft 3D particles, pre-HUD FXAA, moody vignette, and 4x killcam bokeh).
+    enum VulkanEffectBits : std::uint32_t {
+        kVkEffectAo             = 1u << 0,
+        kVkEffectContactShadows = 1u << 1,
+        kVkEffectVolumetricFog  = 1u << 2,
+        kVkEffectBloom          = 1u << 3,
+        kVkEffectSsgi           = 1u << 4,
+        kVkEffectSpecular       = 1u << 5,
+        kVkEffectSoftParticles  = 1u << 6,
+        kVkEffectFxaa           = 1u << 7,
+        kVkEffectVignette       = 1u << 8,
+        kVkEffectKillcamDof     = 1u << 9,
+        kVkEffectComputeMask    = kVkEffectAo | kVkEffectContactShadows | kVkEffectVolumetricFog |
+                                  kVkEffectBloom | kVkEffectSsgi | kVkEffectSpecular |
+                                  kVkEffectFxaa | kVkEffectVignette,
+        kVkEffectAll            = 0x3FFu,
+    };
     std::atomic<bool> enhanced_lighting{false};
+    std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectAll};
 };
 
 namespace gpu_common {

@@ -203,15 +203,17 @@ void main() {
     }
 
     // 8. Subtle cinematic edge framing ONLY in moody biomes (Caves, CozyIndoor, Swamp, Volcano, Castle Schrade).
-    uint bid = p.ext_slots.z;
-    float vig_str = 0.0;
-    if (bid == 3u || bid == 4u || bid == 5u) vig_str = 0.08;      // IceCave, CozyIndoor, DarkCave
-    else if (bid == 11u || bid == 12u || bid == 14u) vig_str = 0.06; // Swamp, Volcano, FortressSiege
-    if (vig_str > 0.0) {
-        vec2 vc = uv * 2.0 - 1.0;
-        float r2 = dot(vc, vc);
-        float vig = 1.0 - smoothstep(0.65, 1.85, r2) * vig_str;
-        col *= vig;
+    if ((p.ext_slots.w & 2u) != 0u) {
+        uint bid = p.ext_slots.z;
+        float vig_str = 0.0;
+        if (bid == 3u || bid == 4u || bid == 5u) vig_str = 0.08;      // IceCave, CozyIndoor, DarkCave
+        else if (bid == 11u || bid == 12u || bid == 14u) vig_str = 0.06; // Swamp, Volcano, FortressSiege
+        if (vig_str > 0.0) {
+            vec2 vc = uv * 2.0 - 1.0;
+            float r2 = dot(vc, vc);
+            float vig = 1.0 - smoothstep(0.65, 1.85, r2) * vig_str;
+            col *= vig;
+        }
     }
 
     // 9. Gentle C1-smooth highlight rolloff + triangular IGN debanding before RGBA8 store.
