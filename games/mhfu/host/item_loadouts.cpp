@@ -107,10 +107,90 @@ void draw_button_pill(mhf::overlay::Painter &painter, float x, float y, float w,
     painter.rrect(x, y, w, h, h * 0.5f, highlight ? kMhGold : kMhPillTop, 0.96f, 0.0f,
                   highlight ? &kMhGoldBright : &kMhPillBot);
     painter.rrect(x, y, w, h, h * 0.5f, highlight ? kMhGoldBright : kMhGold, 0.92f, 0.85f);
-    const float fsize = 6.5f;
+    const float fsize = 6.2f;
     const float tw = painter.font_ok() ? painter.measure(label, fsize, true, 0.25f) : w * 0.6f;
-    painter.text(x + (w - tw) * 0.5f, y + h * 0.70f, label, fsize,
+    painter.text(x + (w - tw) * 0.5f, y + h * 0.71f, label, fsize,
                  highlight ? mhf::overlay::kInk : kMhParchment, 0.98f, true, 0.25f);
+}
+
+struct ItemVisualInfo {
+    const char *label;
+    mhf::overlay::Color accent;
+};
+
+// Verified MHFU item IDs for common hunter pouch essentials; other IDs fall back to "Item #<id>".
+ItemVisualInfo item_visual_info(std::uint16_t id) noexcept {
+    constexpr mhf::overlay::Color kHeal{0.34f, 0.78f, 0.45f};
+    constexpr mhf::overlay::Color kTool{0.44f, 0.72f, 0.92f};
+    constexpr mhf::overlay::Color kBomb{0.92f, 0.55f, 0.24f};
+    constexpr mhf::overlay::Color kBook{0.89f, 0.74f, 0.36f};
+    constexpr mhf::overlay::Color kMisc{0.76f, 0.70f, 0.58f};
+
+    switch (id) {
+        case 1u: return {"Combo Bk 1", kBook};
+        case 2u: return {"Combo Bk 2", kBook};
+        case 3u: return {"Combo Bk 3", kBook};
+        case 4u: return {"Combo Bk 4", kBook};
+        case 5u: return {"Combo Bk 5", kBook};
+        case 7u: return {"Potion", kHeal};
+        case 8u: return {"Mega Pot", kHeal};
+        case 64u: return {"Paintball", kBomb};
+        case 65u: return {"Flash Bmb", kBomb};
+        case 66u: return {"Sonic Bmb", kBomb};
+        case 143u: return {"Mega Fly", kTool};
+        case 146u: return {"Mega Pick", kTool};
+        case 150u: return {"Mega Net", kTool};
+        case 153u: return {"Whetstone", kTool};
+        case 867u: return {"Mini Whet", kTool};
+        default: return {nullptr, kMisc};
+    }
+}
+
+std::string item_short_name(std::uint16_t id) {
+    if (const auto info = item_visual_info(id); info.label != nullptr) return info.label;
+    return "Item #" + std::to_string(id);
+}
+
+const char *weapon_type_name(std::uint8_t type) noexcept {
+    switch (type) {
+        case 5u: return "Greatsword";
+        case 6u: return "SnS";
+        case 7u: return "Hammer";
+        case 8u: return "Lance";
+        case 9u: return "Heavy Bowgun";
+        case 11u: return "Light Bowgun";
+        case 12u: return "Longsword";
+        case 13u: return "Dual Blades";
+        case 14u: return "Hunting Horn";
+        case 15u: return "Gunlance";
+        case 16u: return "Bow";
+        default: return "Weapon";
+    }
+}
+
+std::size_t count_decorations(const EquipPiece &p) noexcept {
+    std::size_t n = 0;
+    for (std::size_t off = 6u; off + 1u < kEquipPieceSize; off += 2u) {
+        const std::uint16_t deco = static_cast<std::uint16_t>(p[off]) | (static_cast<std::uint16_t>(p[off + 1u]) << 8u);
+        if (deco != 0u) ++n;
+    }
+    return n;
+}
+
+bool piece_in_equip_box(const psprecomp::GuestMemory &memory, std::uint32_t gs, const EquipPiece &piece,
+                        std::uint16_t hint_idx) noexcept {
+    if (!piece_non_empty(piece) || gs == 0u) return false;
+    if (hint_idx < kEquipBoxSlots) {
+        if (read_piece(memory, gs + kGameSysEquipBoxBase + static_cast<std::uint32_t>(hint_idx) * kEquipPieceSize) == piece) {
+            return true;
+        }
+    }
+    for (std::uint16_t b = 0; b < kEquipBoxSlots; ++b) {
+        if (read_piece(memory, gs + kGameSysEquipBoxBase + static_cast<std::uint32_t>(b) * kEquipPieceSize) == piece) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -390,14 +470,22 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
     const std::uint32_t pressed = buttons & ~prev_buttons_;
     prev_buttons_ = buttons;
 
+    using namespace mhf::psp::buttons;
+    if (release_guard_ && (buttons & (kCross | kSelect | kStart | kCircle | kTriangle)) == 0u) {
+        release_guard_ = false;
+    }
+
     if (!enabled || !box_open(now_us) || !can_use_loadouts(memory)) {
         panel_open_ = false;
+        release_guard_ = false;
         return;
     }
 
-    using namespace mhf::psp::buttons;
     if (!panel_open_) {
-        if ((pressed & kSelect) != 0u) panel_open_ = true;
+        if ((pressed & kSelect) != 0u) {
+            panel_open_ = true;
+            release_guard_ = false;
+        }
         return;
     }
 
@@ -419,10 +507,12 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
         toast_until_us_ = now_us + 2'200'000u;
     } else if ((pressed & (kCross | kSelect | kStart)) != 0u) {
         panel_open_ = false;
+        release_guard_ = true;
     }
 }
 
-bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, std::uint64_t now_us) const {
+bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp::GuestMemory &memory,
+                                 std::uint64_t now_us) const {
     if (!box_open(now_us)) return false;
 
     if (!panel_open_) {
@@ -444,60 +534,203 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, std::uint64_t n
         return true;
     }
 
-    // Centered Monster Hunter-styled Hunter Loadouts window (Item Sets + Armor Sets).
-    const float px = 104.0f, py = 38.0f, pw = 272.0f, ph = 194.0f;
-    painter.rrect(px + 2.5f, py + 3.0f, pw, ph, 6.5f, mhf::overlay::kBlack, 0.55f);
-    painter.rrect(px, py, pw, ph, 6.0f, kMhTop, 0.94f, 0.0f, &kMhBot);
+    // Modern MH (World/Rise/Wilds) two-column Hunter Loadouts window rendered at native HD.
+    const float px = 24.0f, py = 24.0f, pw = 432.0f, ph = 224.0f;
+    painter.rrect(px + 2.5f, py + 3.0f, pw, ph, 6.5f, mhf::overlay::kBlack, 0.58f);
+    painter.rrect(px, py, pw, ph, 6.0f, kMhTop, 0.95f, 0.0f, &kMhBot);
     painter.rrect(px, py, pw, ph, 6.0f, kMhGold, 0.95f, 1.2f);
-    painter.rrect(px + 2.5f, py + 2.5f, pw - 5.0f, ph - 5.0f, 4.0f, kMhGoldDim, 0.60f, 0.75f);
+    painter.rrect(px + 2.5f, py + 2.5f, pw - 5.0f, ph - 5.0f, 4.0f, kMhGoldDim, 0.58f, 0.75f);
 
     // Ornamental Header Bar
-    painter.rrect(px + 3.0f, py + 3.0f, pw - 6.0f, 22.0f, 3.5f, kMhHeader, 0.95f);
+    painter.rrect(px + 3.0f, py + 3.0f, pw - 6.0f, 22.0f, 3.5f, kMhHeader, 0.96f);
     painter.rect(px + 4.0f, py + 25.0f, pw - 8.0f, 1.0f, kMhGoldDim, 0.85f);
-    painter.text(px + 12.0f, py + 17.5f, "Hunter Loadouts", 11.0f, kMhGoldBright, 0.98f, true);
+    painter.text(px + 12.0f, py + 17.5f, "Hunter Loadouts", 10.5f, kMhGoldBright, 0.98f, true);
+    const std::string sub = "Box Controls Locked";
+    const float sub_w = painter.font_ok() ? painter.measure(sub, 7.2f, false) : 64.0f;
+    painter.text(px + pw - 12.0f - sub_w, py + 16.8f, sub, 7.2f, kMhMuted, 0.90f, false);
 
-    // Tab switcher pills (L / R): Item Sets | Armor Sets
+    // Left Column: Tabs + 5 Loadout Slots
+    const float lx = px + 10.0f;
+    const float lw = 148.0f;
     const bool on_items = tab_ == Tab::Items;
     const float tab_y = py + 31.0f;
-    const float tab_w = (pw - 24.0f) * 0.5f;
+    const float tab_w = (lw - 4.0f) * 0.5f;
     auto draw_tab = [&](float x, const std::string &title, bool active) {
-        painter.rrect(x, tab_y, tab_w, 17.0f, 3.5f, active ? kMhSelectTop : kMhRow, active ? 0.95f : 0.78f, 0.0f,
+        painter.rrect(x, tab_y, tab_w, 16.5f, 3.5f, active ? kMhSelectTop : kMhRow, active ? 0.95f : 0.80f, 0.0f,
                       active ? &kMhSelectBot : nullptr);
-        painter.rrect(x, tab_y, tab_w, 17.0f, 3.5f, active ? kMhGoldBright : kMhGoldDim, active ? 0.95f : 0.55f, 0.85f);
-        const float tw = painter.font_ok() ? painter.measure(title, 8.5f, true) : 48.0f;
-        painter.text(x + (tab_w - tw) * 0.5f, tab_y + 11.5f, title, 8.5f,
+        painter.rrect(x, tab_y, tab_w, 16.5f, 3.5f, active ? kMhGoldBright : kMhGoldDim, active ? 0.95f : 0.55f, 0.85f);
+        const float tw = painter.font_ok() ? painter.measure(title, 7.8f, true) : 42.0f;
+        painter.text(x + (tab_w - tw) * 0.5f, tab_y + 11.2f, title, 7.8f,
                      active ? mhf::overlay::kInk : kMhMuted, 0.98f, true);
     };
-    draw_tab(px + 10.0f, "Item Sets", on_items);
-    draw_tab(px + 14.0f + tab_w, "Armor Sets", !on_items);
+    draw_tab(lx, "Item Sets", on_items);
+    draw_tab(lx + tab_w + 4.0f, "Armor Sets", !on_items);
 
-    // 5 Loadout Rows
     for (std::size_t i = 0; i < kItemLoadoutCount; ++i) {
-        const float ry = py + 54.0f + static_cast<float>(i) * 20.5f;
+        const float ry = py + 54.0f + static_cast<float>(i) * 23.0f;
         const bool sel = i == selected_;
-        painter.rrect(px + 10.0f, ry, pw - 20.0f, 17.5f, 3.5f, sel ? kMhSelectTop : kMhRow, sel ? 0.92f : 0.80f, 0.0f,
+        painter.rrect(lx, ry, lw, 19.5f, 3.5f, sel ? kMhSelectTop : kMhRow, sel ? 0.94f : 0.82f, 0.0f,
                       sel ? &kMhSelectBot : nullptr);
-        if (sel) {
-            painter.rrect(px + 10.0f, ry, pw - 20.0f, 17.5f, 3.5f, kMhGoldBright, 0.98f, 1.0f);
-        }
+        if (sel) painter.rrect(lx, ry, lw, 19.5f, 3.5f, kMhGoldBright, 0.98f, 1.0f);
 
         const std::string name = (on_items ? "Item Set " : "Armor Set ") + std::to_string(i + 1);
-        painter.text(px + 18.0f, ry + 11.8f, name, 8.8f, sel ? mhf::overlay::kInk : kMhParchment, 0.98f, true);
+        painter.text(lx + 8.0f, ry + 12.8f, name, 8.2f, sel ? mhf::overlay::kInk : kMhParchment, 0.98f, true);
 
         const bool saved = on_items ? presets_[i].saved : armor_presets_[i].saved;
         const std::string detail = !saved ? "Empty"
-                                          : (on_items ? std::to_string(count_non_empty_items(presets_[i])) + " items"
-                                                      : std::to_string(count_non_empty_armor(armor_presets_[i])) + "/6 pieces");
-        const float dw = painter.font_ok() ? painter.measure(detail, 8.0f, false) : 36.0f;
-        painter.text(px + pw - 18.0f - dw, ry + 11.6f, detail, 8.0f,
+                                          : (on_items ? std::to_string(count_non_empty_items(presets_[i])) + "/24"
+                                                      : std::to_string(count_non_empty_armor(armor_presets_[i])) + "/6");
+        const float dw = painter.font_ok() ? painter.measure(detail, 7.6f, false) : 26.0f;
+        painter.text(lx + lw - 8.0f - dw, ry + 12.6f, detail, 7.6f,
                      sel ? mhf::overlay::kInk : (saved ? kMhGold : kMhMuted), 0.95f, sel);
     }
 
-    // Status Toast
+    // Status Toast inside Left Column below slots
     if (!toast_.empty() && now_us < toast_until_us_) {
-        const float ty = py + ph - 36.0f;
-        painter.rrect(px + 10.0f, ty, pw - 20.0f, 15.0f, 3.0f, toast_ok_ ? kMhOkBg : kMhErrBg, 0.92f);
-        painter.text(px + 16.0f, ty + 10.5f, toast_, 8.0f, toast_ok_ ? kMhOkText : kMhErrText, 0.98f, true);
+        const float ty = py + 174.0f;
+        painter.rrect(lx, ty, lw, 17.0f, 3.0f, toast_ok_ ? kMhOkBg : kMhErrBg, 0.94f);
+        painter.rrect(lx, ty, lw, 17.0f, 3.0f, toast_ok_ ? kMhOkText : kMhErrText, 0.55f, 0.7f);
+        painter.text(lx + 6.0f, ty + 11.4f, toast_, 7.2f, toast_ok_ ? kMhOkText : kMhErrText, 0.98f, true);
+    }
+
+    // Vertical Divider between Set List and Live Visualizer
+    const float div_x = lx + lw + 8.0f;
+    painter.rect(div_x, py + 31.0f, 0.8f, ph - 55.0f, kMhGoldDim, 0.70f);
+
+    // Right Column: Live Modern MH Visualizer
+    const float rx = div_x + 8.0f;
+    const float rw = (px + pw - 10.0f) - rx;
+    const std::uint32_t gs = valid_game_sys(memory, symbols_);
+
+    if (on_items) {
+        const bool saved = presets_[selected_].saved;
+        std::array<ItemSlot, kItemPouchSlots> view_slots{};
+        if (saved) {
+            view_slots = presets_[selected_].slots;
+        } else if (gs != 0u) {
+            for (std::size_t s = 0; s < kItemPouchSlots; ++s) {
+                view_slots[s] = read_slot(memory, gs + kGameSysPouchBase, s);
+            }
+        }
+        std::size_t used = 0;
+        for (const auto &s : view_slots) {
+            if (s.id != 0u && s.count > 0u) ++used;
+        }
+        const std::string hdr = saved ? ("Item Set " + std::to_string(selected_ + 1) + " — Pouch Preview")
+                                      : "Current Pouch (Press △ to Save)";
+        painter.text(rx, py + 40.5f, hdr, 8.2f, saved ? kMhGoldBright : kMhParchment, 0.96f, true);
+        const std::string cnt = std::to_string(used) + " / 24";
+        const float cw = painter.font_ok() ? painter.measure(cnt, 7.5f, false) : 24.0f;
+        painter.text(rx + rw - cw, py + 40.5f, cnt, 7.5f, kMhMuted, 0.92f, false);
+
+        // 3 x 8 (24-slot) visual pouch grid
+        constexpr std::size_t kCols = 3u;
+        constexpr std::size_t kRows = 8u;
+        const float gap_x = 4.0f;
+        const float gap_y = 2.5f;
+        const float cell_w = (rw - gap_x * static_cast<float>(kCols - 1u)) / static_cast<float>(kCols);
+        const float cell_h = 16.0f;
+        const float grid_y = py + 46.5f;
+
+        for (std::size_t idx = 0; idx < kItemPouchSlots; ++idx) {
+            const std::size_t col = idx / kRows;
+            const std::size_t row = idx % kRows;
+            const float cx = rx + static_cast<float>(col) * (cell_w + gap_x);
+            const float cy = grid_y + static_cast<float>(row) * (cell_h + gap_y);
+            const ItemSlot s = view_slots[idx];
+            const bool occupied = s.id != 0u && s.count > 0u;
+
+            painter.rrect(cx, cy, cell_w, cell_h, 2.5f, kMhRow, occupied ? 0.88f : 0.38f);
+            painter.rrect(cx, cy, cell_w, cell_h, 2.5f, kMhGoldDim, occupied ? 0.55f : 0.22f, 0.65f);
+            if (!occupied) continue;
+
+            const auto info = item_visual_info(s.id);
+            painter.rrect(cx + 2.5f, cy + 3.0f, 3.2f, cell_h - 6.0f, 1.5f, info.accent, 0.96f);
+
+            const std::string name = item_short_name(s.id);
+            painter.text(cx + 8.0f, cy + 10.8f, name, 6.8f, kMhParchment, 0.96f, false);
+
+            const std::string qty = "x" + std::to_string(s.count);
+            const float qw = painter.font_ok() ? painter.measure(qty, 6.8f, true) : 14.0f;
+            painter.text(cx + cell_w - 4.0f - qw, cy + 10.8f, qty, 6.8f, kMhGoldBright, 0.96f, true);
+        }
+    } else {
+        const bool saved = armor_presets_[selected_].saved;
+        ArmorLoadoutPreset view_armor{};
+        if (saved) {
+            view_armor = armor_presets_[selected_];
+        } else if (gs != 0u) {
+            for (std::size_t s = 0; s < kEquipSlots; ++s) {
+                view_armor.pieces[s] = read_piece(memory, gs + kGameSysEquippedBase + static_cast<std::uint32_t>(s) * kEquipPieceSize);
+                view_armor.box_indices[s] = memory.load16(gs + kGameSysEquipIdxBase + static_cast<std::uint32_t>(s) * 2u);
+            }
+        }
+        const std::string hdr = saved ? ("Armor Set " + std::to_string(selected_ + 1) + " — Equipment Inspector")
+                                      : "Current Equipment (Press △ to Save)";
+        painter.text(rx, py + 40.5f, hdr, 8.2f, saved ? kMhGoldBright : kMhParchment, 0.96f, true);
+
+        // Display in modern MH vertical order: Weapon, Head, Chest, Arms, Waist, Legs.
+        struct SlotView {
+            std::size_t raw_slot;
+            const char *tag;
+            mhf::overlay::Color badge;
+        };
+        constexpr std::array<SlotView, kEquipSlots> kOrder{{
+            {0u, "WPN",   {0.89f, 0.56f, 0.24f}},
+            {2u, "HEAD",  {0.44f, 0.72f, 0.92f}},
+            {3u, "CHEST", {0.42f, 0.78f, 0.55f}},
+            {4u, "ARMS",  {0.78f, 0.62f, 0.88f}},
+            {5u, "WAIST", {0.86f, 0.72f, 0.36f}},
+            {1u, "LEGS",  {0.72f, 0.64f, 0.52f}},
+        }};
+
+        const float list_y = py + 48.0f;
+        const float row_h = 21.5f;
+        const float row_stride = 24.0f;
+        for (std::size_t r = 0; r < kEquipSlots; ++r) {
+            const auto &sv = kOrder[r];
+            const float cy = list_y + static_cast<float>(r) * row_stride;
+            const EquipPiece &piece = view_armor.pieces[sv.raw_slot];
+            const bool occ = piece_non_empty(piece);
+
+            painter.rrect(rx, cy, rw, row_h, 3.2f, kMhRow, occ ? 0.88f : 0.42f);
+            painter.rrect(rx, cy, rw, row_h, 3.2f, kMhGoldDim, occ ? 0.58f : 0.25f, 0.7f);
+
+            // Slot tag pill
+            painter.rrect(rx + 4.0f, cy + 4.0f, 34.0f, row_h - 8.0f, 2.5f, sv.badge, occ ? 0.88f : 0.35f);
+            const float tw = painter.font_ok() ? painter.measure(sv.tag, 6.4f, true) : 20.0f;
+            painter.text(rx + 4.0f + (34.0f - tw) * 0.5f, cy + 13.0f, sv.tag, 6.4f,
+                         occ ? mhf::overlay::kInk : kMhMuted, 0.96f, true);
+
+            if (!occ) {
+                painter.text(rx + 44.0f, cy + 13.5f, "Empty", 7.6f, kMhMuted, 0.75f, false);
+                continue;
+            }
+
+            const std::uint16_t piece_id = static_cast<std::uint16_t>(piece[2]) | (static_cast<std::uint16_t>(piece[3]) << 8u);
+            std::string desc = (sv.raw_slot == 0u ? std::string(weapon_type_name(piece[0])) : std::string("Armor")) +
+                               " #" + std::to_string(piece_id);
+            if (piece[1] > 0u) desc += "  Lv." + std::to_string(static_cast<unsigned>(piece[1]));
+            const std::size_t decos = count_decorations(piece);
+            if (decos > 0u) desc += "  [" + std::to_string(decos) + " deco]";
+            painter.text(rx + 44.0f, cy + 13.5f, desc, 7.6f, kMhParchment, 0.96f, false);
+
+            // Live ownership status badge against current equipped / Equipment Box
+            bool equipped_now = false;
+            if (gs != 0u) {
+                const EquipPiece cur = read_piece(memory, gs + kGameSysEquippedBase +
+                                                              static_cast<std::uint32_t>(sv.raw_slot) * kEquipPieceSize);
+                equipped_now = (cur == piece);
+            }
+            const bool in_box = equipped_now || piece_in_equip_box(memory, gs, piece, view_armor.box_indices[sv.raw_slot]);
+            const std::string status = equipped_now ? "Equipped" : (in_box ? "In Box" : "Missing");
+            const mhf::overlay::Color st_bg = equipped_now ? kMhHeader : (in_box ? kMhOkBg : kMhErrBg);
+            const mhf::overlay::Color st_fg = equipped_now ? kMhGoldBright : (in_box ? kMhOkText : kMhErrText);
+            const float st_w = 42.0f;
+            painter.rrect(rx + rw - st_w - 5.0f, cy + 4.5f, st_w, row_h - 9.0f, 2.5f, st_bg, 0.92f);
+            const float st_tw = painter.font_ok() ? painter.measure(status, 6.4f, true) : 26.0f;
+            painter.text(rx + rw - st_w - 5.0f + (st_w - st_tw) * 0.5f, cy + 13.0f, status, 6.4f, st_fg, 0.96f, true);
+        }
     }
 
     // Footer Controls Bar with PSP-style button pills
@@ -507,11 +740,11 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, std::uint64_t n
     auto add_hint = [&](const std::string &btn, float bw, const std::string &act) {
         draw_button_pill(painter, fx, fy, bw, 11.5f, btn);
         fx += bw + 3.5f;
-        fx += painter.text(fx, fy + 8.5f, act, 7.5f, kMhParchment, 0.92f, false) + 7.0f;
+        fx += painter.text(fx, fy + 8.5f, act, 7.5f, kMhParchment, 0.92f, false) + 10.0f;
     };
-    add_hint("O", 13.0f, on_items ? "Load" : "Equip");
-    add_hint("△", 13.0f, "Save");
-    add_hint("L/R", 20.0f, "Tab");
+    add_hint("O", 13.0f, on_items ? "Load Item Set" : "Equip Armor Set");
+    add_hint("△", 13.0f, "Save Current");
+    add_hint("L/R", 20.0f, "Switch Tab");
     add_hint("X", 13.0f, "Close");
     return true;
 }

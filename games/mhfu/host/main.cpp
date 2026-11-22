@@ -628,15 +628,6 @@ void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
 void on_item_box_update(Runtime &rt, Context &) {
     if (!g_item_pouch_loadouts.load(std::memory_order_relaxed)) return;
     g_item_loadouts.mark_box_open(rt.now_us());
-    // While the Item Sets panel is open over the Item Box, suppress the underlying box's button reads.
-    if (g_item_loadouts.panel_open() && region::mh_pad_input.has_value()) {
-        auto &mem = rt.memory();
-        const std::uint32_t pad = mem.load32(*region::mh_pad_input);
-        if (pad != 0u && mem.contains(pad, 24u)) {
-            mem.store32(pad + 0x0Cu, 0u); // pressed buttons
-            mem.store32(pad + 0x10u, 0u); // repeated buttons
-        }
-    }
 }
 constexpr std::uint32_t kCameraFov = 0x64;          // f32 in the camera: the field of view, set from the tilt level
 constexpr std::uint32_t kCameraPresetTable = 0x6C;  // u32 in the camera: the presets (the area's own, or the default)
@@ -1531,14 +1522,17 @@ int main(int argc, char **argv) {
                                            g_capturable_indicator.load(std::memory_order_relaxed));
                     g_target_lock.update(g_monster_tracker, !frontend.game_input_blocked() && pad.right_stick_click,
                                          g_target_lock_camera.load(std::memory_order_relaxed));
+                    frontend.set_game_input_suppressed(false);
                 } else {
                     g_quest_timer_skip.clear();
                     g_infinite_consumables.clear(&rt->memory());
                     g_monster_tracker.clear();
                     g_target_lock.clear();
                     g_damage_numbers.clear();
-                    g_item_loadouts.poll_box_ui(rt->memory(), frontend.game_input_blocked() ? 0u : pad.buttons, now,
+                    const std::uint32_t raw_btns = frontend.game_input_blocked() ? 0u : frontend.raw_buttons();
+                    g_item_loadouts.poll_box_ui(rt->memory(), raw_btns, now,
                                                 g_item_pouch_loadouts.load(std::memory_order_relaxed));
+                    frontend.set_game_input_suppressed(g_item_loadouts.suppress_game_input());
                 }
                 if (now - read_at >= 50'000) {
                     read_at = now;
@@ -1643,27 +1637,39 @@ int main(int argc, char **argv) {
                         }
                     } else if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
-                        auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
-                        if (show_skip) {
-                            qol_painter->begin(*buf, 480, 272, 1.0f);
+                        if (show_skip && !show_cap && !show_lock && !show_dmg) {
+                            const auto [ow, oh] = frontend.overlay_size();
+                            auto buf = std::make_shared<std::vector<std::uint32_t>>(
+                                static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
+                            qol_painter->begin(*buf, ow, oh, static_cast<float>(ow) / 480.0f);
                             g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
                             qol_painter->end();
+                            image = std::move(buf);
+                            qol_overlay_active = true;
+                            frontend.set_game_overlay(image, ow, oh);
+                        } else {
+                            auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
+                            if (show_skip) {
+                                qol_painter->begin(*buf, 480, 272, 1.0f);
+                                g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
+                                qol_painter->end();
+                            }
+                            const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
+                            if (show_cap) mhf::mhfu::MonsterTracker::draw_capturable_badge(*buf, 456, 26, pulse);
+                            if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 456, show_cap ? 52 : 26, pulse);
+                            if (show_dmg) {
+                                const mhf::mhfu::CameraProjection cam{
+                                    g_monster_tracker.player_pos(),
+                                    g_camera_yaw.load(std::memory_order_relaxed),
+                                    frontend.game_aspect(),
+                                    g_camera_yaw_valid.load(std::memory_order_relaxed),
+                                };
+                                g_damage_numbers.render(*buf, cam, now);
+                            }
+                            image = std::move(buf);
+                            qol_overlay_active = true;
+                            frontend.set_game_overlay(image, 480, 272);
                         }
-                        const float pulse = static_cast<float>(now % 2'000'000u) * (6.2831853f / 2'000'000.0f);
-                        if (show_cap) mhf::mhfu::MonsterTracker::draw_capturable_badge(*buf, 456, 26, pulse);
-                        if (show_lock) mhf::mhfu::TargetLock::draw_lock_badge(*buf, 456, show_cap ? 52 : 26, pulse);
-                        if (show_dmg) {
-                            const mhf::mhfu::CameraProjection cam{
-                                g_monster_tracker.player_pos(),
-                                g_camera_yaw.load(std::memory_order_relaxed),
-                                frontend.game_aspect(),
-                                g_camera_yaw_valid.load(std::memory_order_relaxed),
-                            };
-                            g_damage_numbers.render(*buf, cam, now);
-                        }
-                        image = std::move(buf);
-                        qol_overlay_active = true;
-                        frontend.set_game_overlay(image);
                     }
                     shown.reset();
                     return;
@@ -1671,14 +1677,16 @@ int main(int argc, char **argv) {
                 if (g_item_pouch_loadouts.load(std::memory_order_relaxed) && g_item_loadouts.box_open(now)) {
                     if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
-                        auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
-                        qol_painter->begin(*buf, 480, 272, 1.0f);
-                        const bool drew = g_item_loadouts.render_box_ui(*qol_painter, now);
+                        const auto [ow, oh] = frontend.overlay_size();
+                        auto buf = std::make_shared<std::vector<std::uint32_t>>(
+                            static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
+                        qol_painter->begin(*buf, ow, oh, static_cast<float>(ow) / 480.0f);
+                        const bool drew = g_item_loadouts.render_box_ui(*qol_painter, rt->memory(), now);
                         qol_painter->end();
                         if (drew) {
                             image = std::move(buf);
                             qol_overlay_active = true;
-                            frontend.set_game_overlay(image);
+                            frontend.set_game_overlay(image, ow, oh);
                         }
                     }
                     shown.reset();
