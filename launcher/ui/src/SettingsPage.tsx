@@ -698,6 +698,42 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
           <Toggle on={s.betterSharpness ?? false} onToggle={() => onChange({ betterSharpness: !(s.betterSharpness ?? false) })} label="Better sharpness gauge" />
         </div>
         <div className="srow">
+          <div className="slabel"><b>Target lock-on camera (R3)</b><span>Press R3 (or Tab / Middle-Click) to lock onto or cycle large monsters in your area.</span></div>
+          <Toggle on={s.targetLockCamera ?? false} onToggle={() => onChange({ targetLockCamera: !(s.targetLockCamera ?? false) })} label="Target lock-on camera (R3)" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Floating damage numbers</b><span>Displays World/Rise/Wilds-style floating damage numbers when hitting monsters.</span></div>
+          <Toggle on={s.damageNumbers ?? false} onToggle={() => onChange({ damageNumbers: !(s.damageNumbers ?? false) })} label="Floating damage numbers" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Capturable monster indicator</b><span>Shows a blue skull badge when a large monster in your area is ready to capture.</span></div>
+          <Toggle on={s.capturableIndicator ?? false} onToggle={() => onChange({ capturableIndicator: !(s.capturableIndicator ?? false) })} label="Capturable monster indicator" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Quest-start monster tracker (60s)</b><span>Reveals large monsters on the map for the first minute of each quest, then expires naturally.</span></div>
+          <Toggle on={s.questStartTracker ?? false} onToggle={() => onChange({ questStartTracker: !(s.questStartTracker ?? false) })} label="Quest-start monster tracker (60s)" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Skip post-quest countdown</b><span>Hold Select after Quest Clear to fast-forward the 60-second return countdown.</span></div>
+          <Toggle on={s.skipQuestClearTimer ?? false} onToggle={() => onChange({ skipQuestClearTimer: !(s.skipQuestClearTimer ?? false) })} label="Skip post-quest countdown" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Infinite whetstone</b><span>Sharpen without consuming Whetstones (supplies a temporary Whetstone if none carried).</span></div>
+          <Toggle on={s.infiniteWhetstone ?? false} onToggle={() => onChange({ infiniteWhetstone: !(s.infiniteWhetstone ?? false) })} label="Infinite whetstone" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Infinite paintballs</b><span>Carrying at least 1 Paintball gives unlimited throws during quests.</span></div>
+          <Toggle on={s.infinitePaintballs ?? false} onToggle={() => onChange({ infinitePaintballs: !(s.infinitePaintballs ?? false) })} label="Infinite paintballs" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Combo books from item box</b><span>Guarantees 100% combine rate once you own all 5 Books of Combos (in Item Box or Pouch).</span></div>
+          <Toggle on={s.comboBooksFromBox ?? false} onToggle={() => onChange({ comboBooksFromBox: !(s.comboBooksFromBox ?? false) })} label="Combo books from item box" />
+        </div>
+        <div className="srow">
+          <div className="slabel"><b>Item pouch loadouts</b><span>Save and restock up to 5 item pouch presets from your Item Box in Village or Hall (Esc &gt; QoL).</span></div>
+          <Toggle on={s.itemPouchLoadouts ?? false} onToggle={() => onChange({ itemPouchLoadouts: !(s.itemPouchLoadouts ?? false) })} label="Item pouch loadouts" />
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Show hunting horn songs</b><span>Displays the hunting horn's songs, the song being played and active effects during quests.</span></div>
           <Toggle on={s.hornSongs ?? false} onToggle={() => onChange({ hornSongs: !(s.hornSongs ?? false) })} label="Show hunting horn songs" />
         </div>
