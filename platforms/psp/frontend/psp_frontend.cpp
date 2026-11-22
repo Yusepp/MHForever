@@ -201,12 +201,105 @@ struct Frontend::Impl {
     // ever take down their own picture.
     std::shared_ptr<const std::vector<std::uint32_t>> game_image, game_image_shown;
     int game_image_w = 480, game_image_h = 272;
+    std::vector<std::uint32_t> songs_pixels; // protected by overlay.mutex
+    int songs_w = 0, songs_h = 0;
+    float songs_aspect = 0.0f;
+    bool songs_active = false;
     std::atomic<bool> game_input_suppressed{false};
     std::atomic<std::uint32_t> raw_buttons{0};
     using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
     bool dialog_stop{};
     std::filesystem::path font_directory;
+
+    // Premultiplied-alpha Porter-Duff src-over composite of `src` onto `dst` (centered 16:9 if sizes differ).
+    static void composite_over(std::vector<std::uint32_t> &dst, int dw, int dh,
+                               const std::vector<std::uint32_t> &src, int sw, int sh) {
+        if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+        auto blend_px = [](std::uint32_t &d, std::uint32_t s) {
+            if (s == 0u) return;
+            const std::uint32_t sa = s >> 24u;
+            if (sa == 255u || d == 0u) {
+                d = s;
+                return;
+            }
+            const std::uint32_t inv = 255u - sa;
+            const std::uint32_t dr = d & 0xFFu, dg = (d >> 8u) & 0xFFu, db = (d >> 16u) & 0xFFu, da = d >> 24u;
+            const std::uint32_t sr = s & 0xFFu, sg = (s >> 8u) & 0xFFu, sb = (s >> 16u) & 0xFFu;
+            const std::uint32_t r = std::min<std::uint32_t>(255u, sr + (dr * inv + 127u) / 255u);
+            const std::uint32_t g = std::min<std::uint32_t>(255u, sg + (dg * inv + 127u) / 255u);
+            const std::uint32_t b = std::min<std::uint32_t>(255u, sb + (db * inv + 127u) / 255u);
+            const std::uint32_t a = std::min<std::uint32_t>(255u, sa + (da * inv + 127u) / 255u);
+            d = r | (g << 8u) | (b << 16u) | (a << 24u);
+        };
+        if (dw == sw && dh == sh) {
+            const std::size_t n = std::min(dst.size(), src.size());
+            for (std::size_t i = 0; i < n; ++i) blend_px(dst[i], src[i]);
+            return;
+        }
+        // Fit 480:272 source centered inside destination (handles widescreen overlays cleanly).
+        const int fit_w = std::min(dw, dh * 480 / 272);
+        const int fit_h = std::max(1, fit_w * 272 / 480);
+        const int ox = (dw - fit_w) / 2;
+        const int oy = (dh - fit_h) / 2;
+        for (int y = 0; y < fit_h; ++y) {
+            const int sy = std::min(sh - 1, (y * sh) / fit_h);
+            const int dy = oy + y;
+            if (dy < 0 || dy >= dh) continue;
+            const std::size_t srow = static_cast<std::size_t>(sy) * static_cast<std::size_t>(sw);
+            const std::size_t drow = static_cast<std::size_t>(dy) * static_cast<std::size_t>(dw);
+            for (int x = 0; x < fit_w; ++x) {
+                const int sx = std::min(sw - 1, (x * sw) / fit_w);
+                const std::uint32_t s = src[srow + static_cast<std::size_t>(sx)];
+                if (s == 0u) continue;
+                const int dx = ox + x;
+                if (dx >= 0 && dx < dw) blend_px(dst[drow + static_cast<std::size_t>(dx)], s);
+            }
+        }
+    }
+
+    // Publishes the combined songs/HUD-bar + game_image overlay; caller holds overlay.mutex.
+    void publish_quest_and_game_locked() {
+        const bool have_game = game_image != nullptr && !song_placing;
+        if (songs_active && have_game) {
+            overlay.pixels = songs_pixels;
+            composite_over(overlay.pixels, songs_w, songs_h, *game_image, game_image_w, game_image_h);
+            overlay.width = songs_w;
+            overlay.height = songs_h;
+            overlay.aspect = songs_aspect;
+            overlay.visible = true;
+            overlay_owner = OverlayOwner::songs;
+            game_image_shown = game_image;
+            ++overlay.generation;
+        } else if (songs_active) {
+            overlay.pixels = songs_pixels;
+            overlay.width = songs_w;
+            overlay.height = songs_h;
+            overlay.aspect = songs_aspect;
+            overlay.visible = true;
+            overlay_owner = OverlayOwner::songs;
+            game_image_shown.reset();
+            ++overlay.generation;
+        } else if (have_game) {
+            overlay.pixels = *game_image;
+            overlay.width = game_image_w;
+            overlay.height = game_image_h;
+            overlay.aspect = 0.0f;
+            overlay.visible = true;
+            overlay_owner = OverlayOwner::game;
+            game_image_shown = game_image;
+            ++overlay.generation;
+        } else {
+            overlay.pixels.clear();
+            overlay.width = 0;
+            overlay.height = 0;
+            overlay.aspect = 0.0f;
+            overlay.visible = false;
+            overlay_owner = OverlayOwner::none;
+            game_image_shown.reset();
+            ++overlay.generation;
+        }
+    }
 
     void dialog_worker() {
         for (;;) {
@@ -248,7 +341,8 @@ struct Frontend::Impl {
                     const std::optional<SongsView> songs_view = std::move(*songs_pending);
                     songs_pending.reset();
                     lock.unlock();
-                    if (overlay_owner != OverlayOwner::none && overlay_owner != OverlayOwner::songs) continue; // not its turn
+                    if (overlay_owner != OverlayOwner::none && overlay_owner != OverlayOwner::songs &&
+                        overlay_owner != OverlayOwner::game) continue; // not its turn
                     std::vector<std::uint32_t> pixels;
                     if (songs_view) {
                         if (!menu_renderer) menu_renderer = std::make_unique<overlay::MenuRenderer>(font_directory);
@@ -265,16 +359,16 @@ struct Frontend::Impl {
                                                          static_cast<float>(songs_view->hud_size) / 100.0f);
                     }
                     std::lock_guard overlay_lock(overlay.mutex);
-                    const bool free = overlay_owner == OverlayOwner::none || overlay_owner == OverlayOwner::songs;
+                    songs_pixels = std::move(pixels);
+                    songs_w = songs_view ? songs_view->width : 0;
+                    songs_h = songs_view ? songs_view->height : 0;
+                    songs_aspect = songs_view ? songs_view->aspect : 0.0f;
+                    songs_active = songs_view.has_value();
+                    hud_bar_published = songs_view && songs_view->bar.has_value();
+                    const bool free = overlay_owner == OverlayOwner::none || overlay_owner == OverlayOwner::songs ||
+                                      overlay_owner == OverlayOwner::game;
                     if (!menu_open && !dialog_visible && free) {
-                        overlay.pixels = std::move(pixels);
-                        overlay.width = songs_view ? songs_view->width : 0;
-                        overlay.aspect = songs_view ? songs_view->aspect : 0.0f;
-                        overlay.height = songs_view ? songs_view->height : 0;
-                        overlay.visible = songs_view.has_value();
-                        hud_bar_published = songs_view && songs_view->bar.has_value();
-                        overlay_owner = songs_view ? OverlayOwner::songs : OverlayOwner::none;
-                        ++overlay.generation;
+                        publish_quest_and_game_locked();
                     }
                     continue;
                 }
@@ -487,24 +581,27 @@ void Frontend::set_game_overlay(std::shared_ptr<const std::vector<std::uint32_t>
         image.reset();
     }
     Impl &impl = *impl_;
-    impl.game_image = image;
+    if (impl.gpu_state != 1) {
+        impl.game_image = std::move(image);
+        impl.game_image_w = width;
+        impl.game_image_h = height;
+        return;
+    }
+    std::lock_guard lock(impl.overlay.mutex);
+    const bool unchanged = (image == impl.game_image_shown && width == impl.game_image_w && height == impl.game_image_h);
+    impl.game_image = std::move(image);
     impl.game_image_w = width;
     impl.game_image_h = height;
-    if (impl.gpu_state != 1) return;
-    std::lock_guard lock(impl.overlay.mutex);
     const auto owner = impl.overlay_owner.load();
-    const auto action = game_overlay_action(owner, image != nullptr, impl.menu_open || impl.dialog_visible || impl.song_placing);
-    if (action == GameOverlayAction::keep) return;
-    if (action == GameOverlayAction::hide) image.reset();
-    if (image == impl.game_image_shown && owner == Impl::OverlayOwner::game && image) return;
-    impl.overlay.pixels = image ? *image : std::vector<std::uint32_t>{};
-    impl.overlay.width = image ? width : 0;
-    impl.overlay.height = image ? height : 0;
-    impl.overlay.aspect = 0.0f;
-    impl.overlay.visible = image != nullptr;
-    impl.overlay_owner = image ? Impl::OverlayOwner::game : Impl::OverlayOwner::none;
-    impl.game_image_shown = std::move(image);
-    ++impl.overlay.generation;
+    if (impl.menu_open || impl.dialog_visible || impl.song_placing ||
+        owner == Impl::OverlayOwner::menu || owner == Impl::OverlayOwner::dialog || owner == Impl::OverlayOwner::notice) {
+        return;
+    }
+    if (unchanged && ((impl.game_image && (owner == Impl::OverlayOwner::game || owner == Impl::OverlayOwner::songs)) ||
+                      (!impl.game_image && (owner == Impl::OverlayOwner::none || (owner == Impl::OverlayOwner::songs && impl.songs_active))))) {
+        return;
+    }
+    impl.publish_quest_and_game_locked();
 }
 
 void Frontend::set_song_panel(std::optional<overlay::SongPanel> panel) {
