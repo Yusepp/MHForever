@@ -150,6 +150,7 @@ mh_carve_invuln_damage    = "game_task.ovl 0x09A618E4 call" # jal Player::proces
 mh_carve_invuln_roar_wind = "game_task.ovl 0x09A619D4 call" # jal Player::process_roar_wind_tremor (a0 is Player*)
 mh_combine_rate_done      = "executable 0x0885C0C8 call" # epilogue of combine rate calc (v0 holds 0..100 or -1)
 mh_enemy_damage_apply     = "game_task.ovl 0x09AC2C94 call" # Enemy::process_damage before subtracting sp+62 damage from Enemy+0x2E4 (s5=Enemy*)
+mh_item_box_update        = "lobby_task.ovl 0x09AD7B68 call" # House & Guild Hall Item Box menu per-frame update
 
 # Words FUComplete's PRELOAD.BIN and MODLOAD.BIN rewrite at run time, according to the options in its CONFIG.BIN. A
 # function that holds one checks it on entry and runs in the interpreter when it changed, so FUComplete's options apply

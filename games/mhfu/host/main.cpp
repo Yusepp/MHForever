@@ -623,6 +623,20 @@ void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
     g_damage_numbers.on_enemy_damage_hook(rt.memory(), ctx.gpr[kRegS5], ctx.gpr[kRegSp], rt.now_us(),
                                           g_damage_numbers_enabled.load(std::memory_order_relaxed));
 }
+
+void on_item_box_update(Runtime &rt, Context &) {
+    if (!g_item_pouch_loadouts.load(std::memory_order_relaxed)) return;
+    g_item_loadouts.mark_box_open(rt.now_us());
+    // While the Item Sets panel is open over the Item Box, suppress the underlying box's button reads.
+    if (g_item_loadouts.panel_open() && region::mh_pad_input.has_value()) {
+        auto &mem = rt.memory();
+        const std::uint32_t pad = mem.load32(*region::mh_pad_input);
+        if (pad != 0u && mem.contains(pad, 24u)) {
+            mem.store32(pad + 0x0Cu, 0u); // pressed buttons
+            mem.store32(pad + 0x10u, 0u); // repeated buttons
+        }
+    }
+}
 constexpr std::uint32_t kCameraFov = 0x64;          // f32 in the camera: the field of view, set from the tilt level
 constexpr std::uint32_t kCameraPresetTable = 0x6C;  // u32 in the camera: the presets (the area's own, or the default)
 constexpr std::uint32_t kCameraPreset = 0x70;       // u32 in the camera: the preset the camera moves to
@@ -1353,6 +1367,7 @@ int main(int argc, char **argv) {
         }
         runtime.register_hook("mh_combine_rate_done", &on_combine_rate_done);
         runtime.register_hook("mh_enemy_damage_apply", &on_enemy_damage_apply);
+        runtime.register_hook("mh_item_box_update", &on_item_box_update);
         if (!controls_file.empty()) {
             g_item_loadouts.set_storage_path((std::filesystem::path(controls_file).parent_path() / "item_loadouts.txt").string());
         } else if (!options.memstick_root.empty()) {
@@ -1521,6 +1536,8 @@ int main(int argc, char **argv) {
                     g_monster_tracker.clear();
                     g_target_lock.clear();
                     g_damage_numbers.clear();
+                    g_item_loadouts.poll_box_ui(rt->memory(), frontend.game_input_blocked() ? 0u : pad.buttons, now,
+                                                g_item_pouch_loadouts.load(std::memory_order_relaxed));
                 }
                 if (now - read_at >= 50'000) {
                     read_at = now;
@@ -1640,6 +1657,19 @@ int main(int argc, char **argv) {
                         }
                         image = std::move(buf);
                         frontend.set_game_overlay(image);
+                    }
+                    shown.reset();
+                    return;
+                }
+                const std::uint64_t now = rt->now_us();
+                if (g_item_pouch_loadouts.load(std::memory_order_relaxed) && g_item_loadouts.box_open(now)) {
+                    if (now - hud_drawn_at >= 33'000u) {
+                        hud_drawn_at = now;
+                        auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
+                        if (g_item_loadouts.render_box_ui(*buf, now)) {
+                            image = std::move(buf);
+                            frontend.set_game_overlay(image);
+                        }
                     }
                     shown.reset();
                     return;

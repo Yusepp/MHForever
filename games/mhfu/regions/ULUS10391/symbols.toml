@@ -161,3 +161,4 @@ mh_carve_invuln_damage    = "game_task.ovl 0x09A666E4 call" # jal Player::proces
 mh_carve_invuln_roar_wind = "game_task.ovl 0x09A667D4 call" # jal Player::process_roar_wind_tremor (a0 is Player*)
 mh_combine_rate_done      = "executable 0x0885C0D0 call" # epilogue of combine rate calc (v0 holds 0..100 or -1)
 mh_enemy_damage_apply     = "game_task.ovl 0x09AC7AC4 call" # Enemy::process_damage before subtracting sp+62 damage from Enemy+0x2E4 (s5=Enemy*)
+mh_item_box_update        = "lobby_task.ovl 0x09ADCCD0 call" # House & Guild Hall Item Box menu per-frame update

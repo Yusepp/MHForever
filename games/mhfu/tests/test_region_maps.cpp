@@ -128,6 +128,8 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
         } else if (p.patch.name == "mh_enemy_damage_apply") {
             MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+        } else if (p.patch.name == "mh_item_box_update") {
+            MHF_CHECK(p.module == "lobby_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
         } else if (p.patch.name.starts_with("mh_enemy_")) {
             MHF_CHECK(p.module == "game_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             guild_scaling_patches.insert(p.patch.name);
