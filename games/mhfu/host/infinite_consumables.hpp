@@ -17,12 +17,12 @@ struct InfiniteConsumablesSymbols {
 };
 
 // MHFU item IDs (verified identical across EU, US, JP, FUComplete).
-inline constexpr std::uint16_t kItemPaintball = 57u;
+inline constexpr std::uint16_t kItemPaintball = 58u;
 inline constexpr std::uint16_t kItemWhetstone = 153u;
 inline constexpr std::uint16_t kItemMiniWhetstone = 867u;
 
-// Keeps Whetstones (World/Rise/Wilds-style infinite sharpening) and Paintballs (carrying >= 1 = infinite)
-// from being consumed during quests without creating permanent items in the village.
+// Keeps Whetstones and Paintballs infinite during quests (restoring consumed uses and supplying a
+// temporary item when none were packed, removed cleanly upon returning to the village).
 class InfiniteConsumables {
 public:
     explicit InfiniteConsumables(InfiniteConsumablesSymbols symbols = {}) noexcept;
@@ -37,11 +37,13 @@ private:
         std::uint16_t count{0};
     };
 
-    void remove_temp_whetstone(psprecomp::GuestMemory &memory, std::uint32_t game_sys) noexcept;
+    void remove_temp_item(psprecomp::GuestMemory &memory, std::uint32_t game_sys,
+                          std::optional<std::size_t> &slot, std::uint16_t item_id) noexcept;
 
     InfiniteConsumablesSymbols symbols_;
     std::array<SlotSnapshot, kPouchSlots> prev_slots_{};
     std::optional<std::size_t> temp_whetstone_slot_;
+    std::optional<std::size_t> temp_paintball_slot_;
     bool in_quest_{false};
 };
 

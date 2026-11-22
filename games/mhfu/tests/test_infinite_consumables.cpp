@@ -36,30 +36,31 @@ void test_infinite_paintballs_and_whetstone() {
     MHF_CHECK(mem.load16(kPouchBase + 6u) == 5u);
 }
 
-void test_temp_whetstone_granted_and_cleaned_up() {
+void test_temp_whetstone_and_paintball_granted_and_cleaned_up() {
     psprecomp::GuestMemory mem;
     mem.store32(kGameSysPtrAddr, kGameSysAddr);
     mem.store8(kGameSysAddr + 0x2Eu, 2u); // active quest, empty pouch
 
     mhf::mhfu::InfiniteConsumables qol({kGameSysPtrAddr});
-    qol.poll(mem, true, false);
+    qol.poll(mem, true, true);
 
-    // Temporary whetstone placed in last empty slot (23).
+    // Temporary whetstone in slot 23, temporary paintball in slot 22.
     const std::uint32_t slot23 = kPouchBase + 23u * 4u;
-    MHF_CHECK(mem.load16(slot23) == mhf::mhfu::kItemWhetstone);
-    MHF_CHECK(mem.load16(slot23 + 2u) == 1u);
+    const std::uint32_t slot22 = kPouchBase + 22u * 4u;
+    MHF_CHECK(mem.load16(slot23) == mhf::mhfu::kItemWhetstone && mem.load16(slot23 + 2u) == 1u);
+    MHF_CHECK(mem.load16(slot22) == mhf::mhfu::kItemPaintball && mem.load16(slot22 + 2u) == 1u);
 
-    // Return to village -> temporary whetstone removed cleanly.
+    // Return to village -> both temporary items removed cleanly.
     mem.store8(kGameSysAddr + 0x2Eu, 0u);
-    qol.poll(mem, true, false);
-    MHF_CHECK(mem.load16(slot23) == 0u);
-    MHF_CHECK(mem.load16(slot23 + 2u) == 0u);
+    qol.poll(mem, true, true);
+    MHF_CHECK(mem.load16(slot23) == 0u && mem.load16(slot23 + 2u) == 0u);
+    MHF_CHECK(mem.load16(slot22) == 0u && mem.load16(slot22 + 2u) == 0u);
 }
 
 } // namespace
 
 int main() {
     test_infinite_paintballs_and_whetstone();
-    test_temp_whetstone_granted_and_cleaned_up();
+    test_temp_whetstone_and_paintball_granted_and_cleaned_up();
     return 0;
 }

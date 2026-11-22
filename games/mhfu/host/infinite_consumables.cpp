@@ -22,22 +22,27 @@ std::uint32_t pouch_slot_addr(std::uint32_t game_sys, std::size_t slot) noexcept
 
 InfiniteConsumables::InfiniteConsumables(InfiniteConsumablesSymbols symbols) noexcept : symbols_(symbols) {}
 
-void InfiniteConsumables::remove_temp_whetstone(psprecomp::GuestMemory &memory, std::uint32_t game_sys) noexcept {
-    if (!temp_whetstone_slot_) return;
-    const std::uint32_t addr = pouch_slot_addr(game_sys, *temp_whetstone_slot_);
-    if (memory.contains(addr, kSlotSize) && memory.load16(addr) == kItemWhetstone) {
+void InfiniteConsumables::remove_temp_item(psprecomp::GuestMemory &memory, std::uint32_t game_sys,
+                                           std::optional<std::size_t> &slot, std::uint16_t item_id) noexcept {
+    if (!slot) return;
+    const std::uint32_t addr = pouch_slot_addr(game_sys, *slot);
+    if (memory.contains(addr, kSlotSize) && memory.load16(addr) == item_id) {
         memory.store16(addr, 0u);
         memory.store16(addr + 2u, 0u);
     }
-    temp_whetstone_slot_.reset();
+    slot.reset();
 }
 
 void InfiniteConsumables::clear(psprecomp::GuestMemory *memory) noexcept {
     if (memory != nullptr && symbols_.complete() && readable_word_address(*memory, *symbols_.game_sys)) {
         const std::uint32_t game_sys = memory->load32(*symbols_.game_sys);
-        if (game_sys != 0u) remove_temp_whetstone(*memory, game_sys);
+        if (game_sys != 0u) {
+            remove_temp_item(*memory, game_sys, temp_whetstone_slot_, kItemWhetstone);
+            remove_temp_item(*memory, game_sys, temp_paintball_slot_, kItemPaintball);
+        }
     } else {
         temp_whetstone_slot_.reset();
+        temp_paintball_slot_.reset();
     }
     prev_slots_.fill({});
     in_quest_ = false;
@@ -58,16 +63,18 @@ void InfiniteConsumables::poll(psprecomp::GuestMemory &memory, bool infinite_whe
     const std::uint8_t phase = memory.load8(game_sys + kGameSysQuestPhase);
     const bool quest_running = phase == kQuestPhaseActive || phase == kQuestPhasePostClear;
     if (!quest_running || (!infinite_whetstone && !infinite_paintballs)) {
-        remove_temp_whetstone(memory, game_sys);
+        remove_temp_item(memory, game_sys, temp_whetstone_slot_, kItemWhetstone);
+        remove_temp_item(memory, game_sys, temp_paintball_slot_, kItemPaintball);
         prev_slots_.fill({});
         in_quest_ = false;
         return;
     }
 
-    if (!infinite_whetstone) remove_temp_whetstone(memory, game_sys);
+    if (!infinite_whetstone) remove_temp_item(memory, game_sys, temp_whetstone_slot_, kItemWhetstone);
+    if (!infinite_paintballs) remove_temp_item(memory, game_sys, temp_paintball_slot_, kItemPaintball);
 
     bool has_whetstone = false;
-    std::optional<std::size_t> last_empty_slot;
+    bool has_paintball = false;
 
     for (std::size_t i = 0; i < kPouchSlots; ++i) {
         const std::uint32_t addr = pouch_slot_addr(game_sys, i);
@@ -88,18 +95,35 @@ void InfiniteConsumables::poll(psprecomp::GuestMemory &memory, bool infinite_whe
         }
 
         if ((id == kItemWhetstone || id == kItemMiniWhetstone) && count > 0u) has_whetstone = true;
-        if (id == 0u && count == 0u) last_empty_slot = i;
+        if (id == kItemPaintball && count > 0u) has_paintball = true;
         prev_slots_[i] = {id, count};
     }
 
-    // World/Rise/Wilds style: if the hunter brought no Whetstones, provide a temporary one during the quest.
-    if (infinite_whetstone && !has_whetstone && last_empty_slot.has_value()) {
-        const std::size_t slot = *last_empty_slot;
-        const std::uint32_t addr = pouch_slot_addr(game_sys, slot);
-        memory.store16(addr, kItemWhetstone);
-        memory.store16(addr + 2u, 1u);
-        prev_slots_[slot] = {kItemWhetstone, 1u};
-        temp_whetstone_slot_ = slot;
+    auto find_last_empty = [&]() -> std::optional<std::size_t> {
+        for (std::size_t i = kPouchSlots; i > 0u; --i) {
+            if (prev_slots_[i - 1u].id == 0u && prev_slots_[i - 1u].count == 0u) return i - 1u;
+        }
+        return std::nullopt;
+    };
+
+    // World/Rise/Wilds style: supply a temporary Whetstone / Paintball if none were packed.
+    if (infinite_whetstone && !has_whetstone) {
+        if (const auto slot = find_last_empty()) {
+            const std::uint32_t addr = pouch_slot_addr(game_sys, *slot);
+            memory.store16(addr, kItemWhetstone);
+            memory.store16(addr + 2u, 1u);
+            prev_slots_[*slot] = {kItemWhetstone, 1u};
+            temp_whetstone_slot_ = *slot;
+        }
+    }
+    if (infinite_paintballs && !has_paintball) {
+        if (const auto slot = find_last_empty()) {
+            const std::uint32_t addr = pouch_slot_addr(game_sys, *slot);
+            memory.store16(addr, kItemPaintball);
+            memory.store16(addr + 2u, 1u);
+            prev_slots_[*slot] = {kItemPaintball, 1u};
+            temp_paintball_slot_ = *slot;
+        }
     }
 
     in_quest_ = true;
