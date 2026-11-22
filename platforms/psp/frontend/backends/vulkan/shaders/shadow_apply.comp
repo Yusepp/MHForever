@@ -1,0 +1,86 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 1, binding = 0, rgba8) uniform image2D u_scene_color;
+
+layout(push_constant) uniform ShadowApplyPush {
+    uint factor_tex;
+    uint depth_tex;
+    uint width;
+    uint height;
+    int step_px;
+    int down;
+} pc;
+
+// Shared tile cache for the 3x3 blur neighborhood (reduces global texture fetches on GPU).
+shared vec4 s_tile[10][10];
+
+void main() {
+    ivec2 full = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 fsize = textureSize(u_textures[nonuniformEXT(pc.factor_tex)], 0) - ivec2(1);
+    int down = max(pc.down, 1);
+
+    // Populate LDS tile when down == 1 (common full-res case).
+    ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+    ivec2 base = ivec2(gl_WorkGroupID.xy) * 8;
+    if (down == 1 && pc.step_px == 1) {
+        for (int dy = lid.y; dy < 10; dy += 8) {
+            for (int dx = lid.x; dx < 10; dx += 8) {
+                ivec2 coord = clamp(base + ivec2(dx - 1, dy - 1), ivec2(0), fsize);
+                s_tile[dy][dx] = texelFetch(u_textures[nonuniformEXT(pc.factor_tex)], coord, 0);
+            }
+        }
+    }
+    barrier();
+
+    if (full.x >= int(pc.width) || full.y >= int(pc.height)) return;
+
+    ivec2 ip = clamp(full / down, ivec2(0), fsize);
+    vec4 sum = vec4(0.0);
+    vec3 sharp;
+    if (down == 1 && pc.step_px == 1) {
+        for (int y = 0; y <= 2; ++y) {
+            for (int x = 0; x <= 2; ++x) sum += s_tile[lid.y + y][lid.x + x];
+        }
+        sharp = s_tile[lid.y + 1][lid.x + 1].rgb;
+    } else {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                sum += texelFetch(u_textures[nonuniformEXT(pc.factor_tex)],
+                                  clamp(ip + ivec2(x, y) * pc.step_px, ivec2(0), fsize), 0);
+            }
+        }
+        sharp = texelFetch(u_textures[nonuniformEXT(pc.factor_tex)], ip, 0).rgb;
+    }
+    sum /= 9.0;
+
+    if (down > 1) {
+        float here = texelFetch(u_textures[nonuniformEXT(pc.depth_tex)], full, 0).r;
+        vec2 at = (vec2(full) + 0.5) / float(down) - 0.5;
+        ivec2 corner = ivec2(floor(at));
+        vec2 f = at - vec2(corner);
+        vec3 total = vec3(0.0);
+        float weight = 0.0, nearest = 1e9;
+        vec3 closest = sharp;
+        for (int y = 0; y <= 1; ++y) {
+            for (int x = 0; x <= 1; ++x) {
+                ivec2 k = clamp(corner + ivec2(x, y), ivec2(0), fsize);
+                float gap = abs(texelFetch(u_textures[nonuniformEXT(pc.depth_tex)], k * down, 0).r - here);
+                float w = (x == 1 ? f.x : 1.0 - f.x) * (y == 1 ? f.y : 1.0 - f.y) * exp(-gap * 4000.0) + 1e-5;
+                vec3 c = texelFetch(u_textures[nonuniformEXT(pc.factor_tex)], k, 0).rgb;
+                total += c * w;
+                weight += w;
+                if (gap < nearest) { nearest = gap; closest = c; }
+            }
+        }
+        sharp = weight > 0.02 ? total / weight : closest;
+    }
+
+    vec3 factor = mix(sharp, sum.rgb, clamp(sum.a * 4.0, 0.0, 1.0));
+    vec4 scene = imageLoad(u_scene_color, full);
+    imageStore(u_scene_color, full, vec4(scene.rgb * factor, scene.a));
+}

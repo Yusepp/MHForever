@@ -20,6 +20,7 @@ export interface Game {
 
 export interface Settings {
   scale: number; // 1..4
+  graphicsBackend?: 'opengl' | 'vulkan' | 'software'; // rendering backend (vulkan is experimental)
   fullscreen: boolean;
   smoothTextures: boolean;
   packMipmaps?: boolean; // texture packs: mip levels made for images that ship none (softer at a distance, no shimmer)
@@ -258,7 +259,7 @@ function simulated(): Native {
     friends: [],
     blocked: [],
     settings: {
-      scale: 4, fullscreen: false, smoothTextures: false, packMipmaps: false, anisotropy: 16, widescreen: false, fps: 30, hudSize: 100, trueWeaponValues: false, fastSupplyBox: false, questAutoclear: false,
+      scale: 4, graphicsBackend: 'opengl', fullscreen: false, smoothTextures: false, packMipmaps: false, anisotropy: 16, widescreen: false, fps: 30, hudSize: 100, trueWeaponValues: false, fastSupplyBox: false, questAutoclear: false,
       smithyBrowse: false, smithyLayout: false, analogCamera: false, analogCameraTurnSpeed: 100, analogCameraTiltSpeed: 100, mouseCamera: false, mouseCameraSpeed: 100,
       gatheringAssistance: false, modernCarving: false, invulnerableCarveQuest: false, betterSharpness: false, keyQuestMarkers: false, hornSongs: false, hornSongsPlace: 'next-to-sheet', guildQuestScaling: false, language: '', copyImage: false, musicVolume: 80, sfxVolume: 90,
       keys: { ...defaultKeys }, pad: { ...defaultPad }, adhocServer: '', adhocRoom: '', checkUpdates: true,

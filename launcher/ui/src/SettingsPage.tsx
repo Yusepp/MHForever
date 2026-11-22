@@ -529,6 +529,18 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
       <motion.div className="glass section" {...rise(0.06)}>
         <h3>Video</h3>
         <div className="srow">
+          <div className="slabel">
+            <b>Graphics backend</b>
+            <span>{(s.graphicsBackend ?? 'opengl') === 'vulkan' ? 'Vulkan 1.3+ (experimental).' : (s.graphicsBackend ?? 'opengl') === 'software' ? 'CPU software renderer.' : 'OpenGL 3.3 (default).'}</span>
+          </div>
+          <div className="seg wide" role="radiogroup" aria-label="Graphics backend" style={{ '--n': 3 } as CSSProperties}>
+            <span className="pill" style={{ transform: `translateX(${Math.max(0, ['opengl', 'vulkan', 'software'].indexOf(s.graphicsBackend ?? 'opengl')) * 100}%)` }} />
+            {([['opengl', 'OpenGL'], ['vulkan', 'Vulkan'], ['software', 'Software']] as const).map(([id, label]) => (
+              <button key={id} className={(s.graphicsBackend ?? 'opengl') === id ? 'on' : ''} role="radio" aria-checked={(s.graphicsBackend ?? 'opengl') === id} onClick={() => onChange({ graphicsBackend: id })}>{label}</button>
+            ))}
+          </div>
+        </div>
+        <div className="srow">
           <div className="slabel"><b>Internal resolution</b><span>{resolutions[s.scale - 1]}{s.scale === 4 ? ' (recommended)' : ''}</span></div>
           <div className="seg wide" role="radiogroup" aria-label="Internal resolution" style={{ '--n': resolutions.length } as CSSProperties}>
             <span className="pill" style={{ transform: `translateX(${(s.scale - 1) * 100}%)` }} />

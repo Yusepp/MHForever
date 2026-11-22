@@ -44,6 +44,8 @@ struct CapturedInput {
     std::string name;
 };
 
+enum class GraphicsApi { Software, OpenGL, Vulkan };
+
 struct HostOptions {
     const char *title = "MH-Forever";
     int width = 480;   // emulated screen size
@@ -51,7 +53,8 @@ struct HostOptions {
     int scale = 2;     // initial window scale
     bool hidden = false; // no visible window (tests, servers)
     int audio_rate = 44100;
-    bool opengl = false; // window for an OpenGL 3.3 core context (the caller draws); no 2D renderer until needed
+    bool opengl = false; // legacy shorthand: treated as GraphicsApi::OpenGL when graphics_api == Software
+    GraphicsApi graphics_api = GraphicsApi::Software;
 };
 
 class SdlHost {

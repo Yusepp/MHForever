@@ -1,0 +1,138 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba8) uniform writeonly image2D u_factor_out;
+
+struct ShadowParams {
+    vec4 proj;          // 0, 5, 10, 11
+    vec4 proj_z_vz;     // proj14, proj15, vz_scale, vz_center
+    vec4 vp;            // vx_scale, vy_scale, vx_center, vy_center
+    vec4 center_pixel;  // xyz = center, w = pixel scale
+    vec4 right_dark;    // xyz = right, w = darkness
+    vec4 up_bias;       // xyz = up, w = bias
+    vec4 dir_drop;      // xyz = dir, w = drop
+    vec4 half_soft;     // xyz = half, w = soft
+    vec4 player_box;    // xyz = player_center, w = player_half
+    vec4 fog_down;      // xyz = fog, w = down
+    vec4 rc0_pad;
+    vec4 rc1_pad;
+    vec4 rc2_pad;
+    vec4 t_pad;
+    uvec4 tex_indices;  // x = depth, y = map, z = kind, w = player_map
+    uvec4 size_sampler; // x = out_w, y = out_h, z = nearest_sampler, w = linear_sampler
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer ShadowParamsBuf {
+    ShadowParams p;
+};
+
+layout(push_constant) uniform ShadowPush {
+    ShadowParamsBuf buf;
+} pc;
+
+float eye_z(ShadowParams p, float d) {
+    float zn = (d * 65535.0 - p.proj_z_vz.w) / p.proj_z_vz.z;
+    return (p.proj_z_vz.x - zn * p.proj_z_vz.y) / (zn * p.proj.w - p.proj.z);
+}
+
+float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+
+void main() {
+    ShadowParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(p.size_sampler.x) || gid.y >= int(p.size_sampler.y)) return;
+
+    int down = max(int(p.fog_down.w), 1);
+    ivec2 ip = gid * down;
+    float d = texelFetch(u_textures[nonuniformEXT(p.tex_indices.x)], ip, 0).r;
+    if (d >= 0.99995) {
+        imageStore(u_factor_out, gid, vec4(1.0, 1.0, 1.0, 0.0));
+        return;
+    }
+
+    float ze = eye_z(p, d);
+    float dark = p.right_dark.w * (p.fog_down.z > 0.0 ? pow(clamp((ze + p.fog_down.x) * p.fog_down.y, 0.0, 1.0), p.fog_down.z) : 1.0);
+    float w = p.proj.w * ze + p.proj_z_vz.y;
+    vec2 ndc = ((vec2(ip) + 0.5) / p.center_pixel.w - p.vp.zw) / p.vp.xy;
+    vec3 x = vec3(ndc.x * w / p.proj.x, ndc.y * w / p.proj.y, ze) - p.t_pad.xyz;
+    vec3 v = vec3(dot(p.rc0_pad.xyz, x), dot(p.rc1_pad.xyz, x), dot(p.rc2_pad.xyz, x)) - p.center_pixel.xyz;
+    vec3 l = vec3(dot(v, p.right_dark.xyz) / p.half_soft.x,
+                  dot(v, p.up_bias.xyz) / p.half_soft.y,
+                  -dot(v, p.dir_drop.xyz) / p.half_soft.z);
+    float edge = max(abs(l.x), abs(l.y));
+    float step_size = abs(eye_z(p, d + 1.0 / 65535.0) - ze);
+    float turn = ign(vec2(gid)) * 6.2831853;
+
+    // Player shadow map (12 taps).
+    float player = 0.0;
+    if (p.player_box.w > 0.0 && p.tex_indices.w != 0u) {
+        vec3 from = v + p.center_pixel.xyz - p.player_box.xyz;
+        vec3 pl = vec3(dot(from, p.right_dark.xyz), dot(from, p.up_bias.xyz), -dot(from, p.dir_drop.xyz) / 3.0) / p.player_box.w;
+        if (max(abs(pl.x), abs(pl.y)) < 1.0) {
+            float pspan = 6.0 * p.player_box.w;
+            float ptex = 1.0 / float(textureSize(u_textures[nonuniformEXT(p.tex_indices.w)], 0).x);
+            vec2 puv = pl.xy * 0.5 + 0.5;
+            float phere = min(pl.z * 0.5 + 0.5, 1.0);
+            float pbias = (p.up_bias.w + 1.5 * step_size) / pspan;
+            for (int i = 0; i < 12; ++i) {
+                float a = turn + float(i) * 2.399963, r = 2.5 * sqrt((float(i) + 0.5) / 12.0);
+                float sample_d = texture(sampler2D(u_textures[nonuniformEXT(p.tex_indices.w)],
+                                                   u_samplers[nonuniformEXT(p.size_sampler.z)]),
+                                         puv + vec2(cos(a), sin(a)) * r * ptex).r;
+                if (phere - sample_d > pbias) player += 1.0;
+            }
+            player /= 12.0;
+        }
+    }
+
+    if (edge >= 1.0 || abs(l.z) >= 1.0 || p.tex_indices.y == 0u) {
+        imageStore(u_factor_out, gid, vec4(vec3(1.0 - dark * player), 0.0));
+        return;
+    }
+
+    vec2 uv = l.xy * 0.5 + 0.5;
+    float here = l.z * 0.5 + 0.5, span = 2.0 * p.half_soft.z;
+    float map_sz = float(textureSize(u_textures[nonuniformEXT(p.tex_indices.y)], 0).x);
+    float texel = 1.0 / map_sz;
+    float fine = map_sz / 8192.0;
+    float bias = (p.up_bias.w / sqrt(fine) + 1.5 * step_size) / span;
+
+    float blockers = 0.0, found = 0.0, scenery = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        float a = turn + float(i) * 2.399963, q = (float(i) + 0.5) / 8.0, r = 24.0 * fine * q * q;
+        vec2 at = uv + vec2(cos(a), sin(a)) * r * texel;
+        float gap = here - texture(sampler2D(u_textures[nonuniformEXT(p.tex_indices.y)],
+                                             u_samplers[nonuniformEXT(p.size_sampler.z)]), at).r;
+        if (gap > bias) {
+            blockers += gap * span;
+            found += 1.0;
+            scenery += texture(sampler2D(u_textures[nonuniformEXT(p.tex_indices.z)],
+                                         u_samplers[nonuniformEXT(p.size_sampler.z)]), at).r;
+        }
+    }
+    if (found == 0.0) {
+        imageStore(u_factor_out, gid, vec4(vec3(1.0 - dark * player), 0.0));
+        return;
+    }
+
+    float share = scenery / found;
+    float radius = min(p.half_soft.w + blockers / found * mix(0.005, 0.03, share) / (2.0 * p.half_soft.x * texel), 32.0 * fine);
+    radius = max(radius, 16.0 * fine * share);
+    float shade = 0.0;
+    for (int i = 0; i < 16; ++i) {
+        float a = turn + float(i) * 2.399963, r = radius * sqrt((float(i) + 0.5) / 16.0);
+        float gap = here - texture(sampler2D(u_textures[nonuniformEXT(p.tex_indices.y)],
+                                             u_samplers[nonuniformEXT(p.size_sampler.z)]),
+                                   uv + vec2(cos(a), sin(a)) * r * texel).r;
+        if (gap > bias) shade += 1.0 - smoothstep(0.6 * p.dir_drop.w, p.dir_drop.w, gap * span);
+    }
+    shade *= (1.0 - smoothstep(0.9, 1.0, edge)) / 16.0;
+    imageStore(u_factor_out, gid, vec4(vec3(1.0 - dark * max(shade, player)), share));
+}

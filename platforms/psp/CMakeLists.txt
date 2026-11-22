@@ -41,12 +41,48 @@ target_link_libraries(mhf_texture_images PRIVATE mhf_basisu mhf_stb_image)
 mhf_target_warnings(mhf_texture_images)
 
 if(MHF_WITH_SDL)
-    add_library(mhf_psp_frontend STATIC frontend/psp_frontend.cpp frontend/gl_backend.cpp frontend/dialog_overlay.cpp)
-    target_include_directories(mhf_psp_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
-                               PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
+    # OpenGL 3.3 hardware backend (isolated from Vulkan dependencies).
+    add_library(mhf_psp_backend_opengl STATIC
+        frontend/backends/opengl/gl_backend.cpp)
+    target_include_directories(mhf_psp_backend_opengl
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
+    target_link_libraries(mhf_psp_backend_opengl
+        PUBLIC mhf_psp_runtime
+        PRIVATE mhf_core_host mhf_psp_interpolation mhf_texture_pack mhf_texture_images)
+    mhf_target_warnings(mhf_psp_backend_opengl)
+
+    # Vulkan 1.3+ hardware backend (owns volk, VMA, Vulkan-Headers, and SPIR-V shaders).
+    add_library(mhf_psp_backend_vulkan STATIC
+        frontend/backends/vulkan/vk_backend.cpp
+        frontend/backends/vulkan/vk_context.cpp
+        frontend/backends/vulkan/vk_swapchain.cpp
+        frontend/backends/vulkan/vk_descriptors.cpp
+        frontend/backends/vulkan/vk_buffers.cpp
+        frontend/backends/vulkan/vk_pipelines.cpp
+        frontend/backends/vulkan/vk_transfer.cpp
+        frontend/backends/vulkan/vk_shadows.cpp
+        frontend/backends/vulkan/vk_interpolate.cpp)
+    target_include_directories(mhf_psp_backend_vulkan
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
+    target_link_libraries(mhf_psp_backend_vulkan
+        PUBLIC mhf_psp_runtime
+        PRIVATE mhf_core_host mhf_psp_interpolation mhf_texture_pack mhf_texture_images mhf_vulkan_deps)
+    mhf_target_warnings(mhf_psp_backend_vulkan)
+
+    # Backend-agnostic PSP frontend coordinator (window, input, menus, overlays, backend selection).
+    add_library(mhf_psp_frontend STATIC
+        frontend/psp_frontend.cpp
+        frontend/dialog_overlay.cpp)
+    target_include_directories(mhf_psp_frontend
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
     # mhf_overlay is public: psp_frontend.hpp takes the horn's song panel (overlay/song_panel.hpp).
-    target_link_libraries(mhf_psp_frontend PUBLIC mhf_psp_runtime mhf_overlay PRIVATE mhf_core_host mhf_stb_truetype mhf_psp_interpolation
-                                                                    mhf_texture_pack mhf_texture_images)
+    target_link_libraries(mhf_psp_frontend
+        PUBLIC mhf_psp_runtime mhf_overlay
+        PRIVATE mhf_core_host mhf_stb_truetype mhf_psp_interpolation mhf_texture_pack mhf_texture_images
+                mhf_psp_backend_opengl mhf_psp_backend_vulkan)
     target_compile_definitions(mhf_psp_frontend PUBLIC MHF_HAS_FRONTEND=1)
     mhf_target_warnings(mhf_psp_frontend)
 endif()

@@ -2,7 +2,7 @@
 //
 // usage: mhfu --iso <image.iso> --exe <decrypted executable> [--trace] [--memstick <dir>]
 //             [--window] [--auto-dialogs] [--dump-frames <dir> [--dump-every N] [--dump-from S]] [--seconds S] [--quiet-overlays]
-//             [--input "<seconds>:<button>,..."] [--name <text>] [--software] [--scale N] [--fullscreen]
+//             [--input "<seconds>:<button>,..."] [--name <text>] [--software] [--backend opengl|vulkan|software] [--scale N] [--fullscreen]
 //             [--smooth-textures] [--texture-pack <folder> [--pack-mipmaps] [--anisotropy 1|2|4|8|16]] [--fps 30..180] [--hud-size 50-100] [--widescreen] [--true-weapon-values] [--fast-supply-box] [--quest-autoclear]
 //             [--smithy-browse [--smithy-layout]]
 //             [--analog-camera [--analog-camera-turn-speed 50-200] [--analog-camera-tilt-speed 50-200]]
@@ -1046,6 +1046,7 @@ int main(int argc, char **argv) {
     bool window = false;
     bool auto_dialogs = false;
     bool software = false; // --software: draw with the CPU renderer even in a window
+    std::string backend_name; // --backend opengl|vulkan|software (empty: OpenGL unless --software)
     int render_scale = 4;  // --scale N: internal resolution = N x 480x272 (GPU renderer)
     bool fullscreen = false;
     bool smooth_textures = false;
@@ -1088,7 +1089,12 @@ int main(int argc, char **argv) {
         else if (a == "--dump-from" && i + 1 < argc) dump_from = std::stod(argv[++i]);
         else if (a == "--seconds" && i + 1 < argc) seconds = std::stod(argv[++i]);
         else if (a == "--window") window = true;
-        else if (a == "--software") software = true;
+        else if (a == "--software") { software = true; backend_name = "software"; }
+        else if (a == "--vulkan") { software = false; backend_name = "vulkan"; }
+        else if (a == "--backend" && i + 1 < argc) {
+            backend_name = argv[++i];
+            software = (backend_name == "software" || backend_name == "sw");
+        }
         else if (a == "--scale" && i + 1 < argc) render_scale = std::clamp(std::stoi(argv[++i]), 1, 10);
         else if (a == "--fullscreen") fullscreen = true;
         else if (a == "--smooth-textures") smooth_textures = true; // enhancement, off by default
@@ -1385,6 +1391,14 @@ int main(int argc, char **argv) {
         }
 #if defined(MHF_HAS_FRONTEND)
         mhf::psp::Frontend frontend;
+        if (!backend_name.empty()) {
+            if (const auto parsed = mhf::psp::parse_graphics_backend(backend_name)) {
+                frontend.set_graphics_backend(*parsed);
+            } else {
+                std::fprintf(stderr, "error: unknown --backend '%s' (opengl, vulkan, software)\n", backend_name.c_str());
+                return 2;
+            }
+        }
         if (window && frontend.open(window_title(options.disc_image).c_str(), false, 2, !software, render_scale, fullscreen, smooth_textures, target_fps, keyboard, controller)) {
             frontend.set_controls_file(controls_file);
             frontend.set_friends_files(friends_file, friend_actions_file);
