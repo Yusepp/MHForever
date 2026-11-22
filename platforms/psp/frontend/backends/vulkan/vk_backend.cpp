@@ -149,6 +149,7 @@ struct RenderTarget {
     std::uint32_t height = 272;
     std::uint32_t format = 3;
     std::uint64_t last_draw = 0;
+    std::uint64_t last_vram_copy = 0;
     VkImageResource color;
     VkImageResource depth;
 
@@ -231,6 +232,13 @@ private:
     void apply_live_fps();
     void render_interpolated_subframe(float phase);
     void read_back();
+    void capture_clean_3d_snapshot(RenderTarget &rt);
+    void copy_shown_to_vram(RenderTarget *shown);
+    void copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::uint32_t sx, std::uint32_t sy,
+                            std::uint32_t dst, std::uint32_t dst_stride, std::uint32_t dx, std::uint32_t dy,
+                            std::uint32_t width, std::uint32_t height);
+    [[nodiscard]] std::uint32_t match_killcam_hires(std::uint32_t tex_addr, std::uint32_t tex_w, std::uint32_t tex_h,
+                                                    const std::uint32_t *rgba_pixels) const noexcept;
 
     struct RecordedBatch {
         DrawSetup setup{};
@@ -314,6 +322,42 @@ private:
         if (shown_addrs_[0] == UINT32_MAX) return true;
         return addr == shown_addrs_[0] || addr == shown_addrs_[1];
     }
+
+    // Clean HUD-free internal-res killcam capture + async VRAM readback (fixes black quest-end killcam and
+    // upgrades it to full internal resolution without HUD baked in).
+    static constexpr std::size_t kKillcamSlots = 4;
+    static constexpr std::size_t kKillcamSampleCount = 16;
+    struct KillcamSlot {
+        VkImageResource image;
+        std::array<std::uint32_t, kKillcamSampleCount> samples{};
+        bool valid = false;
+        std::uint64_t frame = 0;
+    };
+    struct PendingVramReadback {
+        bool active = false;
+        std::uint64_t timeline_value = 0;
+        std::uint32_t address = 0;
+        std::uint32_t stride = 512;
+        std::uint32_t format = 3;
+        std::uint32_t width = 480;
+        std::uint32_t height = 272;
+        std::size_t killcam_slot = 0;
+        bool has_killcam_hires = false;
+    };
+    VkImageResource killcam_clean_;
+    std::array<KillcamSlot, kKillcamSlots> killcam_slots_{};
+    std::size_t killcam_next_slot_ = 0;
+    std::uint32_t killcam_ram_addr_ = 0;
+    std::size_t killcam_ram_slot_ = 0;
+    std::uint64_t killcam_matched_hash_ = 0;
+    std::uint32_t killcam_matched_slot_ = 0;
+    bool frame_had_3d_ = false;
+    bool captured_clean_3d_ = false;
+    VkImageResource vram_rb_img_;
+    VkBuffer vram_rb_buf_ = VK_NULL_HANDLE;
+    VmaAllocation vram_rb_alloc_ = VK_NULL_HANDLE;
+    void *vram_rb_mapped_ = nullptr;
+    PendingVramReadback pending_vram_rb_{};
 
     std::uint32_t last_shown_slot_ = 0;
     float last_shown_uv_[2]{1.0f, 1.0f};
@@ -414,6 +458,15 @@ void VkBackend::shutdown() {
     overlay_tex_.destroy_immediate(ctx_, &descriptors_);
     blur_a_.destroy_immediate(ctx_, &descriptors_);
     blur_b_.destroy_immediate(ctx_, &descriptors_);
+    killcam_clean_.destroy_immediate(ctx_, &descriptors_);
+    for (auto &ks : killcam_slots_) ks.image.destroy_immediate(ctx_, &descriptors_);
+    vram_rb_img_.destroy_immediate(ctx_, nullptr);
+    if (vram_rb_buf_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(ctx_.allocator, vram_rb_buf_, vram_rb_alloc_);
+        vram_rb_buf_ = VK_NULL_HANDLE;
+        vram_rb_alloc_ = VK_NULL_HANDLE;
+        vram_rb_mapped_ = nullptr;
+    }
     interp_rt_.color.destroy_immediate(ctx_, &descriptors_);
     interp_rt_.depth.destroy_immediate(ctx_, nullptr);
     auto destroy_snap_buf = [&](SnapRawBuf &sb) {
@@ -747,28 +800,60 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             }
             if (pack_slot == 0) {
                 const std::uint64_t h = ge.texture_hash();
-                auto it = textures_.find(h);
-                if (it == textures_.end()) {
-                    if (textures_.size() >= kMaxCachedTextures) {
-                        auto oldest = textures_.begin();
-                        for (auto cur = textures_.begin(); cur != textures_.end(); ++cur) {
-                            if (cur->second.last_used < oldest->second.last_used) oldest = cur;
-                        }
-                        retire_image(oldest->second.image);
-                        textures_.erase(oldest);
+                std::uint32_t kc_slot = 0;
+                if (setup_.through && info.width >= 480u && info.height >= 256u) {
+                    if (killcam_matched_slot_ != 0 && h == killcam_matched_hash_) {
+                        kc_slot = killcam_matched_slot_;
+                    } else {
+                        kc_slot = match_killcam_hires(info.address, info.width, info.height, nullptr);
                     }
-                    decode_buf_.resize(static_cast<std::size_t>(info.width) * info.height);
-                    ge.decode_texture(decode_buf_.data());
-                    CachedTexture ct{};
-                    ct.width = info.width;
-                    ct.height = info.height;
-                    ct.last_used = frame_number_;
-                    upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
-                    it = textures_.emplace(h, std::move(ct)).first;
-                } else {
-                    it->second.last_used = frame_number_;
                 }
-                setup_.tex_slot = it->second.image.bindless_slot;
+                if (kc_slot != 0) {
+                    setup_.tex_slot = kc_slot;
+                    setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
+                    setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
+                    setup_.uv_xform[2] = 0.0f;
+                    setup_.uv_xform[3] = 0.0f;
+                    setup_.linear_override = true;
+                } else {
+                    auto it = textures_.find(h);
+                    if (it == textures_.end()) {
+                        if (textures_.size() >= kMaxCachedTextures) {
+                            auto oldest = textures_.begin();
+                            for (auto cur = textures_.begin(); cur != textures_.end(); ++cur) {
+                                if (cur->second.last_used < oldest->second.last_used) oldest = cur;
+                            }
+                            retire_image(oldest->second.image);
+                            textures_.erase(oldest);
+                        }
+                        decode_buf_.resize(static_cast<std::size_t>(info.width) * info.height);
+                        ge.decode_texture(decode_buf_.data());
+                        if (setup_.through && info.width >= 480u && info.height >= 256u) {
+                            kc_slot = match_killcam_hires(info.address, info.width, info.height, decode_buf_.data());
+                        }
+                        if (kc_slot != 0) {
+                            killcam_matched_hash_ = h;
+                            killcam_matched_slot_ = kc_slot;
+                            setup_.tex_slot = kc_slot;
+                            setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
+                            setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
+                            setup_.uv_xform[2] = 0.0f;
+                            setup_.uv_xform[3] = 0.0f;
+                            setup_.linear_override = true;
+                        } else {
+                            CachedTexture ct{};
+                            ct.width = info.width;
+                            ct.height = info.height;
+                            ct.last_used = frame_number_;
+                            upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
+                            it = textures_.emplace(h, std::move(ct)).first;
+                            setup_.tex_slot = it->second.image.bindless_slot;
+                        }
+                    } else {
+                        it->second.last_used = frame_number_;
+                        setup_.tex_slot = it->second.image.bindless_slot;
+                    }
+                }
             }
         }
     }
@@ -782,10 +867,18 @@ void VkBackend::draw_batch() {
         return;
     }
     RenderTarget &rt = rt_it->second;
-    begin_target_pass(rt);
-
     const auto R = [&](std::uint32_t reg) { return key_reg(setup_.key, reg); };
     const bool clear = (R(kClearMode) & 1u) != 0;
+
+    if (!clear && is_shown_target(setup_.target)) {
+        if (!setup_.through) {
+            frame_had_3d_ = true;
+        } else if (frame_had_3d_ && !captured_clean_3d_ && !setup_.self_sampled) {
+            capture_clean_3d_snapshot(rt);
+        }
+    }
+
+    begin_target_pass(rt);
 
     // Quest HUD detection, HUD scaling, and widescreen 2D aspect preservation (single tight pass).
     float hud_scale = 1.0f, hud_ax = 0.0f, hud_ay = 0.0f;
@@ -855,7 +948,8 @@ void VkBackend::draw_batch() {
     const bool zrange = !clear && !setup_.through && maxz != 0 && (minz != 0 || maxz != 0xFFFFu);
 
     const bool linear = ((R(kTexFilter) & 0x100u) != 0) ||
-                        (live_->smooth_textures.load(std::memory_order_relaxed) && !setup_.through);
+                        (live_->smooth_textures.load(std::memory_order_relaxed) && !setup_.through) ||
+                        setup_.linear_override;
     const bool clamp_s = (R(kTexWrap) & 1u) != 0;
     const bool clamp_t = (R(kTexWrap) & 0x100u) != 0;
     const int aniso = std::clamp(live_->texture_pack_anisotropy.load(std::memory_order_relaxed), 1, 16);
@@ -1108,13 +1202,31 @@ void VkBackend::block_transfer(std::uint32_t src, std::uint32_t /*src_stride*/, 
     const std::uint32_t dst_vram = dst & 0x1FFFFFFFu;
     const bool src_in_vram = src_vram >= 0x04000000u && src_vram < 0x04800000u;
     const bool dst_in_vram = dst_vram >= 0x04000000u && dst_vram < 0x04800000u;
-    if (!src_in_vram || !dst_in_vram) return;
+    if (!src_in_vram) return;
 
     const std::uint32_t src_off = src_vram & 0x001FFFFFu;
-    const std::uint32_t dst_off = dst_vram & 0x001FFFFFu;
     auto sit = targets_.find(src_off);
+    if (sit == targets_.end()) {
+        // Also check if `src_off` lies inside an existing render target (sub-rect transfer).
+        for (auto it = targets_.begin(); it != targets_.end(); ++it) {
+            const std::uint32_t span = it->second.stride * it->second.height * it->second.bytes_per_pixel();
+            if (src_off >= it->first && src_off < it->first + span) {
+                sit = it;
+                break;
+            }
+        }
+    }
     if (sit == targets_.end()) return;
 
+    if (!dst_in_vram) {
+        // VRAM -> RAM readback (used by quest-end killcam capture when the game copies out of VRAM).
+        if (sit->second.bytes_per_pixel() == bytes_per_pixel) {
+            copy_target_to_ram(sit->second, src, sx, sy, dst, dst_stride, dx, dy, width, height);
+        }
+        return;
+    }
+
+    const std::uint32_t dst_off = dst_vram & 0x001FFFFFu;
     const std::uint32_t fmt = bytes_per_pixel == 4u ? 3u : sit->second.format;
     RenderTarget &dst_rt = ensure_target(dst_off, dst_stride > 0 ? dst_stride : sit->second.stride, fmt, dy + height);
     RenderTarget &src_rt = sit->second;
@@ -1136,6 +1248,352 @@ void VkBackend::block_transfer(std::uint32_t src, std::uint32_t /*src_stride*/, 
     vkCmdBlitImage(frames_[frame_slot_].cmd, src_rt.color.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dst_rt.color.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
     dst_rt.last_draw = frame_number_;
+}
+
+namespace {
+// 16 evenly spaced sample coordinates inside a 480x272 screen (4x4 grid avoiding outer borders).
+constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 16> kKillcamSampleCoords = {{
+    {60, 40}, {180, 40}, {300, 40}, {420, 40},
+    {60, 108}, {180, 108}, {300, 108}, {420, 108},
+    {60, 164}, {180, 164}, {300, 164}, {420, 164},
+    {60, 232}, {180, 232}, {300, 232}, {420, 232},
+}};
+} // namespace
+
+void VkBackend::capture_clean_3d_snapshot(RenderTarget &rt) {
+    if (rt.color.image == VK_NULL_HANDLE) return;
+    const std::uint32_t cw = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
+    const std::uint32_t ch = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
+    if (cw == 0 || ch == 0) return;
+
+    ensure_recording();
+    end_render_pass();
+
+    if (killcam_clean_.image == VK_NULL_HANDLE || killcam_clean_.width != cw || killcam_clean_.height != ch) {
+        retire_image(killcam_clean_);
+        killcam_clean_.create(ctx_, &descriptors_, cw, ch, VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    if (killcam_clean_.image == VK_NULL_HANDLE) return;
+
+    transition_resource(rt.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    transition_resource(killcam_clean_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    VkImageCopy cp{};
+    cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.extent = {cw, ch, 1};
+    vkCmdCopyImage(frames_[frame_slot_].cmd, rt.color.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   killcam_clean_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    captured_clean_3d_ = true;
+}
+
+void VkBackend::copy_shown_to_vram(RenderTarget *shown) {
+    constexpr std::uint32_t kW = 480u, kH = 272u;
+
+    // 1. Harvest previous async readback if the GPU has finished (zero stalls).
+    if (pending_vram_rb_.active && ctx_.query_timeline(ctx_.graphics_timeline) >= pending_vram_rb_.timeline_value) {
+        const PendingVramReadback p = pending_vram_rb_;
+        pending_vram_rb_.active = false;
+        if (vram_rb_mapped_ != nullptr) {
+            const auto *rgba = static_cast<const std::uint8_t *>(vram_rb_mapped_);
+            const std::uint32_t bpp = p.format == 3u ? 4u : 2u;
+            for (std::uint32_t y = 0; y < p.height; ++y) {
+                std::uint8_t *row = memory_.raw_pointer(0x04000000u + p.address + y * p.stride * bpp, p.width * bpp);
+                if (!row) continue;
+                const std::uint8_t *line = rgba + static_cast<std::size_t>(y) * kW * 4u;
+                if (p.format == 3u) {
+                    std::memcpy(row, line, p.width * 4u);
+                } else {
+                    for (std::uint32_t x = 0; x < p.width; ++x) pack_pixel(line + x * 4u, p.format, row + x * bpp);
+                }
+            }
+            if (p.has_killcam_hires && p.killcam_slot < kKillcamSlots) {
+                auto &ks = killcam_slots_[p.killcam_slot];
+                for (std::size_t i = 0; i < kKillcamSampleCount; ++i) {
+                    const auto [sx, sy] = kKillcamSampleCoords[i];
+                    std::uint32_t px = 0;
+                    std::memcpy(&px, rgba + (static_cast<std::size_t>(sy) * kW + sx) * 4u, 4);
+                    ks.samples[i] = px;
+                }
+                ks.valid = true;
+                ks.frame = frame_number_;
+            }
+        }
+    }
+
+    // 2. Schedule a new async 480x272 readback at most every 4th flip per render target.
+    if (pending_vram_rb_.active || !shown || shown->color.image == VK_NULL_HANDLE) return;
+    if (shown->last_vram_copy != 0 && frame_number_ - shown->last_vram_copy < 4u) return;
+    shown->last_vram_copy = frame_number_;
+
+    if (vram_rb_img_.image == VK_NULL_HANDLE) {
+        vram_rb_img_.create(ctx_, nullptr, kW, kH, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                            VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    if (vram_rb_buf_ == VK_NULL_HANDLE) {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0,
+                               static_cast<VkDeviceSize>(kW) * kH * 4u,
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+        VmaAllocationCreateInfo vaci{};
+        vaci.usage = VMA_MEMORY_USAGE_AUTO;
+        vaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo info{};
+        if (vmaCreateBuffer(ctx_.allocator, &bci, &vaci, &vram_rb_buf_, &vram_rb_alloc_, &info) == VK_SUCCESS) {
+            vram_rb_mapped_ = info.pMappedData;
+        }
+    }
+    if (vram_rb_img_.image == VK_NULL_HANDLE || vram_rb_buf_ == VK_NULL_HANDLE) return;
+
+    // Prefer the HUD-free clean 3D snapshot when available so the killcam never bakes in the HUD!
+    const bool use_clean = captured_clean_3d_ && killcam_clean_.image != VK_NULL_HANDLE;
+    VkImageResource &src_img = use_clean ? killcam_clean_ : shown->color;
+    const std::uint32_t src_w = use_clean ? killcam_clean_.width : std::min(kW, shown->width) * static_cast<std::uint32_t>(scale_);
+    const std::uint32_t src_h = use_clean ? killcam_clean_.height : std::min(kH, shown->height) * static_cast<std::uint32_t>(scale_);
+
+    ensure_recording();
+    end_render_pass();
+
+    std::size_t slot_idx = 0;
+    bool saved_hires = false;
+    if (use_clean) {
+        slot_idx = killcam_next_slot_;
+        killcam_next_slot_ = (killcam_next_slot_ + 1u) % kKillcamSlots;
+        auto &ks = killcam_slots_[slot_idx];
+        if (ks.image.bindless_slot != 0 && ks.image.bindless_slot == killcam_matched_slot_) {
+            killcam_matched_slot_ = 0;
+            killcam_matched_hash_ = 0;
+        }
+        ks.valid = false;
+        if (ks.image.image == VK_NULL_HANDLE || ks.image.width != src_w || ks.image.height != src_h) {
+            retire_image(ks.image);
+            ks.image.create(ctx_, &descriptors_, src_w, src_h, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            VK_IMAGE_ASPECT_COLOR_BIT);
+        }
+        if (ks.image.image != VK_NULL_HANDLE) {
+            transition_resource(killcam_clean_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            transition_resource(ks.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkImageCopy cp{};
+            cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            cp.extent = {src_w, src_h, 1};
+            vkCmdCopyImage(frames_[frame_slot_].cmd, killcam_clean_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           ks.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+            transition_resource(ks.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            saved_hires = true;
+        }
+    }
+
+    transition_resource(src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    transition_resource(vram_rb_img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[0] = {0, 0, 0};
+    blit.srcOffsets[1] = {static_cast<std::int32_t>(src_w), static_cast<std::int32_t>(src_h), 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[0] = {0, 0, 0};
+    blit.dstOffsets[1] = {static_cast<std::int32_t>(kW), static_cast<std::int32_t>(kH), 1};
+    vkCmdBlitImage(frames_[frame_slot_].cmd, src_img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   vram_rb_img_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+    transition_resource(vram_rb_img_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {kW, kH, 1};
+    vkCmdCopyImageToBuffer(frames_[frame_slot_].cmd, vram_rb_img_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           vram_rb_buf_, 1, &region);
+
+    // Restore shown->color back to shader-read layout if we transitioned it.
+    if (!use_clean) {
+        transition_resource(shown->color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
+
+    pending_vram_rb_.active = true;
+    pending_vram_rb_.timeline_value = ctx_.graphics_timeline_value + 1u;
+    pending_vram_rb_.address = shown->address;
+    pending_vram_rb_.stride = shown->stride;
+    pending_vram_rb_.format = shown->format;
+    pending_vram_rb_.width = std::min(kW, shown->width);
+    pending_vram_rb_.height = std::min(kH, shown->height);
+    pending_vram_rb_.killcam_slot = slot_idx;
+    pending_vram_rb_.has_killcam_hires = saved_hires;
+}
+
+void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::uint32_t sx, std::uint32_t sy,
+                                   std::uint32_t dst, std::uint32_t dst_stride, std::uint32_t dx, std::uint32_t dy,
+                                   std::uint32_t width, std::uint32_t height) {
+    const std::uint32_t bpp = from.bytes_per_pixel();
+    const std::uint32_t src_offset = ((src & 0x001FFFFFu) - from.address) / bpp;
+    const std::uint32_t fx = src_offset % from.stride + sx, fy = src_offset / from.stride + sy;
+    if (fx >= from.width || fy >= from.height) return;
+    width = std::min(width, from.width - fx);
+    height = std::min(height, from.height - fy);
+    if (width == 0 || height == 0) return;
+
+    const bool use_clean = is_shown_target(from.address) && captured_clean_3d_ && killcam_clean_.image != VK_NULL_HANDLE &&
+                           fx + width <= 480u && fy + height <= 272u;
+    VkImageResource &src_img = use_clean ? killcam_clean_ : from.color;
+
+    VkImageResource tmp_img;
+    tmp_img.create(ctx_, nullptr, width, height, VK_FORMAT_R8G8B8A8_UNORM,
+                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkBuffer rb_buf = VK_NULL_HANDLE;
+    VmaAllocation rb_alloc = VK_NULL_HANDLE;
+    VmaAllocationInfo rb_info{};
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0,
+                           static_cast<VkDeviceSize>(width) * height * 4u,
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+    VmaAllocationCreateInfo vaci{};
+    vaci.usage = VMA_MEMORY_USAGE_AUTO;
+    vaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    if (tmp_img.image == VK_NULL_HANDLE || vmaCreateBuffer(ctx_.allocator, &bci, &vaci, &rb_buf, &rb_alloc, &rb_info) != VK_SUCCESS) {
+        tmp_img.destroy_immediate(ctx_, nullptr);
+        return;
+    }
+
+    ensure_recording();
+    end_render_pass();
+
+    // If this is a full-screen killcam copy, promote the HUD-free internal-res snapshot into a killcam slot.
+    if (use_clean && width >= 480u && height >= 256u) {
+        const std::size_t slot_idx = killcam_next_slot_;
+        killcam_next_slot_ = (killcam_next_slot_ + 1u) % kKillcamSlots;
+        auto &ks = killcam_slots_[slot_idx];
+        if (ks.image.image == VK_NULL_HANDLE || ks.image.width != killcam_clean_.width || ks.image.height != killcam_clean_.height) {
+            retire_image(ks.image);
+            ks.image.create(ctx_, &descriptors_, killcam_clean_.width, killcam_clean_.height, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        }
+        if (ks.image.image != VK_NULL_HANDLE) {
+            transition_resource(killcam_clean_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            transition_resource(ks.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkImageCopy cp{};
+            cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            cp.extent = {killcam_clean_.width, killcam_clean_.height, 1};
+            vkCmdCopyImage(frames_[frame_slot_].cmd, killcam_clean_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           ks.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+            transition_resource(ks.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            killcam_ram_addr_ = dst & 0x1FFFFFFFu;
+            killcam_ram_slot_ = slot_idx;
+            ks.valid = true;
+            ks.frame = frame_number_;
+        }
+    }
+
+    transition_resource(src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    transition_resource(tmp_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[0] = {static_cast<std::int32_t>(fx) * scale_, static_cast<std::int32_t>(fy) * scale_, 0};
+    blit.srcOffsets[1] = {static_cast<std::int32_t>(fx + width) * scale_, static_cast<std::int32_t>(fy + height) * scale_, 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[0] = {0, 0, 0};
+    blit.dstOffsets[1] = {static_cast<std::int32_t>(width), static_cast<std::int32_t>(height), 1};
+    vkCmdBlitImage(frames_[frame_slot_].cmd, src_img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   tmp_img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    transition_resource(tmp_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width, height, 1};
+    vkCmdCopyImageToBuffer(frames_[frame_slot_].cmd, tmp_img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           rb_buf, 1, &region);
+
+    vkEndCommandBuffer(frames_[frame_slot_].cmd);
+    recording_ = false;
+    const std::uint64_t sig = ++ctx_.graphics_timeline_value;
+    VkCommandBufferSubmitInfo cbsi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, frames_[frame_slot_].cmd, 0};
+    VkSemaphoreSubmitInfo ssi{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, ctx_.graphics_timeline, sig,
+                              VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cbsi, 1, &ssi};
+    {
+        std::lock_guard lock(ctx_.graphics_queue_mutex);
+        vkQueueSubmit2(ctx_.graphics_queue, 1, &si, VK_NULL_HANDLE);
+    }
+    ctx_.wait_timeline(ctx_.graphics_timeline, sig);
+    frames_[frame_slot_].timeline_value = sig;
+
+    const auto *rgba = static_cast<const std::uint8_t *>(rb_info.pMappedData);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        std::uint8_t *row = memory_.raw_pointer(dst + ((dy + y) * dst_stride + dx) * bpp, width * bpp);
+        if (!row) continue;
+        const std::uint8_t *line = rgba + static_cast<std::size_t>(y) * width * 4u;
+        if (from.format == 3u) {
+            std::memcpy(row, line, width * 4u);
+        } else {
+            for (std::uint32_t x = 0; x < width; ++x) pack_pixel(line + x * 4u, from.format, row + x * bpp);
+        }
+    }
+    if (use_clean && width >= 480u && height >= 256u && killcam_ram_slot_ < kKillcamSlots) {
+        auto &ks = killcam_slots_[killcam_ram_slot_];
+        for (std::size_t i = 0; i < kKillcamSampleCount; ++i) {
+            const auto [kx, ky] = kKillcamSampleCoords[i];
+            if (kx < width && ky < height) {
+                std::uint32_t px = 0;
+                std::memcpy(&px, rgba + (static_cast<std::size_t>(ky) * width + kx) * 4u, 4);
+                ks.samples[i] = px;
+            }
+        }
+    }
+    vmaDestroyBuffer(ctx_.allocator, rb_buf, rb_alloc);
+    tmp_img.destroy_immediate(ctx_, nullptr);
+    ensure_recording();
+}
+
+std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32_t tex_w, std::uint32_t tex_h,
+                                             const std::uint32_t *rgba_pixels) const noexcept {
+    // 1. Direct address match from block_transfer(VRAM -> RAM).
+    if (killcam_ram_addr_ != 0 && (tex_addr & 0x1FFFFFFFu) == killcam_ram_addr_ && killcam_ram_slot_ < kKillcamSlots) {
+        const auto &ks = killcam_slots_[killcam_ram_slot_];
+        if (ks.valid && ks.image.bindless_slot != 0) return ks.image.bindless_slot;
+    }
+    if (!rgba_pixels || tex_w < 480u || tex_h < 256u) return 0u;
+
+    // 2. 16-pixel perceptual fingerprint match against saved HUD-free internal-res captures.
+    std::uint32_t best_slot = 0u;
+    std::uint32_t best_err = 14u * 3u * kKillcamSampleCount; // mean <= 14 per RGB channel (survives 16-bit packing)
+    std::uint64_t best_frame = 0u;
+    for (const auto &ks : killcam_slots_) {
+        if (!ks.valid || ks.image.bindless_slot == 0) continue;
+        std::uint32_t err = 0u;
+        std::uint32_t non_black = 0u;
+        for (std::size_t i = 0; i < kKillcamSampleCount; ++i) {
+            const auto [sx, sy] = kKillcamSampleCoords[i];
+            if (sx >= tex_w || sy >= tex_h) continue;
+            const std::uint32_t a = rgba_pixels[static_cast<std::size_t>(sy) * tex_w + sx];
+            const std::uint32_t b = ks.samples[i];
+            const int ar = static_cast<int>(a & 0xFFu), ag = static_cast<int>((a >> 8u) & 0xFFu), ab = static_cast<int>((a >> 16u) & 0xFFu);
+            const int br = static_cast<int>(b & 0xFFu), bg = static_cast<int>((b >> 8u) & 0xFFu), bb = static_cast<int>((b >> 16u) & 0xFFu);
+            if (ar > 8 || ag > 8 || ab > 8) ++non_black;
+            err += static_cast<std::uint32_t>(std::abs(ar - br) + std::abs(ag - bg) + std::abs(ab - bb));
+        }
+        // Require a real non-black scene so solid black fade textures never falsely trigger killcam substitution.
+        if (non_black >= 4u && (err < best_err || (err == best_err && ks.frame > best_frame))) {
+            best_err = err;
+            best_frame = ks.frame;
+            best_slot = ks.image.bindless_slot;
+        }
+    }
+    return best_slot;
 }
 
 void VkBackend::flush() {
@@ -1459,6 +1917,7 @@ void VkBackend::apply_live_scale() {
         retire_image(interp_rt_.color);
         retire_image(interp_rt_.depth);
         retire_image(copy_tex_);
+        retire_image(killcam_clean_);
     }
 }
 
@@ -1850,8 +2309,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
     if (have_gpu_frame) {
         RenderTarget &rt = it->second;
+        if (frame_had_3d_ && !captured_clean_3d_) {
+            capture_clean_3d_snapshot(rt);
+        }
         ensure_recording();
         end_render_pass();
+        copy_shown_to_vram(&rt);
         transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         const float uv_x = std::min(1.0f, 480.0f / static_cast<float>(rt.width));
@@ -1861,6 +2324,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         last_shown_uv_[1] = uv_y;
         last_shown_linear_ = true;
     } else {
+        copy_shown_to_vram(nullptr);
         // CPU-drawn screen (boot logos, PSMF intro videos): upload from guest VRAM.
         const std::uint32_t s = stride > 0 ? stride : 512u;
         const std::uint32_t bpp = pixel_format == 3u ? 4u : 2u;
@@ -1944,6 +2408,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     }
 
     last_menu_draw_ = now;
+    frame_had_3d_ = false;
+    captured_clean_3d_ = false;
     if ((frame_number_ % 60u) == 0u) {
         pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + 1u);
     }
