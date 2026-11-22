@@ -2044,6 +2044,7 @@ ControllerState map_input(const host::GamepadState &g) {
     s.ly = axis(g.left_y);
     s.right_stick_x = std::clamp(g.right_x, -1.0f, 1.0f);
     s.right_stick_y = std::clamp(g.right_y, -1.0f, 1.0f);
+    s.right_stick_click = g.right_stick_click;
     return s;
 }
 
