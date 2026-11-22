@@ -20,6 +20,11 @@ SHADERS = [
     ("kBlurFragSpv", "blur.frag"),
     ("kGeDrawVertSpv", "ge_draw.vert"),
     ("kGeDrawFragSpv", "ge_draw.frag"),
+    ("kShadowMapVertSpv", "shadow_map.vert"),
+    ("kShadowMapFragSpv", "shadow_map.frag"),
+    ("kShadowFactorCompSpv", "shadow_factor.comp"),
+    ("kShadowApplyCompSpv", "shadow_apply.comp"),
+    ("kPlaceV2CompSpv", "place_v2.comp"),
 ]
 
 

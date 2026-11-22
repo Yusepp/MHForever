@@ -50,6 +50,9 @@ if(MHF_WITH_SDL)
         frontend/vulkan/vk_descriptors.cpp
         frontend/vulkan/vk_buffers.cpp
         frontend/vulkan/vk_pipelines.cpp
+        frontend/vulkan/vk_transfer.cpp
+        frontend/vulkan/vk_shadows.cpp
+        frontend/vulkan/vk_interpolate.cpp
         frontend/dialog_overlay.cpp)
     target_include_directories(mhf_psp_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend
                                PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)

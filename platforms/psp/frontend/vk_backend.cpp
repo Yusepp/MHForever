@@ -11,8 +11,11 @@
 #include "vulkan/vk_buffers.hpp"
 #include "vulkan/vk_context.hpp"
 #include "vulkan/vk_descriptors.hpp"
+#include "vulkan/vk_interpolate.hpp"
 #include "vulkan/vk_pipelines.hpp"
+#include "vulkan/vk_shadows.hpp"
 #include "vulkan/vk_swapchain.hpp"
+#include "vulkan/vk_transfer.hpp"
 
 #include "ge.hpp"
 
@@ -237,6 +240,15 @@ private:
     vk::Swapchain swapchain_;
     vk::BindlessDescriptors descriptors_;
     vk::Pipelines pipelines_;
+    vk::PackStreamer pack_streamer_;
+    vk::ShadowCompute shadow_compute_;
+    vk::GpuInterpolator interpolator_;
+
+    VkImageResource blur_a_;
+    VkImageResource blur_b_;
+    std::uint32_t blur_src_slot_ = 0;
+
+    void build_menu_blur(std::uint32_t src_slot, float uv_max_x, float uv_max_y);
 
     std::array<FrameSlice, kFramesInFlight> frames_{};
     int frame_slot_ = 0;
@@ -281,6 +293,10 @@ bool VkBackend::init() {
     if (!swapchain_.create(ctx_, pw, ph)) return false;
     if (!descriptors_.init(ctx_)) return false;
     if (!pipelines_.init(ctx_, descriptors_.layout(), swapchain_.format)) return false;
+    pack_streamer_.init(ctx_, live_->texture_pack_folder, live_->texture_pack_game,
+                        live_->builtin_textures_folder, live_->texture_pack_mipmaps.load());
+    shadow_compute_.init(ctx_, descriptors_.layout());
+    interpolator_.init(ctx_);
 
     for (int i = 0; i < kFramesInFlight; ++i) {
         VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr,
@@ -325,6 +341,12 @@ void VkBackend::shutdown() {
     cpu_display_tex_.destroy_immediate(ctx_, &descriptors_);
     copy_tex_.destroy_immediate(ctx_, &descriptors_);
     overlay_tex_.destroy_immediate(ctx_, &descriptors_);
+    blur_a_.destroy_immediate(ctx_, &descriptors_);
+    blur_b_.destroy_immediate(ctx_, &descriptors_);
+
+    pack_streamer_.shutdown(ctx_, descriptors_);
+    shadow_compute_.shutdown(ctx_, descriptors_);
+    interpolator_.shutdown(ctx_);
 
     collect_retired(UINT64_MAX);
 
@@ -616,30 +638,57 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
         }
 
         if (!rtt_hit && info.width > 0 && info.height > 0) {
-            const std::uint64_t h = ge.texture_hash();
-            auto it = textures_.find(h);
-            if (it == textures_.end()) {
-                if (textures_.size() >= kMaxCachedTextures) {
-                    // Evict oldest LRU texture.
-                    auto oldest = textures_.begin();
-                    for (auto cur = textures_.begin(); cur != textures_.end(); ++cur) {
-                        if (cur->second.last_used < oldest->second.last_used) oldest = cur;
-                    }
-                    retire_image(oldest->second.image);
-                    textures_.erase(oldest);
+            // Phase 3: check texture pack (and builtin HD text) before decoding original PSP texture.
+            std::uint32_t pack_slot = 0;
+            if (pack_streamer_.active() && live_->texture_pack.load(std::memory_order_relaxed)) {
+                textures::TextureFacts facts{};
+                facts.address = info.address;
+                facts.buffer_width = info.stride;
+                facts.format = info.format;
+                facts.width = info.width;
+                facts.height = info.height;
+                facts.dimension = static_cast<std::uint16_t>(ge.reg(kTexSize0) & 0xFFFFu);
+                facts.clut_format_word = (kClutFormat << 24u) | (ge.reg(kClutFormat) & 0xFFFFFFu);
+                facts.clut = ge.clut_bytes();
+                facts.clut_last_bytes = ge.clut_last_bytes();
+                facts.clut_max_bytes = ge.clut_max_bytes();
+                textures::Filter pfilter = textures::Filter::Auto;
+                bool has_mips = false;
+                pack_slot = pack_streamer_.lookup_or_queue(
+                    ctx_, descriptors_, facts,
+                    [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
+                    frame_number_, has_mips, pfilter);
+                if (pack_slot != 0) {
+                    setup_.tex_slot = pack_slot;
+                    setup_.texture_mips = has_mips;
+                    setup_.linear_override = (pfilter == textures::Filter::Linear);
                 }
-                decode_buf_.resize(static_cast<std::size_t>(info.width) * info.height);
-                ge.decode_texture(decode_buf_.data());
-                CachedTexture ct{};
-                ct.width = info.width;
-                ct.height = info.height;
-                ct.last_used = frame_number_;
-                upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
-                it = textures_.emplace(h, std::move(ct)).first;
-            } else {
-                it->second.last_used = frame_number_;
             }
-            setup_.tex_slot = it->second.image.bindless_slot;
+            if (pack_slot == 0) {
+                const std::uint64_t h = ge.texture_hash();
+                auto it = textures_.find(h);
+                if (it == textures_.end()) {
+                    if (textures_.size() >= kMaxCachedTextures) {
+                        auto oldest = textures_.begin();
+                        for (auto cur = textures_.begin(); cur != textures_.end(); ++cur) {
+                            if (cur->second.last_used < oldest->second.last_used) oldest = cur;
+                        }
+                        retire_image(oldest->second.image);
+                        textures_.erase(oldest);
+                    }
+                    decode_buf_.resize(static_cast<std::size_t>(info.width) * info.height);
+                    ge.decode_texture(decode_buf_.data());
+                    CachedTexture ct{};
+                    ct.width = info.width;
+                    ct.height = info.height;
+                    ct.last_used = frame_number_;
+                    upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
+                    it = textures_.emplace(h, std::move(ct)).first;
+                } else {
+                    it->second.last_used = frame_number_;
+                }
+                setup_.tex_slot = it->second.image.bindless_slot;
+            }
         }
     }
 }
@@ -980,10 +1029,64 @@ void VkBackend::upload_overlay_if_needed() {
     }
 }
 
+void VkBackend::build_menu_blur(std::uint32_t src_slot, float uv_max_x, float uv_max_y) {
+    constexpr std::uint32_t kBw = 480u, kBh = 272u;
+    if (blur_a_.image == VK_NULL_HANDLE) {
+        blur_a_.create(ctx_, &descriptors_, kBw, kBh, VK_FORMAT_R8G8B8A8_UNORM,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        blur_b_.create(ctx_, &descriptors_, kBw, kBh, VK_FORMAT_R8G8B8A8_UNORM,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    if (blur_a_.image == VK_NULL_HANDLE || blur_b_.image == VK_NULL_HANDLE) return;
+
+    auto run_pass = [&](VkImageResource &dst, std::uint32_t in_slot, float u_scale, float v_scale,
+                        float dx, float dy, float dim) {
+        transition_resource(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        VkRenderingAttachmentInfo att{};
+        att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        att.imageView = dst.view;
+        att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO, nullptr, 0, {{0, 0}, {kBw, kBh}}, 1, 0, 1, &att, nullptr, nullptr};
+        VkCommandBuffer cmd = frames_[frame_slot_].cmd;
+        vkCmdBeginRendering(cmd, &ri);
+        VkViewport vp{0.0f, 0.0f, static_cast<float>(kBw), static_cast<float>(kBh), 0.0f, 1.0f};
+        VkRect2D sc{{0, 0}, {kBw, kBh}};
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        VkDescriptorSet set0 = descriptors_.set();
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.blur_pipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.blur_layout, 0, 1, &set0, 0, nullptr);
+        vk::BlurPush bp{{0.0f, 0.0f}, {u_scale, v_scale}, {dx, dy}, dim, in_slot,
+                        vk::BindlessDescriptors::sampler_index(true, false, true, true, 1)};
+        vkCmdPushConstants(cmd, pipelines_.blur_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(bp), &bp);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+        transition_resource(dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    };
+
+    run_pass(blur_a_, src_slot, uv_max_x, uv_max_y, uv_max_x / static_cast<float>(kBw), 0.0f, 1.0f);
+    run_pass(blur_b_, blur_a_.bindless_slot, 1.0f, 1.0f, 0.0f, 1.0f / static_cast<float>(kBh), 0.55f);
+    blur_src_slot_ = blur_b_.bindless_slot;
+}
+
 void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter) {
     ensure_recording();
     end_render_pass();
     upload_overlay_if_needed();
+    if (overlay_visible_ && overlay_continuous_) {
+        build_menu_blur(tex_slot, uv_max_x, uv_max_y);
+        if (blur_src_slot_ != 0) {
+            tex_slot = blur_src_slot_;
+            uv_max_x = 1.0f;
+            uv_max_y = 1.0f;
+            linear_filter = true;
+        }
+    }
 
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(window_, &pw, &ph);
@@ -1181,6 +1284,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     }
 
     last_menu_draw_ = std::chrono::steady_clock::now();
+    if ((frame_number_ % 60u) == 0u) {
+        pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + 1u);
+    }
     apply_live_scale();
 }
 

@@ -1,0 +1,81 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Phase 5 GPU Compute Frame Interpolation (place_v2 on GPU):
+// Re-projects raw 3D world-space vertices through each draw's interpolated eye/projection matrix and viewport
+// directly into a device-local GpuVertex buffer — zero CPU re-projection and zero CPU->GPU uploads at 120/180 fps!
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct RawGpuVertex {
+    vec3 world_pos;
+    uint draw_idx;
+    vec2 uv;
+    uint color_rgba;
+    uint spec_rgba;
+    float fog;
+    float pad[3];
+};
+
+struct DrawTransform {
+    mat4 mvp;       // proj * blended_eye
+    vec4 vp_scale;  // x_scale, y_scale, z_scale, unused
+    vec4 vp_center; // x_center - off_x, y_center - off_y, z_center, overlay_stretch
+};
+
+struct GpuVertexOut {
+    float x, y, z, inv_w;
+    float u, v;
+    uint color_rgba;
+    uint spec_rgba;
+    float fog;
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer RawVertexBuf {
+    RawGpuVertex items[];
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer TransformBuf {
+    DrawTransform items[];
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer OutVertexBuf {
+    GpuVertexOut items[];
+};
+
+layout(push_constant) uniform PlacePush {
+    RawVertexBuf raw_verts;
+    TransformBuf transforms;
+    OutVertexBuf out_verts;
+    uint vertex_count;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.vertex_count) return;
+
+    RawGpuVertex rv = pc.raw_verts.items[idx];
+    DrawTransform tr = pc.transforms.items[rv.draw_idx];
+
+    vec4 clip = tr.mvp * vec4(rv.world_pos, 1.0);
+    float inv_w = abs(clip.w) > 1e-6 ? (1.0 / clip.w) : 1.0;
+    float sx = clip.x * inv_w * tr.vp_scale.x + tr.vp_center.x;
+    float sy = clip.y * inv_w * tr.vp_scale.y + tr.vp_center.y;
+    float sz = clamp(clip.z * inv_w * tr.vp_scale.z + tr.vp_center.z, 0.0, 65535.0);
+    if (tr.vp_center.w > 1.0) {
+        sx = 240.0 + (sx - 240.0) * tr.vp_center.w;
+    }
+
+    GpuVertexOut o;
+    o.x = sx;
+    o.y = sy;
+    o.z = sz;
+    o.inv_w = inv_w;
+    o.u = rv.uv.x;
+    o.v = rv.uv.y;
+    o.color_rgba = rv.color_rgba;
+    o.spec_rgba = rv.spec_rgba;
+    o.fog = rv.fog;
+    pc.out_verts.items[idx] = o;
+}

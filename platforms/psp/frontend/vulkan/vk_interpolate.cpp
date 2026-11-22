@@ -1,0 +1,91 @@
+#include "vk_interpolate.hpp"
+#include "vk_shaders_spv.hpp"
+#include "../gpu_common.hpp"
+
+#include <cstdio>
+
+namespace mhf::psp::vk {
+
+bool GpuInterpolator::init(const Context &ctx) {
+    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PlacePush)};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 0, nullptr, 1, &pcr};
+    if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &layout_) != VK_SUCCESS) return false;
+
+    VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0,
+                                  shaders::kPlaceV2CompSpv.size() * sizeof(std::uint32_t),
+                                  shaders::kPlaceV2CompSpv.data()};
+    VkShaderModule mod = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(ctx.device, &smci, nullptr, &mod) != VK_SUCCESS) return false;
+
+    VkComputePipelineCreateInfo cpci{};
+    cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
+    cpci.layout = layout_;
+    const VkResult r = vkCreateComputePipelines(ctx.device, ctx.pipeline_cache, 1, &cpci, nullptr, &pipe_);
+    vkDestroyShaderModule(ctx.device, mod, nullptr);
+    if (r != VK_SUCCESS) return false;
+
+    const std::size_t out_bytes = static_cast<std::size_t>(max_vertices_) * sizeof(gpu_common::GpuVertex);
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = out_bytes;
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo vaci{};
+    vaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateBuffer(ctx.allocator, &bci, &vaci, &out_buf_, &out_alloc_, nullptr) != VK_SUCCESS) {
+        shutdown(ctx);
+        return false;
+    }
+    VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, out_buf_};
+    out_addr_ = vkGetBufferDeviceAddress(ctx.device, &bdai);
+    return out_addr_ != 0;
+}
+
+void GpuInterpolator::shutdown(const Context &ctx) {
+    if (out_buf_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(ctx.allocator, out_buf_, out_alloc_);
+        out_buf_ = VK_NULL_HANDLE;
+        out_alloc_ = VK_NULL_HANDLE;
+        out_addr_ = 0;
+    }
+    if (pipe_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(ctx.device, pipe_, nullptr);
+        pipe_ = VK_NULL_HANDLE;
+    }
+    if (layout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(ctx.device, layout_, nullptr);
+        layout_ = VK_NULL_HANDLE;
+    }
+}
+
+void GpuInterpolator::dispatch_place_v2(VkCommandBuffer cmd, VkDeviceAddress raw_verts_bda,
+                                        VkDeviceAddress transforms_bda, std::uint32_t vertex_count) {
+    if (!ready() || vertex_count == 0) return;
+    const std::uint32_t count = vertex_count <= max_vertices_ ? vertex_count : max_vertices_;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);
+    PlacePush push{raw_verts_bda, transforms_bda, out_addr_, count};
+    vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (count + 63u) / 64u, 1u, 1u);
+
+    VkBufferMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = out_buf_;
+    barrier.offset = 0;
+    barrier.size = static_cast<VkDeviceSize>(count) * sizeof(gpu_common::GpuVertex);
+
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+} // namespace mhf::psp::vk
