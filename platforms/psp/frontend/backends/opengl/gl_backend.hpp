@@ -5,7 +5,7 @@
 // Runs on the GE thread: it owns the OpenGL context of the game window, draws every framebuffer the game renders
 // into an upscaled render target, and presents the displayed one to the window.
 
-#include "gpu_common.hpp"
+#include "../gpu_common.hpp"
 
 #include <memory>
 

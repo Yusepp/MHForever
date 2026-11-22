@@ -6,7 +6,7 @@
 // for the game window, and renders PSP framebuffers into upscaled VkImages using dynamic rendering, bindless textures,
 // Buffer Device Address, and VMA.
 
-#include "gpu_common.hpp"
+#include "../gpu_common.hpp"
 
 #include <memory>
 

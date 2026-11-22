@@ -1,8 +1,8 @@
 #include "psp_frontend.hpp"
 
 #include "dialog_overlay.hpp"
-#include "gl_backend.hpp"
-#include "vk_backend.hpp"
+#include "backends/opengl/gl_backend.hpp"
+#include "backends/vulkan/vk_backend.hpp"
 #include "game_overlay_policy.hpp"
 #include "host/keymap.hpp"
 #include "host/padmap.hpp"

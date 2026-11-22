@@ -5,8 +5,8 @@
 
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
-#include "../texture_images.hpp"
-#include "../texture_pack.hpp"
+#include "texture_images.hpp"
+#include "texture_pack.hpp"
 
 #include <cstdint>
 #include <filesystem>

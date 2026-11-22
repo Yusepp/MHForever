@@ -8,14 +8,14 @@
 // - Upscaled VkRenderTarget pool, RTT + self-sampling copies, block transfers, overlays, and menu blur.
 
 #include "vk_backend.hpp"
-#include "vulkan/vk_buffers.hpp"
-#include "vulkan/vk_context.hpp"
-#include "vulkan/vk_descriptors.hpp"
-#include "vulkan/vk_interpolate.hpp"
-#include "vulkan/vk_pipelines.hpp"
-#include "vulkan/vk_shadows.hpp"
-#include "vulkan/vk_swapchain.hpp"
-#include "vulkan/vk_transfer.hpp"
+#include "vk_buffers.hpp"
+#include "vk_context.hpp"
+#include "vk_descriptors.hpp"
+#include "vk_interpolate.hpp"
+#include "vk_pipelines.hpp"
+#include "vk_shadows.hpp"
+#include "vk_swapchain.hpp"
+#include "vk_transfer.hpp"
 
 #include "ge.hpp"
 
