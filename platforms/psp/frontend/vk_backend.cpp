@@ -297,8 +297,13 @@ private:
     std::uint32_t cur_layer_ = gpu::DrawInfo::kNoLayer;
     std::uint32_t hud_layer_ = gpu::DrawInfo::kNoLayer;
     bool quest_hud_this_flip_ = false;
-    std::uint32_t last_shown_addr_ = 0;
+    std::array<std::uint32_t, 2> shown_addrs_{UINT32_MAX, UINT32_MAX};
     float frame_stretch_ = 1.0f;
+
+    [[nodiscard]] bool is_shown_target(std::uint32_t addr) const noexcept {
+        if (shown_addrs_[0] == UINT32_MAX) return true;
+        return addr == shown_addrs_[0] || addr == shown_addrs_[1];
+    }
 
     std::uint32_t last_shown_slot_ = 0;
     float last_shown_uv_[2]{1.0f, 1.0f};
@@ -772,7 +777,7 @@ void VkBackend::draw_batch() {
     // Quest HUD detection, HUD scaling, and widescreen 2D aspect preservation (single tight pass).
     float hud_scale = 1.0f, hud_ax = 0.0f, hud_ay = 0.0f;
     float wide_scale = 1.0f, wide_ax = 240.0f;
-    if (setup_.through && !clear && !setup_.self_sampled && (setup_.target == last_shown_addr_ || last_shown_addr_ == 0u)) {
+    if (setup_.through && !clear && !setup_.self_sampled && is_shown_target(setup_.target)) {
         float x1 = 1e9f, y1 = 1e9f, x2 = -1e9f, y2 = -1e9f;
         for (const GpuVertex &v : batch_) {
             x1 = std::min(x1, v.x);
@@ -1714,7 +1719,10 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     frame_stretch_ = wide > 0.0f ? (wide / (480.0f / 272.0f)) : 1.0f;
 
     const std::uint32_t off = (address & 0x1FFFFFFFu) & 0x001FFFFFu;
-    last_shown_addr_ = off;
+    if (off != shown_addrs_[0]) {
+        shown_addrs_[1] = shown_addrs_[0];
+        shown_addrs_[0] = off;
+    }
     auto it = targets_.find(off);
     bool have_gpu_frame = (it != targets_.end() && it->second.color.image != VK_NULL_HANDLE && it->second.last_draw + 4 >= frame_number_);
     if (have_gpu_frame) {
