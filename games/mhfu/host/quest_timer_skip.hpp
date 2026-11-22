@@ -1,11 +1,13 @@
 #pragma once
 
 #include "mhf/psp/host.hpp"
+#include "overlay/hud_bar.hpp"
 #include "psprecomp/guest_memory.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace mhf::mhfu {
 
@@ -33,12 +35,17 @@ public:
     void clear() noexcept;
 
     [[nodiscard]] bool can_skip() const noexcept { return can_skip_; }
-    [[nodiscard]] std::string hint() const;
+    [[nodiscard]] float hold_progress() const noexcept { return hold_progress_; }
+    // Localized text prompt matching the game's system language (0=JP, 1=EN, 2=FR, 3=ES, 4=DE, 5=IT).
+    [[nodiscard]] std::string hint(int language = 1) const;
+    // MH-styled PSP [SELECT] pill + return emblem sprite with hold-progress highlight.
+    [[nodiscard]] std::vector<mhf::overlay::HintSprite> sprites() const;
 
 private:
     QuestTimerSkipSymbols symbols_;
     std::uint32_t active_quest_manager_{0};
     std::uint64_t hold_start_us_{0};
+    float hold_progress_{0.0f};
     bool holding_{false};
     bool triggered_{false};
     bool can_skip_{false};

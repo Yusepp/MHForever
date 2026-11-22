@@ -1528,7 +1528,8 @@ int main(int argc, char **argv) {
                     auto sprites = g_gathering.sprites(*rt);
                     auto text = sprites.empty() ? g_gathering.hint(*rt) : std::string{};
                     if (sprites.empty() && text.empty() && g_quest_timer_skip.can_skip()) {
-                        text = g_quest_timer_skip.hint();
+                        text = g_quest_timer_skip.hint(g_gathering.language);
+                        sprites = g_quest_timer_skip.sprites();
                     }
                     frontend.set_game_hint(std::move(text), std::move(sprites));
                 }
