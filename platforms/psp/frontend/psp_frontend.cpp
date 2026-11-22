@@ -994,7 +994,7 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     overlay::MenuItem quit = menu_item(Kind::Button, kQuit, "Quit the game");
     quit.detail = "Return to the launcher. Unsaved progress will be lost.";
     quit.danger = true;
-    overlay::MenuTab game{"Game", {resume, quit}, v.subtitle};
+    overlay::MenuTab game{"Game", {resume, quit}, v.subtitle, {}};
     // The game's options that change while playing (add_game_option); a row shown with a switch only while it is on.
     if (!impl.game_options.empty()) game.items.push_back(menu_item(Kind::Heading, 0, "Enhancements"));
     for (std::size_t i = 0; i < impl.game_options.size(); ++i) {
@@ -1041,7 +1041,7 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
 
     overlay::MenuTab audio{"Audio", {menu_item(Kind::Slider, kMusic, "Music", impl.music_volume),
                                       menu_item(Kind::Slider, kSfx, "Sound effects", impl.sfx_volume)},
-                           "Changes apply immediately."};
+                           "Changes apply immediately.", {}};
 
     overlay::MenuItem scale = menu_item(Kind::Choice, kScale, "Internal resolution", impl.render_scale - 1);
     for (int n = 1; n <= kMaxScale; ++n) scale.options.push_back(std::to_string(n) + "x");
@@ -1057,7 +1057,7 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     overlay::MenuTab video{"Video", {scale, fps,
                                       menu_item(Kind::Toggle, kFullscreen, "Fullscreen", impl.host.window_rect().fullscreen ? 1 : 0),
                                       menu_item(Kind::Toggle, kSmooth, "Smooth textures", impl.live.smooth_textures ? 1 : 0)},
-                           "Changes apply immediately."};
+                           "Changes apply immediately.", {}};
     if (impl.gpu_state == 1 && impl.widescreen_offered) { // the GPU renderer stretches the picture; the software one draws the PSP's screen as it is
         overlay::MenuItem wide = menu_item(Kind::Toggle, kWidescreen, "Widescreen", impl.live.widescreen ? 1 : 0);
         wide.detail = "Fills wide windows and screens with a wider view.";
@@ -1105,7 +1105,7 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     }
     hud.detail = "Size of the quest HUD.";
     video.items.push_back(hud);
-    overlay::MenuTab controls{"Controls", {menu_item(Kind::Heading, 0, "Keyboard")}, "Select an action, then press the new key or button."};
+    overlay::MenuTab controls{"Controls", {menu_item(Kind::Heading, 0, "Keyboard")}, "Select an action, then press the new key or button.", {}};
     for (std::size_t i = 0; i < host::kKeyActions.size(); ++i) {
         const int id = kKeyBase + static_cast<int>(i);
         overlay::MenuItem row = menu_item(Kind::Binding, id, std::string(kActionLabels[i]), impl.capture_id == id ? 1 : 0);
@@ -1167,7 +1167,7 @@ overlay::MenuView menu_confirm_quit(const Frontend::Impl &impl) {
     overlay::MenuItem yes = menu_item(Kind::Button, kQuitYes, "Quit without saving");
     yes.danger = true;
     v.tabs = {overlay::MenuTab{"Quit the game?", {menu_item(Kind::Button, kQuitNo, "Keep playing"), yes},
-                               "Unsaved progress will be lost."}};
+                               "Unsaved progress will be lost.", {}}};
     return v;
 }
 
@@ -1196,18 +1196,15 @@ void save_controls(const Frontend::Impl &impl) {
             out << "option.shadowDarkness=" << static_cast<int>(impl.live.shadow_strength * 100.0f + 0.5f) << "\n";
         }
         if (impl.vulkan_lighting_known) {
+            static constexpr std::string_view kVkEffectNames[] = {
+                "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
+                "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
+            };
             const std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
             out << "option.enhancedLighting=" << (impl.live.enhanced_lighting ? "true" : "false") << "\n";
-            out << "option.vkAo=" << ((m & LiveSettings::kVkEffectAo) ? "true" : "false") << "\n";
-            out << "option.vkContactShadows=" << ((m & LiveSettings::kVkEffectContactShadows) ? "true" : "false") << "\n";
-            out << "option.vkVolumetricFog=" << ((m & LiveSettings::kVkEffectVolumetricFog) ? "true" : "false") << "\n";
-            out << "option.vkBloom=" << ((m & LiveSettings::kVkEffectBloom) ? "true" : "false") << "\n";
-            out << "option.vkSsgi=" << ((m & LiveSettings::kVkEffectSsgi) ? "true" : "false") << "\n";
-            out << "option.vkSpecular=" << ((m & LiveSettings::kVkEffectSpecular) ? "true" : "false") << "\n";
-            out << "option.vkSoftParticles=" << ((m & LiveSettings::kVkEffectSoftParticles) ? "true" : "false") << "\n";
-            out << "option.vkFxaa=" << ((m & LiveSettings::kVkEffectFxaa) ? "true" : "false") << "\n";
-            out << "option.vkVignette=" << ((m & LiveSettings::kVkEffectVignette) ? "true" : "false") << "\n";
-            out << "option.vkKillcamDof=" << ((m & LiveSettings::kVkEffectKillcamDof) ? "true" : "false") << "\n";
+            for (unsigned bit = 0u; bit < std::size(kVkEffectNames); ++bit) {
+                out << "option." << kVkEffectNames[bit] << "=" << ((m & (1u << bit)) ? "true" : "false") << "\n";
+            }
         }
         for (const Frontend::GameOption &o : impl.game_options) {
             out << "option." << o.setting << "=";
