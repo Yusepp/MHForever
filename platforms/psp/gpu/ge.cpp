@@ -375,6 +375,11 @@ void Ge::prepare_lighting() {
         std::copy(l.lp, l.lp + 3, l.direction);
         const float ll = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
         if (ll > 0) for (float &c : l.direction) c /= ll;
+        if (l.kind == 2) {
+            const float dl = std::sqrt(l.ld[0] * l.ld[0] + l.ld[1] * l.ld[1] + l.ld[2] * l.ld[2]);
+            if (dl > 0) for (float &c : l.ld) c /= dl;
+            else l.ld[0] = l.ld[1] = l.ld[2] = 0.0f;
+        }
     }
 }
 
@@ -414,13 +419,14 @@ void Ge::light(const float wp[3], const float wn[3], Vertex &out, const DecodedV
             const float d = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
             const float denom = l.att[0] + l.att[1] * d + l.att[2] * d * d;
             attenuation = denom > 0 ? std::min(1.0f, 1.0f / denom) : 1.0f;
-            const float ll = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
-            if (ll > 0) for (float &c : L) c /= ll;
+            if (d > 0) {
+                const float inv_d = 1.0f / d;
+                L[0] *= inv_d; L[1] *= inv_d; L[2] *= inv_d;
+            }
         }
         if (l.kind == 2) {
             const float *ld = l.ld;
-            const float dl = std::sqrt(ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2]);
-            float spot = dl > 0 ? -(L[0] * ld[0] + L[1] * ld[1] + L[2] * ld[2]) / dl : 0.0f;
+            float spot = -(L[0] * ld[0] + L[1] * ld[1] + L[2] * ld[2]);
             spot = spot >= l.cutoff ? std::pow(std::max(spot, 0.0f), l.spot_exp) : 0.0f;
             attenuation *= spot;
         }
@@ -474,26 +480,31 @@ Vertex Ge::transform(const DecodedVertex &in) const {
         return out;
     }
     // Skinning.
+    const bool lighting_on = (regs_[kLightingEnable] & 1u) != 0;
+    const bool need_normal = lighting_on && in.has_normal;
     float model[3] = {in.pos[0], in.pos[1], in.pos[2]};
     float normal[3] = {in.normal[0], in.normal[1], in.normal[2]};
     if (((vt >> 9u) & 3u) != 0) {
         const unsigned count = ((vt >> 14u) & 7u) + 1u;
         float p[3] = {0, 0, 0}, nn[3] = {0, 0, 0};
         for (unsigned i = 0; i < count; ++i) {
-            float tp[3], tn[3];
+            const float w = in.weights[i];
+            if (w == 0.0f) continue;
+            float tp[3];
             mul43(bones_[i], in.pos, tp);
-            mul43(bones_[i], in.normal, tn, 0.0f);
-            for (int c = 0; c < 3; ++c) {
-                p[c] += tp[c] * in.weights[i];
-                nn[c] += tn[c] * in.weights[i];
+            p[0] += tp[0] * w; p[1] += tp[1] * w; p[2] += tp[2] * w;
+            if (need_normal) {
+                float tn[3];
+                mul43(bones_[i], in.normal, tn, 0.0f);
+                nn[0] += tn[0] * w; nn[1] += tn[1] * w; nn[2] += tn[2] * w;
             }
         }
         std::copy(p, p + 3, model);
-        std::copy(nn, nn + 3, normal);
+        if (need_normal) std::copy(nn, nn + 3, normal);
     }
-    float world[3], view[3], wn[3];
+    float world[3], view[3], wn[3] = {0.0f, 0.0f, 0.0f};
     mul43(world_, model, world);
-    mul43(world_, normal, wn, 0.0f);
+    if (lighting_on) mul43(world_, normal, wn, 0.0f);
     mul43(view_, world, view);
     const float v4[4] = {view[0], view[1], view[2], 1.0f};
     float clip[4];
@@ -1156,9 +1167,187 @@ Ge::TextureInfo Ge::texture_info() const {
 
 void Ge::decode_texture(std::uint32_t *out) const {
     const TextureInfo t = texture_info();
-    for (std::uint32_t y = 0; y < t.height; ++y) {
-        for (std::uint32_t x = 0; x < t.width; ++x) {
-            out[y * t.width + x] = fetch_texel(0, static_cast<int>(x), static_cast<int>(y));
+    const std::uint8_t *src = host(t.address, t.bytes);
+    if (src == nullptr || t.format == 6u || t.format == 7u || t.format > 10u) {
+        for (std::uint32_t y = 0; y < t.height; ++y) {
+            for (std::uint32_t x = 0; x < t.width; ++x) {
+                out[y * t.width + x] = fetch_texel(0, static_cast<int>(x), static_cast<int>(y));
+            }
+        }
+        return;
+    }
+
+    // DXT1/3/5: decode each 4x4 block once instead of 16 times per block.
+    if (t.format >= 8u && t.format <= 10u) {
+        const std::uint32_t block_bytes = t.format == 8u ? 8u : 16u;
+        const std::uint32_t blocks_per_row = std::max(1u, t.stride / 4u);
+        for (std::uint32_t by = 0; by < t.height; by += 4u) {
+            const std::uint32_t row_blocks = (by / 4u) * blocks_per_row;
+            for (std::uint32_t bx = 0; bx < t.width; bx += 4u) {
+                const std::uint8_t *blk = src + (row_blocks + bx / 4u) * block_bytes;
+                const std::uint8_t *cblk = blk + (t.format == 8u ? 0u : 8u);
+                std::uint32_t lines = 0;
+                std::uint16_t c0 = 0, c1 = 0;
+                std::memcpy(&lines, cblk, 4);
+                std::memcpy(&c0, cblk + 4, 2);
+                std::memcpy(&c1, cblk + 6, 2);
+                const std::uint32_t rgba0 = decode16(c0, 0);
+                const std::uint32_t rgba1 = decode16(c1, 0);
+                const std::uint32_t r0 = rgba0 & 0xFFu, g0 = (rgba0 >> 8u) & 0xFFu, b0 = (rgba0 >> 16u) & 0xFFu;
+                const std::uint32_t r1 = rgba1 & 0xFFu, g1 = (rgba1 >> 8u) & 0xFFu, b1 = (rgba1 >> 16u) & 0xFFu;
+                std::uint32_t pal[4];
+                pal[0] = (rgba0 & 0x00FFFFFFu) | 0xFF000000u;
+                pal[1] = (rgba1 & 0x00FFFFFFu) | 0xFF000000u;
+                if (c0 > c1 || t.format != 8u) {
+                    pal[2] = ((2u * r0 + r1 + 1u) / 3u) | (((2u * g0 + g1 + 1u) / 3u) << 8u) |
+                             (((2u * b0 + b1 + 1u) / 3u) << 16u) | 0xFF000000u;
+                    pal[3] = ((r0 + 2u * r1 + 1u) / 3u) | (((g0 + 2u * g1 + 1u) / 3u) << 8u) |
+                             (((b0 + 2u * b1 + 1u) / 3u) << 16u) | 0xFF000000u;
+                } else {
+                    pal[2] = ((r0 + r1) >> 1u) | (((g0 + g1) >> 1u) << 8u) |
+                             (((b0 + b1) >> 1u) << 16u) | 0xFF000000u;
+                    pal[3] = 0u;
+                }
+                std::uint64_t a_bits = 0;
+                std::uint32_t a_pal[8]{};
+                if (t.format == 10u) {
+                    const std::uint32_t a0 = blk[6], a1 = blk[7];
+                    std::uint32_t lo = 0;
+                    std::uint16_t hi = 0;
+                    std::memcpy(&lo, blk, 4);
+                    std::memcpy(&hi, blk + 4, 2);
+                    a_bits = lo | (static_cast<std::uint64_t>(hi) << 32u);
+                    a_pal[0] = a0;
+                    a_pal[1] = a1;
+                    if (a0 > a1) {
+                        for (std::uint32_t k = 2u; k < 8u; ++k) a_pal[k] = ((8u - k) * a0 + (k - 1u) * a1) / 7u;
+                    } else {
+                        for (std::uint32_t k = 2u; k < 6u; ++k) a_pal[k] = ((6u - k) * a0 + (k - 1u) * a1) / 5u;
+                        a_pal[6] = 0u;
+                        a_pal[7] = 255u;
+                    }
+                }
+                const std::uint32_t h_lim = std::min(4u, t.height - by);
+                const std::uint32_t w_lim = std::min(4u, t.width - bx);
+                for (std::uint32_t py = 0; py < h_lim; ++py) {
+                    std::uint16_t a_row = 0;
+                    if (t.format == 9u) std::memcpy(&a_row, blk + py * 2u, 2);
+                    std::uint32_t *dst_row = out + (by + py) * t.width + bx;
+                    for (std::uint32_t px = 0; px < w_lim; ++px) {
+                        const std::uint32_t bit_idx = py * 4u + px;
+                        std::uint32_t px_out = pal[(lines >> (bit_idx * 2u)) & 3u];
+                        if (t.format == 9u) {
+                            const std::uint32_t a4 = (a_row >> (px * 4u)) & 0xFu;
+                            px_out = (px_out & 0x00FFFFFFu) | (expand4(a4) << 24u);
+                        } else if (t.format == 10u) {
+                            const std::uint32_t code = static_cast<std::uint32_t>(a_bits >> (bit_idx * 3u)) & 7u;
+                            px_out = (px_out & 0x00FFFFFFu) | (a_pal[code] << 24u);
+                        }
+                        dst_row[px] = px_out;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    static constexpr std::uint32_t bits_for[6] = {16, 16, 16, 32, 4, 8};
+    const std::uint32_t row_bytes = t.stride * bits_for[t.format] / 8u;
+    const std::uint32_t blocks_per_row = std::max(1u, row_bytes / 16u);
+
+    if (t.format == 4u || t.format == 5u) {
+        // Pre-decode active CLUT once (16 entries for CLUT4, 256 for CLUT8).
+        std::uint32_t lut[256];
+        const std::uint32_t n_entries = (t.format == 4u) ? 16u : 256u;
+        for (std::uint32_t i = 0; i < n_entries; ++i) lut[i] = clut_lookup(i);
+
+        if (t.format == 4u) {
+            if (!t.swizzled) {
+                for (std::uint32_t y = 0; y < t.height; ++y) {
+                    const std::uint8_t *row = src + y * row_bytes;
+                    std::uint32_t *dst = out + y * t.width;
+                    for (std::uint32_t x = 0; x + 1u < t.width; x += 2u) {
+                        const std::uint8_t b = row[x >> 1u];
+                        dst[x] = lut[b & 0xFu];
+                        dst[x + 1u] = lut[b >> 4u];
+                    }
+                    if (t.width & 1u) dst[t.width - 1u] = lut[row[(t.width - 1u) >> 1u] & 0xFu];
+                }
+            } else {
+                for (std::uint32_t y = 0; y < t.height; ++y) {
+                    const std::uint32_t block_row = (y >> 3u) * blocks_per_row;
+                    const std::uint32_t in_block_y = (y & 7u) * 16u;
+                    std::uint32_t *dst = out + y * t.width;
+                    for (std::uint32_t xb = 0; xb * 2u < t.width; ++xb) {
+                        const std::uint8_t b = src[(block_row + (xb >> 4u)) * 128u + in_block_y + (xb & 15u)];
+                        const std::uint32_t x = xb * 2u;
+                        dst[x] = lut[b & 0xFu];
+                        if (x + 1u < t.width) dst[x + 1u] = lut[b >> 4u];
+                    }
+                }
+            }
+        } else {
+            if (!t.swizzled) {
+                for (std::uint32_t y = 0; y < t.height; ++y) {
+                    const std::uint8_t *row = src + y * row_bytes;
+                    std::uint32_t *dst = out + y * t.width;
+                    for (std::uint32_t x = 0; x < t.width; ++x) dst[x] = lut[row[x]];
+                }
+            } else {
+                for (std::uint32_t y = 0; y < t.height; ++y) {
+                    const std::uint32_t block_row = (y >> 3u) * blocks_per_row;
+                    const std::uint32_t in_block_y = (y & 7u) * 16u;
+                    std::uint32_t *dst = out + y * t.width;
+                    for (std::uint32_t x = 0; x < t.width; ++x) {
+                        dst[x] = lut[src[(block_row + (x >> 4u)) * 128u + in_block_y + (x & 15u)]];
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if (t.format == 3u) {
+        if (!t.swizzled) {
+            for (std::uint32_t y = 0; y < t.height; ++y) {
+                std::memcpy(out + y * t.width, src + y * row_bytes, t.width * 4u);
+            }
+        } else {
+            for (std::uint32_t y = 0; y < t.height; ++y) {
+                const std::uint32_t block_row = (y >> 3u) * blocks_per_row;
+                const std::uint32_t in_block_y = (y & 7u) * 16u;
+                std::uint32_t *dst = out + y * t.width;
+                for (std::uint32_t x = 0; x < t.width; ++x) {
+                    const std::uint32_t xb = x * 4u;
+                    std::memcpy(dst + x, src + (block_row + (xb >> 4u)) * 128u + in_block_y + (xb & 15u), 4);
+                }
+            }
+        }
+        return;
+    }
+
+    // Direct 16-bit formats (0: RGB565, 1: ABGR5551, 2: ABGR4444).
+    if (!t.swizzled) {
+        for (std::uint32_t y = 0; y < t.height; ++y) {
+            const std::uint8_t *row = src + y * row_bytes;
+            std::uint32_t *dst = out + y * t.width;
+            for (std::uint32_t x = 0; x < t.width; ++x) {
+                std::uint16_t p = 0;
+                std::memcpy(&p, row + x * 2u, 2);
+                dst[x] = decode16(p, t.format);
+            }
+        }
+    } else {
+        for (std::uint32_t y = 0; y < t.height; ++y) {
+            const std::uint32_t block_row = (y >> 3u) * blocks_per_row;
+            const std::uint32_t in_block_y = (y & 7u) * 16u;
+            std::uint32_t *dst = out + y * t.width;
+            for (std::uint32_t x = 0; x < t.width; ++x) {
+                const std::uint32_t xb = x * 2u;
+                std::uint16_t p = 0;
+                std::memcpy(&p, src + (block_row + (xb >> 4u)) * 128u + in_block_y + (xb & 15u), 2);
+                dst[x] = decode16(p, t.format);
+            }
         }
     }
 }
@@ -1184,8 +1373,22 @@ std::uint64_t Ge::texture_hash() const {
         for (; i < t.bytes; ++i) mix(p[i]);
     }
     if (t.format >= 4u && t.format <= 7u) {
-        mix(regs_[kClutFormat]);
-        for (const std::uint32_t c : clut_) mix(c);
+        const std::uint32_t cf = regs_[kClutFormat];
+        mix(cf);
+        if (t.format == 4u) {
+            // CLUT4 only reads 16 entries from the active palette slice.
+            const std::uint32_t fmt = cf & 3u;
+            const std::uint32_t start = ((cf >> 16u) & 0x1Fu) * 16u;
+            const std::uint32_t word_start = (fmt == 3u) ? (start & 0xFFu) : ((start >> 1u) & 0xFFu);
+            const std::uint32_t word_count = (fmt == 3u) ? 16u : 8u;
+            for (std::uint32_t k = 0; k < word_count; ++k) {
+                mix(clut_[(word_start + k) & 0xFFu]);
+            }
+        } else {
+            for (std::uint32_t i = 0; i < 256u; i += 2u) {
+                mix(static_cast<std::uint64_t>(clut_[i]) | (static_cast<std::uint64_t>(clut_[i + 1u]) << 32u));
+            }
+        }
     }
     return h;
 }
