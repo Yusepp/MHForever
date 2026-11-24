@@ -35,14 +35,16 @@ public:
 
     [[nodiscard]] bool can_skip() const noexcept { return can_skip_; }
     [[nodiscard]] float hold_progress() const noexcept { return hold_progress_; }
+    [[nodiscard]] std::uint32_t remaining_seconds() const noexcept { return (remaining_frames_ + 29u) / 30u; }
     // Localized label matching the game's system language (0=JP, 1=EN, 2=FR, 3=ES, 4=DE, 5=IT).
     [[nodiscard]] std::string label(int language = 1) const;
-    // Renders a Monster Hunter-styled Quest Return card with PSP [SELECT] pill, TrueType font, and progress bar.
+    // Renders the top-center MHFU post-quest countdown (animated 5s hourglass, live timer, radial SELECT ring, banner).
     void render_card(mhf::overlay::Painter &painter, int language = 1) const;
 
 private:
     QuestTimerSkipSymbols symbols_;
     std::uint32_t active_quest_manager_{0};
+    std::uint32_t remaining_frames_{0};
     std::uint64_t hold_start_us_{0};
     float hold_progress_{0.0f};
     bool holding_{false};
