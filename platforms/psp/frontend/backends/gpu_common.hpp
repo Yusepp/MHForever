@@ -155,15 +155,39 @@ constexpr std::array<int, 256> kKeyIndex = [] {
     return i >= 0 ? key[static_cast<std::size_t>(i)] : 0u;
 }
 
-// Screen-space vertex layout shared by both OpenGL and Vulkan draw pipelines (36 bytes).
+// Screen-space vertex layout shared by both OpenGL and Vulkan draw pipelines (40 bytes).
 struct GpuVertex {
     float x, y, z, inv_w;
     float u, v;
     std::uint8_t color[4];
     std::uint8_t spec[4];
     float fog;
+    std::uint32_t normal_oct; // packed 2x16-bit snorm octahedral view-space normal (0 = none)
 };
-static_assert(sizeof(GpuVertex) == 36);
+static_assert(sizeof(GpuVertex) == 40);
+
+// Encodes a unit view-space normal into 2x16-bit snorm octahedral coordinates (0u reserved for "absent").
+[[nodiscard]] inline std::uint32_t pack_oct_normal(float nx, float ny, float nz) noexcept {
+    const float l1 = (nx < 0.0f ? -nx : nx) + (ny < 0.0f ? -ny : ny) + (nz < 0.0f ? -nz : nz);
+    if (l1 < 1e-5f) return 0u;
+    float ox = nx / l1;
+    float oy = ny / l1;
+    if (nz < 0.0f) {
+        const float tx = (1.0f - (oy < 0.0f ? -oy : oy)) * (ox >= 0.0f ? 1.0f : -1.0f);
+        const float ty = (1.0f - (ox < 0.0f ? -ox : ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
+        ox = tx;
+        oy = ty;
+    }
+    auto to_s16 = [](float v) -> std::int16_t {
+        if (v < -1.0f) v = -1.0f;
+        if (v > 1.0f) v = 1.0f;
+        return static_cast<std::int16_t>(v * 32767.0f + (v >= 0.0f ? 0.5f : -0.5f));
+    };
+    std::uint16_t ux = static_cast<std::uint16_t>(to_s16(ox));
+    std::uint16_t uy = static_cast<std::uint16_t>(to_s16(oy));
+    std::uint32_t packed = static_cast<std::uint32_t>(ux) | (static_cast<std::uint32_t>(uy) << 16u);
+    return packed == 0u ? 1u : packed;
+}
 
 [[nodiscard]] inline std::uint32_t expand_bits(std::uint32_t v, int bits) noexcept {
     return bits == 5 ? (v << 3u) | (v >> 2u) : bits == 6 ? (v << 2u) | (v >> 4u) : (v << 4u) | v;

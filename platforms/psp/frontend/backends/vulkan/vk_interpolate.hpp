@@ -20,7 +20,7 @@ struct alignas(16) RawGpuVertex {
     std::uint32_t color_rgba{0xFFFFFFFFu};
     std::uint32_t spec_rgba{0xFF000000u};
     float fog{1.0f};
-    float pad[3]{};
+    float world_normal[3]{}; // skinned world-space unit normal (0,0,0 = absent)
 };
 static_assert(sizeof(RawGpuVertex) == 48);
 

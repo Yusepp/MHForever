@@ -4,11 +4,14 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-// Full-resolution unified lighting composite (runs once after 3D and before 2D HUD):
-// - Depth-aware bilateral upsample of multi-bounce GTAO with biome/sky-tinted crevice shading
-// - Subtle per-pixel sun key accent + Fresnel rim light (reconstructed normal, sky-masked)
-// - Depth-aware bilateral upsample of volumetric fog & sun shafts
-// - Selective emissive bloom + gentle filmic highlight shoulder
+// Full-resolution unified Linear-HDR lighting composite (runs once after 3D and before 2D HUD):
+// - Smooth per-pixel G-buffer vertex normals (with seamless bilateral depth-normal fallback)
+// - Multi-bounce GTAO + contact shadows + world-up hemisphere bounce in linear HDR space
+// - Per-pixel sun key contrast + GGX-inspired specular sheen + Fresnel rim light
+// - Quarter-res SSGI colored bounce + 4x2 dynamic emissive flash
+// - Rayleigh/Mie atmospheric fog & volumetric sun shafts + HDR Karis bloom with heat shimmer
+// - Adaptive eye exposure + ACES-inspired filmic tonemapping + subtle biome color grading
+// - Aspect-corrected luminance-preserving cinematic vignette + triangular IGN debanding
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -16,7 +19,8 @@ layout(set = 0, binding = 0) uniform texture2D u_textures[];
 layout(set = 0, binding = 1) uniform sampler u_samplers[];
 layout(set = 1, binding = 0, rgba8) uniform image2D u_lit_out;
 
-// When FXAA is off, kSpecInPlace = 1 reads and writes scene_color in place, skipping lit_tmp_tex_ + fxaa_prehud.comp.
+// When FXAA is off and reading from RGBA8 scene_color directly, kSpecInPlace = 1 reads/writes u_lit_out in place.
+// When reading from dedicated RGBA16F hdr_color_, kSpecInPlace = 0 reads u_textures[p.tex_slots.x] and writes u_lit_out.
 layout(constant_id = 0) const uint kSpecInPlace = 0u;
 
 struct LightingParams {
@@ -34,6 +38,7 @@ struct LightingParams {
     uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
     uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+    uvec4 phase1_slots; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags, w = 0
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -52,17 +57,41 @@ vec3 multi_bounce_ao(float ao, vec3 albedo) {
     return max(vec3(ao), ((ao * a + b) * ao + c) * ao);
 }
 
-// Triangular IGN dither for 8-bit debanding (eliminates banding in fog, skies & dark cave ceilings).
 float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Gentle highlight-preserving filmic shoulder: exact identity below 0.85 so bright snow & midtones
-// stay faithful to MHFU art, with C1-smooth asymptotic rolloff above 0.85 for HDR bloom/shafts.
-vec3 soft_filmic(vec3 x) {
+vec3 srgb_to_linear_hdr(vec3 c) {
+    return pow(max(c, vec3(0.0)), vec3(2.2));
+}
+
+vec3 linear_to_srgb(vec3 c) {
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+// Neutral-hue filmic tonemapper (AgX/ACES-inspired): keeps midtones faithful to MHFU art
+// while smoothly compressing HDR fire, lightning, bloom, and sunlight without hue-clipping!
+vec3 filmic_tonemap(vec3 x) {
+    // Subtle cross-channel desaturation on extreme HDR (> 1.0) so fire/explosions glow golden-white instead of neon.
     vec3 a = max(x, vec3(0.0));
-    vec3 hi = 0.85 + 0.15 * tanh((a - 0.85) / 0.15);
-    return mix(a, hi, step(vec3(0.85), a));
+    float l = dot(a, vec3(0.2126, 0.7152, 0.0722));
+    float hi_blend = smoothstep(0.95, 3.2, l) * 0.28;
+    a = mix(a, vec3(l), hi_blend);
+    // Narkowicz ACES fitted curve, gently blended with linear below 0.35 to preserve MHFU shadow readability.
+    vec3 aces = (a * (2.51 * a + 0.03)) / (a * (2.43 * a + 0.59) + 0.14);
+    float mid_w = smoothstep(0.0, 0.65, l);
+    // Scale ACES so 0.18 middle-grey maps cleanly without crushing dark caves.
+    vec3 scaled = mix(a * 1.04, aces * 1.06, 0.55 + 0.35 * mid_w);
+    return clamp(scaled, vec3(0.0), vec3(1.0));
+}
+
+vec3 decode_gbuf_normal(vec2 rg) {
+    vec2 oct = rg * 2.0 - 1.0;
+    vec3 n = vec3(oct.x, oct.y, 1.0 - abs(oct.x) - abs(oct.y));
+    float t = max(-n.z, 0.0);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.y += (n.y >= 0.0) ? -t : t;
+    return normalize(n);
 }
 
 void main() {
@@ -71,14 +100,14 @@ void main() {
     if (ip.x >= int(p.vz_and_size.z) || ip.y >= int(p.vz_and_size.w)) return;
 
     vec4 scene = (kSpecInPlace != 0u) ? imageLoad(u_lit_out, ip) : texelFetch(u_textures[p.tex_slots.x], ip, 0);
-    vec3 col = scene.rgb;
+    vec3 col_lin = srgb_to_linear_hdr(scene.rgb);
     vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
 
     uint dslot = p.tex_slots.y;
     float d_here = texelFetch(u_textures[dslot], ip, 0).r;
     bool is_sky = (d_here >= 0.99992 || d_here <= 0.00001);
 
-    // 1. Depth-aware bilateral upsample of denoised half-res GTAO, Contact Shadows & view-space normal.
+    // 1. Depth-aware bilateral upsample of denoised half-res GTAO & Contact Shadows + smooth G-buffer normal.
     if (!is_sky && p.tex_slots.z != 0u) {
         ivec2 gsize = textureSize(u_textures[p.tex_slots.z], 0);
         ivec2 gmax = gsize - ivec2(1);
@@ -112,72 +141,90 @@ void main() {
         vec2 nxy = nxy_sum / w_sum;
         float nz = sqrt(max(1.0 - dot(nxy, nxy), 0.001));
         vec3 N = normalize(vec3(nxy, nz));
+        bool is_skinned = false;
+
+        // Upgrade to true smooth per-pixel skinned vertex normal when G-buffer is present!
+        if (p.phase1_slots.x != 0u) {
+            vec4 gb = texelFetch(u_textures[p.phase1_slots.x], ip, 0);
+            if (gb.b > 0.5) {
+                vec3 gn = decode_gbuf_normal(gb.rg);
+                // Flip Y to match lighting_composite's +Y-down screen/view convention.
+                gn.y = -gn.y;
+                N = gn;
+                is_skinned = (gb.a > 0.5);
+            }
+        }
 
         vec2 ndc = uv * 2.0 - 1.0;
         vec3 V = normalize(vec3(-ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, 1.0));
+        if (dot(N, V) < 0.0) N = -N;
         vec3 L = normalize(p.sun_dir_view.xyz);
         vec3 U = normalize(p.world_up_view.xyz);
 
-        // Multi-bounce AO + Screen-Space Contact Shadows tinted by biome sky/shadow color.
-        vec3 mb_ao = multi_bounce_ao(ao, col);
-        vec3 tinted_ao = mix(p.shadow_tint.rgb, vec3(1.0), mb_ao);
-        vec3 tinted_cs = mix(p.shadow_tint.rgb * 0.72, vec3(1.0), contact);
-        col *= tinted_ao * tinted_cs;
+        // Multi-bounce AO + Screen-Space Contact Shadows tinted by biome sky/shadow color (linear).
+        vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
+        vec3 mb_ao = multi_bounce_ao(ao, clamp(col_lin, vec3(0.0), vec3(1.0)));
+        vec3 tinted_ao = mix(shadow_tint_lin, vec3(1.0), mb_ao);
+        vec3 tinted_cs = mix(shadow_tint_lin * 0.65, vec3(1.0), contact);
+        col_lin *= tinted_ao * tinted_cs;
 
         // 2. World-up Hemisphere Ambient Bounce (sky bounce upward, snow/sand/magma under-glow downward).
         if (p.ground_bounce.a > 0.001) {
             float up_dot = clamp(dot(N, U), -1.0, 1.0);
             float sky_w = max(up_dot, 0.0);
             float gnd_w = max(-up_dot, 0.0);
-            vec3 hemi = p.shadow_tint.rgb * (sky_w * 0.45) + p.ground_bounce.rgb * gnd_w;
-            col += col * hemi * (p.ground_bounce.a * (0.4 + 0.6 * ao));
+            vec3 ground_lin = srgb_to_linear_hdr(p.ground_bounce.rgb);
+            vec3 hemi = shadow_tint_lin * (sky_w * 0.45) + ground_lin * gnd_w;
+            col_lin += col_lin * hemi * (p.ground_bounce.a * (0.4 + 0.6 * ao));
         }
 
-        // 3. Per-pixel sun key contrast + GGX-lite biome specular sheen + Fresnel rim light.
+        // 3. Per-pixel sun key contrast + smooth GGX-like specular sheen + Fresnel rim light.
+        vec3 scatter_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
         float sun_vis = ao * contact;
-        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis;
-        col *= clamp(key_boost, 0.88, 1.16);
+        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_skinned ? 1.15 : 1.0);
+        col_lin *= clamp(key_boost, 0.84, 1.22);
 
         float ndotv = clamp(dot(N, V), 0.0, 1.0);
-        float fresnel = pow(1.0 - ndotv, 3.0);
+        float fresnel = pow(1.0 - ndotv, 3.2);
         if (p.spec_contact.x > 0.001 && p.sun_dir_view.w < 0.5) {
             vec3 H = normalize(L + V);
             float ndoth = clamp(dot(N, H), 0.0, 1.0);
-            float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-            float spec = pow(ndoth, max(p.spec_contact.y, 4.0)) * (0.25 + 0.75 * fresnel) * ndotl;
-            col += p.scatter_color.rgb * (spec * p.spec_contact.x * sun_vis * (0.35 + 0.65 * luma));
+            float luma_lin = dot(col_lin, vec3(0.2126, 0.7152, 0.0722));
+            float gloss = max(p.spec_contact.y, 6.0) * (is_skinned ? 1.15 : 0.90);
+            float spec = pow(ndoth, gloss) * (0.20 + 0.80 * fresnel) * ndotl;
+            col_lin += scatter_lin * (spec * p.spec_contact.x * sun_vis * (0.30 + 0.70 * clamp(luma_lin, 0.0, 1.5)));
         }
         if (p.bloom_rim.z > 0.001) {
             float sun_align = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
-            col += p.scatter_color.rgb * (fresnel * sun_align * p.bloom_rim.z * sun_vis);
+            float rim_mul = is_skinned ? 1.25 : 0.85;
+            col_lin += scatter_lin * (fresnel * sun_align * p.bloom_rim.z * rim_mul * sun_vis);
         }
 
-        // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash (explosions/fireballs/lightning).
+        // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash.
         if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
-            vec3 ssgi = texture(sampler2D(u_textures[p.ext_slots.x],
-                                          u_samplers[p.aux_slots.y]),
-                                uv).rgb;
-            col += ssgi * (0.35 + 0.65 * col) * (p.world_up_view.w * (0.45 + 0.55 * ao));
+            vec3 ssgi = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.x],
+                                                             u_samplers[p.aux_slots.y]),
+                                                   uv).rgb);
+            col_lin += ssgi * (0.30 + 0.70 * clamp(col_lin, vec3(0.0), vec3(1.0))) * (p.world_up_view.w * (0.45 + 0.55 * ao));
         }
         if (p.ext_slots.y != 0u) {
-            vec3 flash = texture(sampler2D(u_textures[p.ext_slots.y],
-                                           u_samplers[p.aux_slots.y]),
-                                 uv).rgb;
-            // Subtle room-wide colored illumination during bright explosions, fireballs & thunderbolts.
-            col += flash * (0.25 + 0.75 * col) * (0.32 * (0.45 + 0.55 * ao));
+            vec3 flash = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.y],
+                                                              u_samplers[p.aux_slots.y]),
+                                                    uv).rgb);
+            col_lin += flash * (0.25 + 0.75 * clamp(col_lin, vec3(0.0), vec3(1.0))) * (0.32 * (0.45 + 0.55 * ao));
         }
     }
 
-    // 5. Smooth bilinear upsample of quarter-res volumetric fog & sun shafts.
+    // 5. Smooth bilinear upsample of quarter-res Rayleigh/Mie volumetric fog & sun shafts.
     if (p.tex_slots.w != 0u) {
         vec4 vol = texture(sampler2D(u_textures[p.tex_slots.w],
                                      u_samplers[p.aux_slots.y]),
                            uv);
-        col = col * vol.a + vol.rgb;
+        col_lin = col_lin * vol.a + srgb_to_linear_hdr(vol.rgb);
     }
 
-    // 6. Selective emissive bloom + subtle rising heat-shimmer on warm fire/lava halos (100% race-free).
+    // 6. Selective HDR emissive bloom + subtle rising heat-shimmer on warm fire/lava halos.
     if (p.aux_slots.x != 0u && p.bloom_rim.y > 0.001) {
         vec3 bloom = texture(sampler2D(u_textures[p.aux_slots.x],
                                        u_samplers[p.aux_slots.y]),
@@ -192,10 +239,21 @@ void main() {
                                       clamp(uv + heat_off, vec2(0.001), vec2(0.999))).rgb;
             bloom = mix(bloom, bloom_haze, 0.55);
         }
-        col += bloom * p.bloom_rim.y;
+        col_lin += srgb_to_linear_hdr(bloom) * (p.bloom_rim.y * 1.15);
     }
 
-    // 7. Subtle biome color harmony (gentle vibrance boost on desaturated midtones, preserving highlights).
+    // 7. Adaptive Eye Exposure (smooth outdoor <-> cave luminance adaptation).
+    if (p.phase1_slots.y != 0u) {
+        float exp_gain = texelFetch(u_textures[p.phase1_slots.y], ivec2(0, 0), 0).r;
+        if (exp_gain > 0.5 && exp_gain < 2.0) {
+            col_lin *= exp_gain;
+        }
+    }
+
+    // 8. Filmic Tonemapping (Linear HDR -> display-referred [0,1] linear) -> sRGB.
+    vec3 col = linear_to_srgb(filmic_tonemap(col_lin));
+
+    // 9. Subtle biome color harmony & vibrance (preserves MHFU's iconic palette per biome).
     if (p.spec_contact.w > 0.001) {
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
         float cmax = max(col.r, max(col.g, col.b));
@@ -205,22 +263,31 @@ void main() {
         col = mix(vec3(luma), col, 1.0 + vib);
     }
 
-    // 8. Subtle cinematic edge framing ONLY in moody biomes (Caves, CozyIndoor, Swamp, Volcano, Castle Schrade).
+    // 10. Aspect-corrected, luminance-preserving cinematic vignette in moody biomes.
     if ((p.ext_slots.w & 2u) != 0u) {
         uint bid = p.ext_slots.z;
         float vig_str = 0.0;
-        if (bid == 3u || bid == 4u || bid == 5u) vig_str = 0.08;      // IceCave, CozyIndoor, DarkCave
-        else if (bid == 11u || bid == 12u || bid == 14u) vig_str = 0.06; // Swamp, Volcano, FortressSiege
+        vec3 vig_tint = vec3(1.0);
+        if (bid == 3u) { vig_str = 0.10; vig_tint = vec3(0.86, 0.94, 1.04); }      // IceCave: cool icy edge
+        else if (bid == 4u) { vig_str = 0.09; vig_tint = vec3(1.04, 0.95, 0.86); } // CozyIndoor: warm hearth
+        else if (bid == 5u) { vig_str = 0.12; vig_tint = vec3(0.92, 0.94, 1.00); } // DarkCave
+        else if (bid == 11u) { vig_str = 0.09; vig_tint = vec3(0.90, 0.96, 1.02); } // Swamp
+        else if (bid == 12u) { vig_str = 0.09; vig_tint = vec3(1.06, 0.90, 0.82); } // Volcano: warm embers
+        else if (bid == 14u) { vig_str = 0.09; vig_tint = vec3(0.94, 0.94, 0.98); } // FortressSiege
+        else { vig_str = 0.04; } // Ultra-subtle natural lens framing outdoors
         if (vig_str > 0.0) {
-            vec2 vc = uv * 2.0 - 1.0;
+            float aspect = p.vz_and_size.z / max(p.vz_and_size.w, 1.0);
+            vec2 vc = (uv * 2.0 - 1.0) * vec2(aspect / 1.765, 1.0);
             float r2 = dot(vc, vc);
-            float vig = 1.0 - smoothstep(0.65, 1.85, r2) * vig_str;
-            col *= vig;
+            float vig_mask = smoothstep(0.55, 1.75, r2) * vig_str;
+            // Preserve bright highlights (fire/UI edges) while gently framing corners.
+            float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+            float hi_protect = 1.0 - smoothstep(0.75, 1.0, luma) * 0.5;
+            col *= mix(vec3(1.0), vig_tint * (1.0 - vig_mask * hi_protect), clamp(vig_mask * 2.0, 0.0, 1.0));
         }
     }
 
-    // 9. Gentle C1-smooth highlight rolloff + triangular IGN debanding before RGBA8 store.
-    col = soft_filmic(col);
+    // 11. Triangular IGN debanding before RGBA8 store.
     float dither = (ign(vec2(ip)) + ign(vec2(ip) + vec2(17.0, 31.0)) - 1.0) / 255.0;
     col = clamp(col + vec3(dither), vec3(0.0), vec3(1.0));
     imageStore(u_lit_out, ip, vec4(col, scene.a));

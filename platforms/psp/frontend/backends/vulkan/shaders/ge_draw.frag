@@ -34,13 +34,26 @@ layout(constant_id = 0) const uint kSpecClear = 0u;
 layout(constant_id = 1) const uint kSpecTextured = 1u;
 layout(constant_id = 2) const uint kSpecAlphaTest = 1u;
 layout(constant_id = 3) const uint kSpecZRange = 0u;
+layout(constant_id = 4) const uint kSpecHdr = 0u;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
 layout(location = 2) in vec3 v_spec;
 layout(location = 3) in float v_fog;
+layout(location = 4) in vec3 v_normal;
+layout(location = 5) in float v_has_normal;
 
 layout(location = 0) out vec4 o_color;
+layout(location = 1) out vec4 o_gbuf;
+
+vec2 encode_oct_unorm(vec3 n) {
+    float l1 = abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 oct = n.xy / max(l1, 1e-5);
+    if (n.z < 0.0) {
+        oct = (1.0 - abs(oct.yx)) * vec2(oct.x >= 0.0 ? 1.0 : -1.0, oct.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return clamp(oct * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+}
 
 bool alpha_compare(uint f, uint a, uint b) {
     if (f == 0u) return false;
@@ -97,7 +110,11 @@ void main() {
             else { c.rgb += t.rgb; if (rgba) c.a *= t.a; }
             if ((bits & 16u) != 0u) c.rgb *= 2.0;
         }
-        c.rgb = min(c.rgb + v_spec, vec3(1.0));
+        if (kSpecHdr != 0u) {
+            c.rgb = max(c.rgb + v_spec, vec3(0.0));
+        } else {
+            c.rgb = min(c.rgb + v_spec, vec3(1.0));
+        }
         if ((bits & 0x80u) != 0u) {
             c.rgb = mix(p.fog_and_zmin.rgb, c.rgb, clamp(v_fog, 0.0, 1.0));
         }
@@ -135,5 +152,17 @@ void main() {
             }
         }
     }
-    o_color = clamp(c, 0.0, 1.0);
+    if (kSpecHdr != 0u) {
+        o_color = vec4(clamp(c.rgb, vec3(0.0), vec3(8.0)), clamp(c.a, 0.0, 1.0));
+        if (kSpecClear == 0u && v_has_normal > 0.5) {
+            DrawParams p2 = pc.params.items[pc.draw_idx];
+            float skinned = ((p2.tex_func_bits & 0x800u) != 0u) ? 1.0 : 0.0;
+            o_gbuf = vec4(encode_oct_unorm(normalize(v_normal)), 1.0, skinned);
+        } else {
+            o_gbuf = vec4(0.5, 0.5, 0.0, 0.0);
+        }
+    } else {
+        o_color = clamp(c, 0.0, 1.0);
+        o_gbuf = vec4(0.5, 0.5, 0.0, 0.0);
+    }
 }

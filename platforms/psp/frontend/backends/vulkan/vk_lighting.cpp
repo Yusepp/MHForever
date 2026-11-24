@@ -87,6 +87,7 @@ enum PassSlot : std::size_t {
     kPassFlash = 7,
     kPassComposite = 8,
     kPassFxaa = 9,
+    kPassExposure = 10,
 };
 
 } // namespace
@@ -118,7 +119,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    constexpr std::uint32_t kTotalSets = 11u + static_cast<std::uint32_t>(kSceneSetCount);
+    constexpr std::uint32_t kTotalSets = 12u + static_cast<std::uint32_t>(kSceneSetCount);
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
@@ -137,10 +138,11 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     ssgi_blur_set_ = sets[6];
     flash_set_ = sets[7];
     lit_tmp_set_ = sets[8];
-    taa_hist_sets_[0] = sets[9];
-    taa_hist_sets_[1] = sets[10];
+    exposure_set_ = sets[9];
+    taa_hist_sets_[0] = sets[10];
+    taa_hist_sets_[1] = sets[11];
     for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        scene_sets_[i] = sets[11 + i];
+        scene_sets_[i] = sets[12 + i];
     }
     scene_set_cursor_ = 0;
 
@@ -175,6 +177,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     const VkSpecializationMapEntry inplace_entry{0, 0, sizeof(std::uint32_t)};
     const VkSpecializationInfo inplace_spec{1, &inplace_entry, sizeof(inplace_val), &inplace_val};
     comp_inplace_pipe_ = make_pipe_spec(shaders::kLightingCompositeCompSpv, &inplace_spec);
+    exposure_pipe_ = make_pipe(shaders::kExposureCompSpv);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
     taa_pipe_ = make_pipe(shaders::kTaaResolveCompSpv);
 
@@ -231,6 +234,9 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     ssgi_blur_tex_.destroy(ctx, desc);
     flash_tex_.destroy(ctx, desc);
     lit_tmp_tex_.destroy(ctx, desc);
+    exposure_tex_.destroy(ctx, desc);
+    exposure_initialized_ = false;
+    exposure_reset_ = true;
     taa_hist_[0].destroy(ctx, desc);
     taa_hist_[1].destroy(ctx, desc);
     taa_hist_valid_ = false;
@@ -249,6 +255,7 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(flash_pipe_);
     kill_pipe(comp_pipe_);
     kill_pipe(comp_inplace_pipe_);
+    kill_pipe(exposure_pipe_);
     kill_pipe(fxaa_pipe_);
     kill_pipe(taa_pipe_);
     scene_set_views_.fill(VK_NULL_HANDLE);
@@ -336,11 +343,15 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
         needs_recreate(vol_tex_, qw, qh) || needs_recreate(bloom_tex_, qw, qh) ||
         needs_recreate(bloom_blur_tex_, qw, qh) || needs_recreate(ssgi_tex_, qw, qh) ||
         needs_recreate(ssgi_blur_tex_, qw, qh) || needs_recreate(flash_tex_, 4u, 2u) ||
-        needs_recreate(lit_tmp_tex_, full_w, full_h);
+        needs_recreate(lit_tmp_tex_, full_w, full_h) || needs_recreate(exposure_tex_, 1u, 1u);
     if (!any_recreate) return true;
 
     ctx.wait_idle();
     scene_set_views_.fill(VK_NULL_HANDLE);
+    if (needs_recreate(exposure_tex_, 1u, 1u)) {
+        exposure_initialized_ = false;
+        exposure_reset_ = true;
+    }
 
     auto make_target = [&](Target2D &t, std::uint32_t w, std::uint32_t h, VkFormat fmt, VkDescriptorSet dset) -> bool {
         if (t.image != VK_NULL_HANDLE && t.w == w && t.h == h) return true;
@@ -386,7 +397,8 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
            make_target(ssgi_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_set_) &&
            make_target(ssgi_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_blur_set_) &&
            make_target(flash_tex_, 4u, 2u, VK_FORMAT_R16G16B16A16_SFLOAT, flash_set_) &&
-           make_target(lit_tmp_tex_, full_w, full_h, VK_FORMAT_R8G8B8A8_UNORM, lit_tmp_set_);
+           make_target(lit_tmp_tex_, full_w, full_h, VK_FORMAT_R8G8B8A8_UNORM, lit_tmp_set_) &&
+           make_target(exposure_tex_, 1u, 1u, VK_FORMAT_R16_SFLOAT, exposure_set_);
 }
 
 bool LightingPipeline::ensure_taa_targets(const Context &ctx, BindlessDescriptors &desc,
@@ -609,7 +621,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda,
-                                bool run_fxaa) {
+                                bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
@@ -627,6 +639,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
 
     const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi;
     const bool need_bloom_src  = want_bloom || want_ssgi;
+    const bool use_hdr_src     = (hdr_input_slot != 0u);
+    const std::uint32_t src_color_slot = use_hdr_src ? hdr_input_slot : scene_color_slot;
 
     LightingComputeParams base{};
     fill_biome_params(base, in);
@@ -644,7 +658,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u);
     base.vz_and_size[2] = static_cast<float>(scene_w);
     base.vz_and_size[3] = static_cast<float>(scene_h);
-    base.tex_slots[0] = scene_color_slot;
+    base.tex_slots[0] = src_color_slot;
     base.tex_slots[1] = scene_depth_slot;
     base.tex_slots[2] = need_gtao_pass ? gtao_blur_tex_.slot : 0u;
     base.tex_slots[3] = want_vol ? vol_tex_.slot : 0u;
@@ -652,6 +666,10 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     base.aux_slots[1] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
     base.ext_slots[0] = want_ssgi ? ssgi_blur_tex_.slot : 0u;
     base.ext_slots[1] = need_gtao_pass ? gtao_tex_.slot : 0u;
+    base.phase1_slots[0] = gbuf_normal_slot;
+    base.phase1_slots[1] = exposure_tex_.slot;
+    base.phase1_slots[2] = (use_hdr_src ? 1u : 0u) | ((exposure_reset_ || !exposure_initialized_) ? 2u : 0u);
+    base.phase1_slots[3] = 0u;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;
@@ -664,9 +682,10 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     slots[kPassFlash]       = base; slots[kPassFlash].aux_slots[0]       = bloom_tex_.slot;   slots[kPassFlash].aux_slots[2]       = 4u;                slots[kPassFlash].aux_slots[3]     = 2u;
     slots[kPassComposite]   = base; slots[kPassComposite].ext_slots[1]   = want_ssgi ? flash_tex_.slot : 0u; slots[kPassComposite].aux_slots[2] = scene_w; slots[kPassComposite].aux_slots[3] = scene_h;
     slots[kPassFxaa]        = base; slots[kPassFxaa].aux_slots[0]        = lit_tmp_tex_.slot; slots[kPassFxaa].aux_slots[2]        = scene_w;           slots[kPassFxaa].aux_slots[3]      = scene_h;
+    slots[kPassExposure]    = base; slots[kPassExposure].aux_slots[2]    = 1u;                slots[kPassExposure].aux_slots[3]    = 1u;
 
     // Batch image layout transitions into one vkCmdPipelineBarrier2 per stage boundary.
-    std::array<VkImageMemoryBarrier2, 10> barriers{};
+    std::array<VkImageMemoryBarrier2, 12> barriers{};
     std::uint32_t barrier_count = 0;
     auto push_barrier = [&](VkImage img, VkImageLayout old_l, VkImageLayout new_l,
                             VkAccessFlags2 src_access, VkAccessFlags2 dst_access) {
@@ -716,13 +735,18 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         queue_to_general(flash_tex_.image);
     }
     if (want_fxaa) queue_to_general(lit_tmp_tex_.image);
+    push_barrier(exposure_tex_.image,
+                 exposure_initialized_ ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 exposure_initialized_ ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : 0,
+                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     flush_barriers();
 
     // Bind global bindless Set 0 once; individual passes only rebind Set 1.
     const VkDescriptorSet bindless_set = desc.set();
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
 
-    // Stage 1: Enabled half/quarter-res passes read scene_depth/scene_color in parallel across GPU CUs.
+    // Stage 1: Enabled half/quarter-res passes + 1-WG adaptive exposure run in parallel across GPU CUs.
     auto run_pass = [&](VkPipeline pipe, VkDescriptorSet out_set, std::uint32_t w, std::uint32_t h, std::size_t idx) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1, &out_set, 0, nullptr);
@@ -735,11 +759,21 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_vol)       run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, kPassVol);
     if (need_bloom_src) run_pass(bloom_pipe_, bloom_set_, bloom_tex_.w, bloom_tex_.h, kPassBloom);
     if (want_ssgi)      run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, kPassSsgi);
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposure_pipe_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1, &exposure_set_, 0, nullptr);
+        const VkDeviceAddress addr = params_bda + kPassExposure * sizeof(LightingComputeParams);
+        vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(addr), &addr);
+        vkCmdDispatch(cmd, 1u, 1u, 1u);
+        exposure_initialized_ = true;
+        exposure_reset_ = false;
+    }
 
     // Stage 2: Bilateral GTAO/ContactShadow denoise + Kawase Bloom/SSGI blur + 4x2 dynamic flash.
     if (need_gtao_pass) queue_to_read(gtao_tex_.image);
     if (need_bloom_src) queue_to_read(bloom_tex_.image);
     if (want_ssgi)      queue_to_read(ssgi_tex_.image);
+    queue_to_read(exposure_tex_.image);
     flush_barriers();
     if (need_gtao_pass) run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, kPassGtaoDenoise);
     if (want_bloom)     run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, kPassBloomBlur);
@@ -759,17 +793,26 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
 
     if (want_fxaa) {
         flush_barriers();
-        // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
+        // Stage 3: Unified full-res composite reading src_color_slot -> writing lit_tmp_tex_.
         run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, kPassComposite);
 
         // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11) -> scene_color.
         queue_to_read(lit_tmp_tex_.image);
-        push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        push_barrier(scene_color,
+                     use_hdr_src ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     use_hdr_src ? 0 : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         flush_barriers();
         run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, kPassFxaa);
+    } else if (use_hdr_src) {
+        // HDR input -> composite & tonemap directly into RGBA8 scene_color (no in-place read needed!).
+        push_barrier(scene_color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                     0, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        flush_barriers();
+        run_pass(comp_pipe_, scene_set, scene_w, scene_h, kPassComposite);
     } else {
-        // FXAA off: composite in place directly on scene_color, skipping lit_tmp_tex_ and fxaa_prehud.comp!
+        // FXAA off, LDR input: composite in place directly on scene_color!
         push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);

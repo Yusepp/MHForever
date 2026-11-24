@@ -73,7 +73,7 @@ void main() {
     bool is_sky = (d0 >= 0.99992);
     float max_dist = is_sky ? 1400.0 : min(linear_eye_z(p, d0), 1600.0);
 
-    // 1. World-up-aligned Atmospheric Distance & Height Fog (starts smoothly beyond foreground hunter).
+    // 1. Physically motivated Rayleigh Aerial Perspective + World-up Atmospheric Valley Mist.
     float fog_start = p.sun_dir_view.w > 0.5 ? 65.0 : 95.0;
     float eff_dist = max(max_dist - fog_start, 0.0);
     // Mist settles naturally toward the world floor (Swamp, Great Forest, Tower cloud-sea, Snowy peaks)
@@ -83,14 +83,25 @@ void main() {
     float optical_depth = eff_dist * p.fog_color.a * height_mod;
     float transmittance = is_sky ? 1.0 : exp(-optical_depth);
     // Keep foreground and mid-ground clear so combat visibility is never compromised.
-    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.72);
-    vec3 fog_scatter = p.fog_color.rgb * (1.0 - transmittance);
+    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.74);
 
-    // 2. Outdoor Volumetric Sun Shafts, OR gentle Doorway / Cave-Mouth light shafts indoors!
+    // Subtle Rayleigh sky-blue aerial perspective on distant outdoor mountains/cliffs.
+    vec3 fog_rgb = p.fog_color.rgb;
+    if (p.sun_dir_view.w < 0.5 && !is_sky) {
+        float aerial = clamp((eff_dist - 120.0) / 900.0, 0.0, 1.0) * clamp(0.65 + ray_up * 0.45, 0.25, 1.0);
+        vec3 rayleigh_tint = mix(p.fog_color.rgb, p.shadow_tint.rgb * vec3(0.92, 0.98, 1.10), 0.45);
+        fog_rgb = mix(fog_rgb, rayleigh_tint, aerial * 0.55);
+    }
+    vec3 fog_scatter = fog_rgb * (1.0 - transmittance);
+
+    // 2. Outdoor Volumetric Sun Shafts (two-lobe Mie scattering), OR Doorway / Cave-Mouth light shafts indoors!
     vec3 shafts = vec3(0.0);
     if (p.sun_dir_view.w < 0.5 && p.scatter_color.a > 0.001 && p.sun_screen.z > 0.02) {
         float cos_theta = clamp(dot(ray_dir, normalize(p.sun_dir_view.xyz)), -1.0, 1.0);
-        float phase = clamp(hg_phase(cos_theta, 0.62) * 1.35, 0.0, 2.5);
+        // Two-lobe Mie phase: crisp solar halo (g=0.80) + broad atmospheric scatter (g=0.48).
+        float mie_tight = hg_phase(cos_theta, 0.80);
+        float mie_broad = hg_phase(cos_theta, 0.48);
+        float phase = clamp((mie_tight * 0.55 + mie_broad * 1.15), 0.0, 2.8);
 
         // Radial occlusion march toward projected sun position (10 jittered steps).
         vec2 to_sun = p.sun_screen.xy - uv;

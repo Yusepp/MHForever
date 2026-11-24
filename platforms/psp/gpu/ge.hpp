@@ -34,6 +34,8 @@ struct Vertex {
     // read from (0 when it was made up by clipping, or for lines and points).
     float world[3]{};
     bool has_world{};
+    float normal[3]{};
+    bool has_normal{};
     std::uint32_t source{};
 };
 

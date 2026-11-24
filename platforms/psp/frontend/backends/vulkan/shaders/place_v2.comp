@@ -18,7 +18,7 @@ struct RawGpuVertex {
     uint color_rgba;
     uint spec_rgba;
     float fog;
-    float pad[3];
+    vec3 world_normal;
 };
 
 struct DrawTransform {
@@ -36,6 +36,7 @@ struct GpuVertexOut {
     uint color_rgba;
     uint spec_rgba;
     float fog;
+    uint normal_oct;
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer RawVertexBuf {
@@ -67,6 +68,21 @@ vec3 mul_3x4(vec4 m[3], vec3 p) {
     return vec3(dot(m[0], p4), dot(m[1], p4), dot(m[2], p4));
 }
 
+vec3 mul_3x3(vec4 m[3], vec3 n) {
+    return vec3(dot(m[0].xyz, n), dot(m[1].xyz, n), dot(m[2].xyz, n));
+}
+
+uint pack_oct_normal(vec3 n) {
+    float l1 = abs(n.x) + abs(n.y) + abs(n.z);
+    if (l1 < 1e-5) return 0u;
+    vec2 oct = n.xy / l1;
+    if (n.z < 0.0) {
+        oct = (1.0 - abs(oct.yx)) * vec2(oct.x >= 0.0 ? 1.0 : -1.0, oct.y >= 0.0 ? 1.0 : -1.0);
+    }
+    uint packed = packSnorm2x16(clamp(oct, vec2(-1.0), vec2(1.0)));
+    return packed == 0u ? 1u : packed;
+}
+
 vec4 unpack_u8x4(uint c) {
     return vec4(float(c & 0xFFu), float((c >> 8u) & 0xFFu), float((c >> 16u) & 0xFFu), float((c >> 24u) & 0xFFu));
 }
@@ -82,6 +98,7 @@ struct ClipVert {
     vec4 col;
     vec4 spec;
     float fog;
+    vec3 vnorm;
 };
 
 ClipVert mix_clip_vert(ClipVert a, ClipVert b, float t) {
@@ -91,6 +108,7 @@ ClipVert mix_clip_vert(ClipVert a, ClipVert b, float t) {
     o.col = mix(a.col, b.col, t);
     o.spec = mix(a.spec, b.spec, t);
     o.fog = mix(a.fog, b.fog, t);
+    o.vnorm = mix(a.vnorm, b.vnorm, t);
     return o;
 }
 
@@ -112,13 +130,14 @@ GpuVertexOut project_vert(ClipVert cv, DrawTransform tr) {
     o.color_rgba = pack_u8x4(cv.col);
     o.spec_rgba = pack_u8x4(cv.spec);
     o.fog = cv.fog;
+    o.normal_oct = pack_oct_normal(cv.vnorm);
     return o;
 }
 
 GpuVertexOut degenerate_vert() {
     GpuVertexOut deg;
     deg.x = 0.0; deg.y = 0.0; deg.z = 0.0; deg.inv_w = 1.0;
-    deg.u = 0.0; deg.v = 0.0; deg.color_rgba = 0u; deg.spec_rgba = 0u; deg.fog = 1.0;
+    deg.u = 0.0; deg.v = 0.0; deg.color_rgba = 0u; deg.spec_rgba = 0u; deg.fog = 1.0; deg.normal_oct = 0u;
     return deg;
 }
 
@@ -169,6 +188,8 @@ void main() {
         cv[k].col = unpack_u8x4(rvs[k].color_rgba);
         cv[k].spec = unpack_u8x4(rvs[k].spec_rgba);
         cv[k].fog = rvs[k].fog;
+        vec3 vn_old = mul_3x3(tr.mv_old, rvs[k].world_normal);
+        cv[k].vnorm = vn_old;
 
         if (use_deform) {
             vec2 duv = abs(nvs[k].uv - rvs[k].uv);
@@ -177,6 +198,8 @@ void main() {
             cv[k].col = mix(cv[k].col, unpack_u8x4(nvs[k].color_rgba), pc.phase);
             cv[k].spec = mix(cv[k].spec, unpack_u8x4(nvs[k].spec_rgba), pc.phase);
             cv[k].fog = mix(rvs[k].fog, nvs[k].fog, pc.phase);
+            vec3 vn_new = mul_3x3(tr.mv_new, nvs[k].world_normal);
+            cv[k].vnorm = mix(vn_old, vn_new, pc.phase);
         }
     }
 
