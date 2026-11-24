@@ -54,8 +54,8 @@ struct MenuItem {
 struct MenuTab {
     std::string name;
     std::vector<MenuItem> items;
-    std::string subtitle; // under the section's title
-    std::string badge;    // a short tag next to its name in the sidebar ("Private")
+    std::string subtitle{}; // under the section's title
+    std::string badge{};    // a short tag next to its name in the sidebar ("Private")
 };
 
 struct MenuView {

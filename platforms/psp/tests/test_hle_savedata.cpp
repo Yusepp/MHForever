@@ -23,10 +23,10 @@ using mhf::psp::Runtime;
 using mhf::psp::RuntimeOptions;
 namespace sc = pokke::save_crypto;
 
-constexpr std::uint32_t kParams = 0x08A00000u, kBuffer = 0x08B00000u, kIcon = 0x08C00000u;
+constexpr std::uint32_t kParams = 0x08A00000u, kBuffer = 0x08B00000u;
 // SceUtilitySavedataParam offsets (the same ones the HLE uses).
 constexpr std::uint32_t kMode = 0x30, kGameName = 0x3C, kSaveName = 0x4C, kFileName = 0x64, kDataBuf = 0x74, kDataBufSize = 0x78,
-                        kDataSize = 0x7C, kSfoTitle = 0x80, kSfoSavedataTitle = 0x100, kResult = 0x1C, kKey = 0x5DC;
+                        kDataSize = 0x7C, kSfoTitle = 0x80, kSfoSavedataTitle = 0x100, kKey = 0x5DC;
 enum : std::uint32_t { kAutoLoad = 0, kAutoSave = 1 };
 
 std::vector<std::uint8_t> read_file(const fs::path &path) {

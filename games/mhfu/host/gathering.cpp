@@ -71,7 +71,7 @@ bool has_deliverable_item(const psprecomp::GuestMemory &m, std::uint32_t player,
     return false;
 }
 
-[[maybe_unused]] std::uint16_t pick_virtual_slot(std::span<const GatheringItem> items) noexcept {
+std::uint16_t pick_virtual_slot(std::span<const GatheringItem> items) noexcept {
     for (std::size_t i = items.size(); i-- > 0;) {
         if (items[i].id == 0 || items[i].count == 0) return static_cast<std::uint16_t>(i);
     }

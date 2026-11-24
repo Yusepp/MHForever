@@ -363,14 +363,12 @@ int main() {
             lay = layouter.layout(m.view());
         }
         MHF_CHECK(lay.scroll == lay.max_scroll);
-        bool partly = false; // a row cut by the top edge: picked only below it
+        // A row cut by the top edge: picked only below it.
         for (const auto &r : lay.rows) {
             if (r.w > 0 && r.y < lay.content.y) {
-                partly = true;
                 MHF_CHECK(lay.hit(r.x + 2.0f, r.y + 0.5f).kind == MenuLayout::Hit::Kind::None);
             }
         }
-        (void)partly;
         m.press(Key::Down); // keys: the selection (the second row) comes into view again
         lay = layouter.layout(m.view());
         MHF_CHECK(selected_id(m) == 101 && lay.scroll < one + 1.0f);

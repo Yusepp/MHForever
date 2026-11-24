@@ -1,4 +1,4 @@
-// Bridge between the UI and the native launcher (core/launcher/native/bridge.cpp).
+// Bridge between the UI and the native launcher (launcher/native/main.cpp).
 //
 // The native side binds `mhf_*` functions on `window` (each returns a Promise of JSON) and pushes events by calling
 // `window.__mhfEvent(event)`. Opened in a plain browser (`npm run dev`), a simulated backend stands in so the UI can be
@@ -49,7 +49,7 @@ export interface Settings {
   guildQuestScaling?: boolean; // dynamic 1P-4P scaling for large-monster HP and part stagger in Guild quests
   skipQuestClearTimer?: boolean; // hold Select after Quest Clear to fast-forward 60s timer
   itemPouchLoadouts?: boolean; // save/load item pouch presets in Village/Hall
-  capturableIndicator?: boolean; // blue skull icon when large monster is capturable
+  capturableIndicator?: boolean; // cyan minimap dot when large monster is capturable
   questStartTracker?: boolean; // reveal large monsters on the map for the first 60s of each quest
   infiniteWhetstone?: boolean; // sharpen without consuming Whetstones
   damageNumbers?: boolean; // World/Rise/Wilds-style floating damage numbers

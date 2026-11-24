@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
-#include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -76,10 +75,6 @@ int compare_prerelease(std::string_view a, std::string_view b) {
         }
     }
     return 0;
-}
-
-bool ends_with(std::string_view text, std::string_view end) {
-    return text.size() >= end.size() && text.substr(text.size() - end.size()) == end;
 }
 
 std::string lower(std::string s) {
@@ -170,7 +165,7 @@ std::optional<Release> pick(const Json &release, std::string_view suffix) {
     if (r.version.empty() || !release["assets"].is_array()) return std::nullopt;
     for (const Json &asset : release["assets"].as_array()) {
         const std::string name = asset["name"].as_string();
-        if (!ends_with(name, suffix)) continue;
+        if (!std::string_view(name).ends_with(suffix)) continue;
         const std::string digest = lower(asset["digest"].as_string());
         if (digest.rfind("sha256:", 0) != 0 || digest.size() != 7 + 64) return std::nullopt;
         r.archive = name;
