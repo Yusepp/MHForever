@@ -478,6 +478,21 @@ private:
     std::chrono::steady_clock::time_point next_subframe_at_{};
 
     // Optional per-stage profiler enabled via MHF_VK_PROFILE=1 (zero overhead when off).
+    struct ScopedTimer {
+        bool enabled;
+        std::uint64_t &accum_ns;
+        std::chrono::steady_clock::time_point start;
+        ScopedTimer(bool on, std::uint64_t &ns)
+            : enabled(on), accum_ns(ns),
+              start(on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+        ~ScopedTimer() {
+            if (enabled) {
+                accum_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    };
+
     struct ProfStats {
         bool enabled = false;
         std::uint64_t frames = 0;
@@ -837,17 +852,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 
     if (have_state_ && key == state_key_) return;
     draw_batch();
-    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    struct ApplyScope {
-        ProfStats &p;
-        std::chrono::steady_clock::time_point start;
-        ~ApplyScope() {
-            if (p.enabled) {
-                p.apply_ns += static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-            }
-        }
-    } prof_scope{prof_, t0};
+    ScopedTimer prof_scope(prof_.enabled, prof_.apply_ns);
 
     state_key_ = key;
     have_state_ = true;
@@ -1223,18 +1228,8 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
 
 void VkBackend::draw_batch() {
     if (batch_.empty()) return;
-    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (prof_.enabled) ++prof_.batches;
-    struct BatchScope {
-        ProfStats &p;
-        std::chrono::steady_clock::time_point start;
-        ~BatchScope() {
-            if (p.enabled) {
-                p.batch_ns += static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-            }
-        }
-    } prof_scope{prof_, t0};
+    ScopedTimer prof_scope(prof_.enabled, prof_.batch_ns);
     auto rt_it = targets_.find(setup_.target);
     if (rt_it == targets_.end()) {
         batch_.clear();
@@ -1373,18 +1368,8 @@ void VkBackend::draw_batch() {
 }
 
 void VkBackend::draw_started(const gpu::DrawInfo &draw) {
-    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (prof_.enabled) ++prof_.draws;
-    struct DrawStartScope {
-        ProfStats &p;
-        std::chrono::steady_clock::time_point start;
-        ~DrawStartScope() {
-            if (p.enabled) {
-                p.draw_start_ns += static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-            }
-        }
-    } prof_scope{prof_, t0};
+    ScopedTimer prof_scope(prof_.enabled, prof_.draw_start_ns);
     cur_layer_ = draw.layer;
     const auto sum = (!draw.through && !draw.clear) || subframes_ > 1 ? interpolation::summarize(draw)
                                                                       : interpolation::DrawSummary{};
@@ -2482,17 +2467,7 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
     if (!lighting_.ready() || !live_->enhanced_lighting.load(std::memory_order_relaxed)) return;
     if ((live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectComputeMask) == 0u) return;
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE || rt.depth.bindless_slot == 0) return;
-    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    struct LightScope {
-        ProfStats &p;
-        std::chrono::steady_clock::time_point start;
-        ~LightScope() {
-            if (p.enabled) {
-                p.light_ns += static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-            }
-        }
-    } prof_scope{prof_, t0};
+    ScopedTimer prof_scope(prof_.enabled, prof_.light_ns);
 
     const std::uint32_t w = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
     const std::uint32_t h = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
@@ -2568,18 +2543,8 @@ void VkBackend::prepare_interp_draws() {
 }
 
 void VkBackend::render_interpolated_subframe(float phase) {
-    const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (prof_.enabled) ++prof_.interp_calls;
-    struct InterpScope {
-        ProfStats &p;
-        std::chrono::steady_clock::time_point start;
-        ~InterpScope() {
-            if (p.enabled) {
-                p.interp_ns += static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-            }
-        }
-    } prof_scope{prof_, t0};
+    ScopedTimer prof_scope(prof_.enabled, prof_.interp_ns);
     SnapRawBuf &cur_old_buf = snap_raw_old_[snap_buf_idx_];
     SnapRawBuf &cur_new_buf = snap_raw_new_[snap_buf_idx_];
     if (!interp_can_blend_ || blend_older_.raw_verts.empty() || cur_old_buf.buf == VK_NULL_HANDLE) {
