@@ -251,9 +251,27 @@ private:
             dp.zmax_pad[1] = 0.0014f;
         }
     }
+    struct PassStateCache {
+        VkPipeline pipe = VK_NULL_HANDLE;
+        bool has_scissor = false;
+        VkRect2D scissor{};
+        bool has_depth = false;
+        VkBool32 depth_test = VK_FALSE;
+        VkBool32 depth_write = VK_FALSE;
+        VkCompareOp depth_op = VK_COMPARE_OP_ALWAYS;
+        bool has_blend_const = false;
+        float blend_const[4]{};
+        bool has_eds3 = false;
+        VkBool32 blend_en = VK_FALSE;
+        VkColorBlendEquationEXT blend_eq{};
+        VkColorComponentFlags write_mask = 0;
+        void reset() noexcept { *this = PassStateCache{}; }
+    };
+    PassStateCache main_pass_state_{};
+
     [[nodiscard]] bool bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w,
                                           std::uint32_t rt_h, bool is_soft_particle, VkDeviceAddress &out_params_addr,
-                                          VkPipeline *last_pipe = nullptr);
+                                          PassStateCache &cache);
     void reset_interp_state() noexcept {
         interp_active_ = false;
         interp_can_blend_ = false;
@@ -817,6 +835,11 @@ void VkBackend::begin_target_pass(RenderTarget &rt) {
     ri.pDepthAttachment = &depth_att;
 
     vkCmdBeginRendering(frames_[frame_slot_].cmd, &ri);
+    main_pass_state_.reset();
+    VkDescriptorSet set0 = descriptors_.set();
+    vkCmdBindDescriptorSets(frames_[frame_slot_].cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+    VkViewport vp{0.0f, 0.0f, static_cast<float>(rt.color.width), static_cast<float>(rt.color.height), 0.0f, 1.0f};
+    vkCmdSetViewport(frames_[frame_slot_].cmd, 0, 1, &vp);
     in_render_pass_ = true;
     active_target_addr_ = rt.address;
     rt.last_draw = frame_number_;
@@ -1119,7 +1142,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 }
 
 bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w, std::uint32_t rt_h,
-                                   bool is_soft_particle, VkDeviceAddress &out_params_addr, VkPipeline *last_pipe) {
+                                   bool is_soft_particle, VkDeviceAddress &out_params_addr, PassStateCache &cache) {
     FrameSlice &f = frames_[frame_slot_];
     auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
     if (!pslice.ptr) return false;
@@ -1211,9 +1234,9 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
 
     VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
     if (!pipe) return false;
-    if (!last_pipe || pipe != *last_pipe) {
+    if (pipe != cache.pipe) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        if (last_pipe) *last_pipe = pipe;
+        cache.pipe = pipe;
     }
 
     const std::uint32_t sx1 = R(kScissor1) & 0x3FFu, sy1 = (R(kScissor1) >> 10u) & 0x3FFu;
@@ -1225,31 +1248,61 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
         scissor.extent = {(sx2 - sx1 + 1u) * static_cast<std::uint32_t>(scale_),
                           (sy2 - sy1 + 1u) * static_cast<std::uint32_t>(scale_)};
     }
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    if (!cache.has_scissor || scissor.offset.x != cache.scissor.offset.x || scissor.offset.y != cache.scissor.offset.y ||
+        scissor.extent.width != cache.scissor.extent.width || scissor.extent.height != cache.scissor.extent.height) {
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        cache.scissor = scissor;
+        cache.has_scissor = true;
+    }
 
+    VkBool32 depth_test = VK_FALSE;
+    VkBool32 depth_write = VK_FALSE;
+    VkCompareOp depth_op = VK_COMPARE_OP_ALWAYS;
     if (clear) {
-        const bool depth_clear = (R(kClearMode) & 0x400u) != 0;
-        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
-        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
-        vkCmdSetDepthWriteEnable(cmd, depth_clear ? VK_TRUE : VK_FALSE);
+        depth_test = VK_TRUE;
+        depth_op = VK_COMPARE_OP_ALWAYS;
+        depth_write = (R(kClearMode) & 0x400u) != 0 ? VK_TRUE : VK_FALSE;
     } else if ((R(kZTestEnable) & 1u) != 0) {
         static constexpr VkCompareOp kOps[8] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL,
                                                 VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL,
                                                 VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL};
-        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
-        vkCmdSetDepthCompareOp(cmd, kOps[R(kZTest) & 7u]);
-        vkCmdSetDepthWriteEnable(cmd, (R(kZWriteDisable) & 1u) == 0 ? VK_TRUE : VK_FALSE);
-    } else {
-        vkCmdSetDepthTestEnable(cmd, VK_FALSE);
-        vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
-        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
+        depth_test = VK_TRUE;
+        depth_op = kOps[R(kZTest) & 7u];
+        depth_write = (R(kZWriteDisable) & 1u) == 0 ? VK_TRUE : VK_FALSE;
     }
+    if (!cache.has_depth || depth_test != cache.depth_test) {
+        vkCmdSetDepthTestEnable(cmd, depth_test);
+        cache.depth_test = depth_test;
+    }
+    if (!cache.has_depth || depth_op != cache.depth_op) {
+        vkCmdSetDepthCompareOp(cmd, depth_op);
+        cache.depth_op = depth_op;
+    }
+    if (!cache.has_depth || depth_write != cache.depth_write) {
+        vkCmdSetDepthWriteEnable(cmd, depth_write);
+        cache.depth_write = depth_write;
+    }
+    cache.has_depth = true;
 
-    vkCmdSetBlendConstants(cmd, blend_const);
+    if (!cache.has_blend_const || std::memcmp(blend_const, cache.blend_const, sizeof(blend_const)) != 0) {
+        vkCmdSetBlendConstants(cmd, blend_const);
+        std::memcpy(cache.blend_const, blend_const, sizeof(blend_const));
+        cache.has_blend_const = true;
+    }
     if (ctx_.caps.extended_dynamic_state3) {
-        vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blend_en);
-        vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &blend_eq);
-        vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &write_mask);
+        if (!cache.has_eds3 || blend_en != cache.blend_en) {
+            vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blend_en);
+            cache.blend_en = blend_en;
+        }
+        if (!cache.has_eds3 || std::memcmp(&blend_eq, &cache.blend_eq, sizeof(blend_eq)) != 0) {
+            vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &blend_eq);
+            cache.blend_eq = blend_eq;
+        }
+        if (!cache.has_eds3 || write_mask != cache.write_mask) {
+            vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &write_mask);
+            cache.write_mask = write_mask;
+        }
+        cache.has_eds3 = true;
     }
     return true;
 }
@@ -1356,14 +1409,10 @@ void VkBackend::draw_batch() {
 
     VkCommandBuffer cmd = f.cmd;
     VkDeviceAddress params_addr = 0;
-    if (!bind_ge_draw_state(cmd, setup_, rt.width, rt.height, is_soft_particle, params_addr)) {
+    if (!bind_ge_draw_state(cmd, setup_, rt.width, rt.height, is_soft_particle, params_addr, main_pass_state_)) {
         batch_.clear();
         return;
     }
-    VkDescriptorSet set0 = descriptors_.set();
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
-    VkViewport vp{0.0f, 0.0f, static_cast<float>(rt.color.width), static_cast<float>(rt.color.height), 0.0f, 1.0f};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
 
     const VkDeviceSize voff = vslice.offset;
     vkCmdBindVertexBuffers(cmd, 0, 1, &f.vertices.buffer, &voff);
@@ -2755,7 +2804,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
     vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
     VkViewport vp_full{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph), 0.0f, 1.0f};
     vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
-    VkPipeline last_pipe = VK_NULL_HANDLE;
+    PassStateCache interp_state{};
     VkBuffer last_vb = VK_NULL_HANDLE;
     VkDeviceSize last_vb_off = UINT64_MAX;
     bool interp_saw_3d = false;
@@ -2781,7 +2830,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
             vkCmdBeginRendering(f.cmd, &ri);
             vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
             vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
-            last_pipe = VK_NULL_HANDLE;
+            interp_state.reset();
+            last_vb = VK_NULL_HANDLE;
         }
 
         // Run enhanced Vulkan lighting strictly after 3D draws and before 2D HUD draws on 120/180 Hz subframes too!
@@ -2804,13 +2854,14 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 vkCmdBeginRendering(f.cmd, &ri);
                 vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
                 vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
-                last_pipe = VK_NULL_HANDLE;
+                interp_state.reset();
+                last_vb = VK_NULL_HANDLE;
             }
         }
 
         VkDeviceAddress params_addr = 0;
         if (!bind_ge_draw_state(f.cmd, rb.setup, blend_older_.width, blend_older_.height, is_soft_particle, params_addr,
-                                &last_pipe)) {
+                                interp_state)) {
             continue;
         }
 
