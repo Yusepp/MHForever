@@ -202,19 +202,19 @@ void draw_ps_button(mhf::overlay::Painter &painter, float x, float y, float w, f
     painter.text(x + (w - tw) * 0.5f, y + h * 0.74f, label, fsize, fg, 0.98f, true, 0.15f);
 }
 
-// MHFU authentic rarity color palette (0-based rarity 0..9 -> RARE 1..10).
+// MHFU authentic rarity color palette (0-based rarity 0..9 -> Rare 1..10).
 mhf::overlay::Color rarity_color(std::uint8_t rarity) noexcept {
     switch (rarity) {
         case 0u:
         case 1u:
-        case 2u: return {0.95f, 0.95f, 0.93f}; // RARE 1-3: White
-        case 3u: return {0.38f, 0.86f, 0.48f}; // RARE 4: Green
-        case 4u: return {0.95f, 0.36f, 0.36f}; // RARE 5: Red
-        case 5u: return {0.38f, 0.72f, 0.96f}; // RARE 6: Sky Blue
-        case 6u: return {0.96f, 0.86f, 0.34f}; // RARE 7: Gold
-        case 7u: return {0.96f, 0.58f, 0.26f}; // RARE 8: Orange
-        case 8u: return {0.78f, 0.48f, 0.96f}; // RARE 9: Violet
-        default: return {0.96f, 0.42f, 0.74f}; // RARE 10: Magenta
+        case 2u: return {0.95f, 0.95f, 0.93f}; // Rare 1-3: White / Light Gray
+        case 3u: return {0.34f, 0.88f, 0.44f}; // Rare 4: Green
+        case 4u: return {0.96f, 0.52f, 0.78f}; // Rare 5: Pink
+        case 5u: return {0.36f, 0.64f, 0.98f}; // Rare 6: Blue
+        case 6u: return {0.96f, 0.58f, 0.24f}; // Rare 7: Orange
+        case 7u: return {0.94f, 0.30f, 0.30f}; // Rare 8: Red
+        case 8u: return {0.96f, 0.88f, 0.30f}; // Rare 9: Yellow
+        default: return {0.74f, 0.40f, 0.96f}; // Rare 10: Purple
     }
 }
 
@@ -925,19 +925,19 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
         // "(L) Rotate" and "[START] Menu OFF" (soft translucent green fading right, no harsh box).
         const float hold = select_hold_progress(now_us);
         const float rx = 0.0f;
-        const float ry = 171.5f;
-        const float rw = 205.0f;
+        const float ry = 171.0f;
+        const float rw = 162.0f;
         const float rh = 15.5f;
 
-        constexpr int kBands = 20;
+        constexpr int kBands = 18;
         const float bw = rw / static_cast<float>(kBands);
         for (int i = 0; i < kBands; ++i) {
             const float t = static_cast<float>(i) / static_cast<float>(kBands - 1);
-            const float fade = t <= 0.62f ? 1.0f : std::max(0.0f, 1.0f - (t - 0.62f) / 0.38f);
+            const float fade = t <= 0.58f ? 1.0f : std::max(0.0f, 1.0f - (t - 0.58f) / 0.42f);
             painter.rect(rx + static_cast<float>(i) * bw, ry, bw + 0.35f, rh, kMhRibbonBg, 0.72f * fade);
         }
         if (hold > 0.001f) {
-            const float fw = std::clamp(hold, 0.0f, 1.0f) * (rw - 24.0f);
+            const float fw = std::clamp(hold, 0.0f, 1.0f) * (rw - 16.0f);
             painter.rect(rx, ry, fw, rh, kMhSelectGreen, 0.78f);
         }
 
@@ -1197,7 +1197,7 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             const float st_w = painter.font_ok() ? painter.measure(status, 6.8f, false) + 8.0f : 38.0f;
             const std::string fitted = fit_text(painter, std::move(desc), 7.8f, r_in_w - 31.0f - st_w - 8.0f);
             painter.text(r_in_x + 31.0f, cy + 12.2f, fitted, 7.8f, rare_col, 0.98f, false);
-            const std::string sub = std::string(sv.tag) + "  RARE-" + std::to_string(static_cast<unsigned>(meta.rarity) + 1u);
+            const std::string sub = std::string(sv.tag) + "  Rare " + std::to_string(static_cast<unsigned>(meta.rarity) + 1u);
             painter.text(r_in_x + 31.0f, cy + 22.8f, sub, 6.4f, rare_col, 0.92f, false);
 
             const mhf::overlay::Color st_fg = equipped_now ? kMhHeaderYellow : (in_box ? kMhOkText : kMhErrText);
