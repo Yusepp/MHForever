@@ -11,9 +11,9 @@
 
 #include <algorithm>
 #include <array>
-#include <deque>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -28,37 +28,87 @@ Kernel &k(Runtime &rt) { return rt.kernel(); }
 constexpr int kChannels = 8;
 constexpr std::uint32_t kSampleRate = 44100;
 
+constexpr std::size_t kMaxQueuedFrames = 44100 / 4; // 250 ms per channel
+constexpr std::size_t kRingCapacity = 32768u;     // power-of-two (>= kMaxQueuedFrames * 2 = 22050)
+constexpr std::size_t kRingMask = kRingCapacity - 1u;
+
 struct AudioChannel {
     bool reserved{};
     std::uint32_t samples{};
     std::uint32_t format{}; // 0 stereo, 0x10 mono
     std::uint64_t busy_until{};
-    std::deque<std::int16_t> queue; // interleaved stereo waiting for the host mixer
-    bool primed{};                  // the host mixer is consuming this channel (see mix_audio)
+    std::array<std::int16_t, kRingCapacity> ring{}; // interleaved stereo waiting for the host mixer
+    std::size_t head{};
+    std::size_t count{}; // number of int16 samples stored
+    bool primed{};       // the host mixer is consuming this channel (see mix_audio)
+
+    void push_frame(std::int16_t l, std::int16_t r) noexcept {
+        if (count + 2u > kRingCapacity) {
+            head = (head + 2u) & kRingMask;
+            count -= 2u;
+        }
+        const std::size_t tail = (head + count) & kRingMask;
+        ring[tail] = l;
+        ring[(tail + 1u) & kRingMask] = r;
+        count += 2u;
+    }
+
+    void trim_to(std::size_t max_samples) noexcept {
+        if (count > max_samples) {
+            const std::size_t drop = (count - max_samples + 1u) & ~std::size_t{1u};
+            head = (head + drop) & kRingMask;
+            count -= drop;
+        }
+    }
+
+    void pop_frame(std::int32_t &left, std::int32_t &right) noexcept {
+        left += ring[head];
+        right += ring[(head + 1u) & kRingMask];
+        head = (head + 2u) & kRingMask;
+        count -= 2u;
+    }
 };
 std::array<AudioChannel, kChannels> g_channels{};
-constexpr std::size_t kMaxQueuedFrames = 44100 / 4; // 250 ms per channel
 
 void enqueue_pcm(Runtime &rt, AudioChannel &c, std::uint32_t buffer, std::uint32_t left_volume,
                  std::uint32_t right_volume) {
-    if (buffer == 0) return;
+    if (buffer == 0 || c.samples == 0) return;
     const bool mono = (c.format & 0x10u) != 0;
+    const auto lv = static_cast<std::int32_t>(left_volume);
+    const auto rv = static_cast<std::int32_t>(right_volume);
     auto &mem = rt.memory();
-    for (std::uint32_t i = 0; i < c.samples; ++i) {
-        std::int32_t l, r;
+    const std::uint32_t bytes = c.samples * (mono ? 2u : 4u);
+    if (const std::uint8_t *raw = mem.raw_pointer(buffer, bytes)) {
         if (mono) {
-            l = r = static_cast<std::int16_t>(mem.load16(buffer + i * 2u));
+            for (std::uint32_t i = 0; i < c.samples; ++i) {
+                std::int16_t s = 0;
+                std::memcpy(&s, raw + i * 2u, 2);
+                const std::int32_t v = s;
+                c.push_frame(static_cast<std::int16_t>((v * lv) >> 15),
+                             static_cast<std::int16_t>((v * rv) >> 15));
+            }
         } else {
-            l = static_cast<std::int16_t>(mem.load16(buffer + i * 4u));
-            r = static_cast<std::int16_t>(mem.load16(buffer + i * 4u + 2u));
+            for (std::uint32_t i = 0; i < c.samples; ++i) {
+                std::int16_t lr[2]{};
+                std::memcpy(lr, raw + i * 4u, 4);
+                c.push_frame(static_cast<std::int16_t>((static_cast<std::int32_t>(lr[0]) * lv) >> 15),
+                             static_cast<std::int16_t>((static_cast<std::int32_t>(lr[1]) * rv) >> 15));
+            }
         }
-        c.queue.push_back(static_cast<std::int16_t>((l * static_cast<std::int32_t>(left_volume)) >> 15));
-        c.queue.push_back(static_cast<std::int16_t>((r * static_cast<std::int32_t>(right_volume)) >> 15));
+    } else {
+        for (std::uint32_t i = 0; i < c.samples; ++i) {
+            std::int32_t l, r;
+            if (mono) {
+                l = r = static_cast<std::int16_t>(mem.load16(buffer + i * 2u));
+            } else {
+                l = static_cast<std::int16_t>(mem.load16(buffer + i * 4u));
+                r = static_cast<std::int16_t>(mem.load16(buffer + i * 4u + 2u));
+            }
+            c.push_frame(static_cast<std::int16_t>((l * lv) >> 15),
+                         static_cast<std::int16_t>((r * rv) >> 15));
+        }
     }
-    while (c.queue.size() > kMaxQueuedFrames * 2) {
-        c.queue.pop_front();
-        c.queue.pop_front();
-    }
+    c.trim_to(kMaxQueuedFrames * 2u);
 }
 
 void AudioChReserve(Runtime &, Context &ctx) {
@@ -173,16 +223,13 @@ std::size_t mix_audio(Runtime &, std::int16_t *out, std::size_t frames) {
         std::int32_t left = 0, right = 0;
         for (auto &c : hle::g_channels) {
             const std::size_t prebuffer = std::max<std::size_t>(2u * c.samples, 1024u);
-            if (!c.primed && c.queue.size() / 2 >= prebuffer) c.primed = true;
+            if (!c.primed && c.count / 2u >= prebuffer) c.primed = true;
             if (!c.primed) continue;
-            if (c.queue.size() < 2) {
+            if (c.count < 2u) {
                 c.primed = false;
                 continue;
             }
-            left += c.queue.front();
-            c.queue.pop_front();
-            right += c.queue.front();
-            c.queue.pop_front();
+            c.pop_frame(left, right);
         }
         out[i * 2] = static_cast<std::int16_t>(std::clamp(left, -32768, 32767));
         out[i * 2 + 1] = static_cast<std::int16_t>(std::clamp(right, -32768, 32767));

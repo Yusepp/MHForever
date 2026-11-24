@@ -68,8 +68,9 @@ private:
             return;
         }
         const std::uint32_t at = data_ + block_ * 16u;
-        const std::uint8_t header = mem.load8(at);
-        const std::uint8_t flags = mem.load8(at + 1u);
+        const std::uint8_t *raw = mem.raw_pointer(at, 16u);
+        const std::uint8_t header = raw ? raw[0] : mem.load8(at);
+        const std::uint8_t flags = raw ? raw[1] : mem.load8(at + 1u);
         if (flags == 7) { // end of data, this block is not played
             end_ = true;
             return;
@@ -81,7 +82,7 @@ private:
         const int predictor = std::min(header >> 4, 4);
         const int c0 = kCoefficients[predictor][0], c1 = kCoefficients[predictor][1];
         for (int i = 0; i < 14; ++i) {
-            const std::uint8_t byte = mem.load8(at + 2u + static_cast<std::uint32_t>(i));
+            const std::uint8_t byte = raw ? raw[2 + i] : mem.load8(at + 2u + static_cast<std::uint32_t>(i));
             for (int half = 0; half < 2; ++half) {
                 const int nibble = half == 0 ? (byte & 0x0F) : (byte >> 4);
                 int sample = static_cast<std::int16_t>(static_cast<std::uint16_t>(nibble << 12)) >> shift;
@@ -388,9 +389,18 @@ void SasCoreMix(Runtime &rt, Context &ctx) {
         if (v.playing) mix_voice(mem, v, c.mix, c.grain);
     }
     const int volume = std::clamp(rt.options().sfx_volume, 0, 100); // player preference (100 = unchanged)
-    for (std::uint32_t i = 0; i < c.grain * 2u; ++i) {
-        const int sample = volume == 100 ? c.mix[i] : c.mix[i] * volume / 100;
-        mem.store16(out + i * 2u, static_cast<std::uint16_t>(static_cast<std::int16_t>(std::clamp(sample, -32768, 32767))));
+    const std::uint32_t total_samples = c.grain * 2u;
+    if (std::uint8_t *dst = mem.raw_pointer(out, total_samples * 2u)) {
+        for (std::uint32_t i = 0; i < total_samples; ++i) {
+            const int sample = volume == 100 ? c.mix[i] : c.mix[i] * volume / 100;
+            const auto clamped = static_cast<std::int16_t>(std::clamp(sample, -32768, 32767));
+            std::memcpy(dst + i * 2u, &clamped, 2);
+        }
+    } else {
+        for (std::uint32_t i = 0; i < total_samples; ++i) {
+            const int sample = volume == 100 ? c.mix[i] : c.mix[i] * volume / 100;
+            mem.store16(out + i * 2u, static_cast<std::uint16_t>(static_cast<std::int16_t>(std::clamp(sample, -32768, 32767))));
+        }
     }
     ret(ctx, 0);
 }
