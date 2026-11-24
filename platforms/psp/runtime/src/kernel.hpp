@@ -11,13 +11,16 @@
 
 #include "mhf/psp/runtime.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <initializer_list>
 #include <optional>
 #include <string>
@@ -30,7 +33,7 @@ public:
     static constexpr std::uint64_t kNoDeadline = ~0ull;
 
     enum class ThreadState { Ready, Running, Waiting, Suspended, Dormant, Dead };
-    enum class WaitType { None, Delay, Sleep, Semaphore, EventFlag, LwMutex, ThreadEnd, Vblank, Generic };
+    enum class WaitType { None, Delay, Sleep, Semaphore, EventFlag, LwMutex, ThreadEnd, Vblank, GeSync, Generic };
 
     struct Thread {
         int uid{};
@@ -185,6 +188,9 @@ public:
     void request_exit(int code) { exit_code_ = code; }
     [[nodiscard]] bool exiting() const noexcept { return exit_code_.has_value(); }
 
+    // Called from the GE worker thread when a display list completes to wake GeSync waiters immediately.
+    void notify_ge_progress();
+
     // Runtime services polled by the scheduler on every iteration, in scheduler context (e.g. delivering GE
     // callbacks raised by the GE worker thread).
     std::vector<std::function<void()>> pollers;
@@ -219,6 +225,10 @@ private:
     std::uint32_t interrupt_stack_top_{};
     std::uint64_t last_vblank_{};
     bool in_interrupt_{};
+    std::vector<Thread *> expired_scratch_;
+    std::mutex external_mutex_;
+    std::condition_variable external_cv_;
+    std::atomic<bool> ge_woken_{false};
 };
 
 } // namespace mhf::psp

@@ -722,6 +722,9 @@ void watch_friends(Frontend::Impl &impl, Runtime &rt) {
         impl.notice_pending = Frontend::Impl::Notice{};
         impl.dialog_cv.notify_one();
     }
+    static thread_local std::chrono::steady_clock::time_point last_check{};
+    if (now - last_check < std::chrono::milliseconds(250)) return;
+    last_check = now;
     const bool changed = look_at_friends(impl);
     const std::string room = rt.adhoc_room(), server = rt.adhoc_server();
     std::vector<std::string> here;

@@ -124,6 +124,7 @@ struct GeState {
             --pending;
             // Keep the table small: completed lists are only needed for ListSync.
             while (lists.size() > 64 && lists.begin()->second.done) lists.erase(lists.begin());
+            rt->kernel().notify_ge_progress();
             return true;
         }
         return false;
@@ -247,11 +248,11 @@ GeState &ge(Runtime &rt) {
     return *slot;
 }
 
-// Blocks the calling guest thread until `done()` holds, polling every 100 us (the worker cannot wake guest threads).
+// Blocks the calling guest thread until `done()` holds, sleeping on the kernel's GE condvar instead of busy-spinning.
 template <typename Done>
 void wait_for_ge(Runtime &rt, Done done) {
     while (!done()) {
-        rt.kernel().wait(Kernel::WaitType::Delay, 0, rt.kernel().now_us() + 100u);
+        rt.kernel().wait(Kernel::WaitType::GeSync, 0, rt.kernel().now_us() + 4'000u);
     }
 }
 

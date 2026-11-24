@@ -1529,43 +1529,46 @@ int main(int argc, char **argv) {
             runtime.register_call_filter("mh_modern_carving_animation_update", &modern_carving_animation_update);
             frontend.offer_songs(horn_songs, mhf::overlay::parse_song_spot(horn_songs_place).value_or(mhf::overlay::SongSpot{}));
             extra = [&frontend, rt = &runtime, songs = mhf::mhfu::HornSongs{}, read_at = std::uint64_t{0},
-                     previous = std::move(extra)]() mutable {
+                     poll_at = std::uint64_t{0}, previous = std::move(extra)]() mutable {
                 const std::uint64_t now = rt->now_us();
-                const auto &pad = mhf::psp::controller_state(*rt);
-                const bool in_quest_ovl = quest_overlay_at(*rt, region::mh_horn_songs.value_or(0));
-                if (in_quest_ovl) {
-                    g_quest_timer_skip.poll(rt->memory(), pad.buttons, now,
-                                            g_skip_quest_clear_timer.load(std::memory_order_relaxed));
-                    g_infinite_consumables.poll(rt->memory(),
-                                                g_infinite_whetstone.load(std::memory_order_relaxed),
-                                                g_infinite_paintballs.load(std::memory_order_relaxed));
-                    g_monster_tracker.poll(rt->memory(),
-                                           g_quest_start_tracker.load(std::memory_order_relaxed),
-                                           g_capturable_indicator.load(std::memory_order_relaxed));
-                    frontend.set_game_input_suppressed(false);
-                    frontend.set_game_button_overrides(0u, 0u);
-                    frontend.set_game_text_input(false);
-                } else {
-                    g_quest_timer_skip.clear();
-                    g_infinite_consumables.clear(&rt->memory());
-                    g_monster_tracker.clear();
-                    g_damage_numbers.clear();
-                    const std::uint32_t raw_btns = frontend.game_input_blocked() ? 0u : frontend.raw_buttons();
-                    g_item_loadouts.poll_box_ui(rt->memory(), raw_btns, now,
-                                                g_item_pouch_loadouts.load(std::memory_order_relaxed));
-                    if (g_item_loadouts.renaming()) {
-                        using G = mhf::psp::Frontend::GameTextEvent::Kind;
-                        for (const auto &ev : frontend.take_game_key_events()) {
-                            if (ev.kind == G::Text) g_item_loadouts.handle_text_input(ev.text);
-                            else if (ev.kind == G::Backspace) g_item_loadouts.handle_text_backspace();
-                            else if (ev.kind == G::Enter) g_item_loadouts.handle_text_confirm(now);
-                            else if (ev.kind == G::Escape) g_item_loadouts.handle_text_cancel();
+                if (now - poll_at >= 8'000u) {
+                    poll_at = now;
+                    const auto &pad = mhf::psp::controller_state(*rt);
+                    const bool in_quest_ovl = quest_overlay_at(*rt, region::mh_horn_songs.value_or(0));
+                    if (in_quest_ovl) {
+                        g_quest_timer_skip.poll(rt->memory(), pad.buttons, now,
+                                                g_skip_quest_clear_timer.load(std::memory_order_relaxed));
+                        g_infinite_consumables.poll(rt->memory(),
+                                                    g_infinite_whetstone.load(std::memory_order_relaxed),
+                                                    g_infinite_paintballs.load(std::memory_order_relaxed));
+                        g_monster_tracker.poll(rt->memory(),
+                                               g_quest_start_tracker.load(std::memory_order_relaxed),
+                                               g_capturable_indicator.load(std::memory_order_relaxed));
+                        frontend.set_game_input_suppressed(false);
+                        frontend.set_game_button_overrides(0u, 0u);
+                        frontend.set_game_text_input(false);
+                    } else {
+                        g_quest_timer_skip.clear();
+                        g_infinite_consumables.clear(&rt->memory());
+                        g_monster_tracker.clear();
+                        g_damage_numbers.clear();
+                        const std::uint32_t raw_btns = frontend.game_input_blocked() ? 0u : frontend.raw_buttons();
+                        g_item_loadouts.poll_box_ui(rt->memory(), raw_btns, now,
+                                                    g_item_pouch_loadouts.load(std::memory_order_relaxed));
+                        if (g_item_loadouts.renaming()) {
+                            using G = mhf::psp::Frontend::GameTextEvent::Kind;
+                            for (const auto &ev : frontend.take_game_key_events()) {
+                                if (ev.kind == G::Text) g_item_loadouts.handle_text_input(ev.text);
+                                else if (ev.kind == G::Backspace) g_item_loadouts.handle_text_backspace();
+                                else if (ev.kind == G::Enter) g_item_loadouts.handle_text_confirm(now);
+                                else if (ev.kind == G::Escape) g_item_loadouts.handle_text_cancel();
+                            }
                         }
+                        frontend.set_game_input_suppressed(g_item_loadouts.suppress_game_input());
+                        frontend.set_game_button_overrides(g_item_loadouts.game_button_clear_mask(),
+                                                           g_item_loadouts.game_button_force_mask());
+                        frontend.set_game_text_input(g_item_loadouts.renaming());
                     }
-                    frontend.set_game_input_suppressed(g_item_loadouts.suppress_game_input());
-                    frontend.set_game_button_overrides(g_item_loadouts.game_button_clear_mask(),
-                                                       g_item_loadouts.game_button_force_mask());
-                    frontend.set_game_text_input(g_item_loadouts.renaming());
                 }
                 if (now - read_at >= 50'000) {
                     read_at = now;
@@ -1736,8 +1739,8 @@ int main(int argc, char **argv) {
                 if (marker != shown) {
                     shown = marker;
                     image = marker ? std::make_shared<const std::vector<std::uint32_t>>(mhf::mhfu::key_quest_pixels(*marker)) : nullptr;
+                    frontend.set_game_overlay(image);
                 }
-                frontend.set_game_overlay(image);
             };
             if (key_quests_mapped) {
                 frontend.add_game_option({"keyQuestMarkers", "Show key quest markers",

@@ -365,6 +365,7 @@ std::vector<int> wake_order(const std::deque<int> &waiters, std::uint32_t attr, 
 } // namespace
 
 void Kernel::signal_semaphore_waiters(Semaphore &sema) {
+    if (sema.waiters.empty()) return;
     for (const int uid : wake_order(sema.waiters, sema.attr, [&](int u) { return thread(u); })) {
         Thread *t = thread(uid);
         if (t == nullptr) {
@@ -386,6 +387,7 @@ bool event_matches(std::uint32_t bits, std::uint32_t pattern, std::uint32_t mode
 } // namespace
 
 void Kernel::signal_event_flag_waiters(EventFlag &flag) {
+    if (flag.waiters.empty()) return;
     for (const int uid : wake_order(flag.waiters, flag.attr, [&](int u) { return thread(u); })) {
         Thread *t = thread(uid);
         if (t == nullptr) {
@@ -449,19 +451,30 @@ void Kernel::wake_timeouts() {
     // Wake expired waits in deadline order, so that threads whose timers fired earlier run earlier even when the
     // host overslept past several deadlines.
     const std::uint64_t now = now_us();
-    std::vector<Thread *> expired;
+    expired_scratch_.clear();
     for (auto &[uid, t] : threads_) {
         if (t->state == ThreadState::Waiting && t->wait_deadline != kNoDeadline && t->wait_deadline <= now) {
-            expired.push_back(t.get());
+            expired_scratch_.push_back(t.get());
         }
     }
-    std::stable_sort(expired.begin(), expired.end(),
-                     [](const Thread *a, const Thread *b) { return a->wait_deadline < b->wait_deadline; });
-    for (Thread *t : expired) {
-        const bool timed_wait = t->wait_type != WaitType::Delay && t->wait_type != WaitType::Vblank;
+    if (expired_scratch_.size() > 1u) {
+        std::stable_sort(expired_scratch_.begin(), expired_scratch_.end(),
+                         [](const Thread *a, const Thread *b) { return a->wait_deadline < b->wait_deadline; });
+    }
+    for (Thread *t : expired_scratch_) {
+        const bool timed_wait = t->wait_type != WaitType::Delay && t->wait_type != WaitType::Vblank &&
+                                t->wait_type != WaitType::GeSync;
         remove_from_wait_queue(*t);
         wake(*t, timed_wait ? error::kWaitTimeout : 0u);
     }
+}
+
+void Kernel::notify_ge_progress() {
+    {
+        std::lock_guard lock(external_mutex_);
+        ge_woken_.store(true, std::memory_order_release);
+    }
+    external_cv_.notify_one();
 }
 
 void Kernel::destroy_finished_fibers() {
@@ -601,14 +614,23 @@ int Kernel::run_scheduler() {
         if (exit_code_) {
             break;
         }
+        if (ge_woken_.exchange(false, std::memory_order_acq_rel)) {
+            for (auto &[uid, t] : threads_) {
+                if (t->state == ThreadState::Waiting && t->wait_type == WaitType::GeSync) {
+                    wake(*t, 0u);
+                }
+            }
+        }
         wake_timeouts();
         Thread *next = pick_ready();
         if (next == nullptr) {
             std::uint64_t earliest = next_interrupt_time();
             bool any_alive = false;
+            bool any_ge_waiter = false;
             for (const auto &[uid, t] : threads_) {
                 if (t->state == ThreadState::Waiting) {
                     any_alive = true;
+                    if (t->wait_type == WaitType::GeSync) any_ge_waiter = true;
                     earliest = std::min(earliest, t->wait_deadline);
                 }
             }
@@ -630,7 +652,15 @@ int Kernel::run_scheduler() {
             const std::uint64_t sleep = earliest == kNoDeadline ? kMaxHostSleepUs
                                                                 : std::min(earliest > now ? earliest - now : 0,
                                                                            kMaxHostSleepUs);
-            if (sleep > 0) precise_sleep(sleep);
+            if (sleep > 0) {
+                if (any_ge_waiter) {
+                    std::unique_lock lock(external_mutex_);
+                    external_cv_.wait_for(lock, std::chrono::microseconds(sleep),
+                                          [this] { return ge_woken_.load(std::memory_order_acquire); });
+                } else {
+                    precise_sleep(sleep);
+                }
+            }
             continue;
         }
         current_ = next;
