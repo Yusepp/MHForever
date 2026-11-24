@@ -499,6 +499,10 @@ void Frontend::set_shadow_zones(std::vector<std::string> names, std::vector<std:
     impl_->live.shadow_zone_textures = std::move(textures);
 }
 
+void Frontend::set_shadow_zone_biomes(std::vector<std::pair<std::uint8_t, bool>> biomes) {
+    impl_->live.shadow_zone_biomes = std::move(biomes);
+}
+
 void Frontend::set_hud(int size) { impl_->live.hud_size = std::clamp(size, 50, 100); }
 
 void Frontend::set_widescreen(bool on) {

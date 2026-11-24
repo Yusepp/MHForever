@@ -277,3 +277,70 @@ inline std::vector<std::pair<std::uint32_t, int>> shadow_zone_textures() {
     for (const ShadowZoneTexture &t : kShadowZoneTextures) out.emplace_back(t.hash, t.zone);
     return out;
 }
+
+// Per-zone Vulkan lighting biome classification (aligned with kShadowZoneNames).
+// Indices match mhf::psp::vk::BiomeKind (0..15).
+inline std::vector<std::pair<std::uint8_t, bool>> shadow_zone_biomes() {
+    constexpr std::uint8_t kDefaultOutdoor = 0, kPokkeVillage = 1, kSnowyPeak = 2, kIceCave = 3,
+                           kCozyIndoor = 4, kDarkCave = 5, kDesert = 6, kDesertSandstorm = 7,
+                           kForestHills = 8, kGreatForest = 9, kJungle = 10, kSwamp = 11,
+                           kVolcano = 12, kTower = 13, kFortressSiege = 14, kArena = 15;
+    auto is_cave_zone = [](std::string_view name) {
+        for (const char *c : kShadowCaveZones) {
+            if (name == c) return true;
+        }
+        return false;
+    };
+    auto classify = [](std::string_view name, bool &is_cave) -> std::uint8_t {
+        if (name.find("pokke/farm") != std::string_view::npos || name.find("pokke/village") != std::string_view::npos) {
+            is_cave = false;
+            return kPokkeVillage;
+        }
+        if (name.find("pokke/hall") != std::string_view::npos || name.find("pokke/house") != std::string_view::npos ||
+            name.find("pokke/kitchen") != std::string_view::npos) {
+            is_cave = true;
+            return kCozyIndoor;
+        }
+        if (name.find("volcano") != std::string_view::npos || name.find("battleground") != std::string_view::npos) {
+            return kVolcano;
+        }
+        if (name.find("snowy_mountains") != std::string_view::npos) {
+            if (is_cave) return kIceCave;
+            if (name.find("peak") != std::string_view::npos || name.find("area6") != std::string_view::npos ||
+                name.find("area7") != std::string_view::npos || name.find("area8") != std::string_view::npos) {
+                return kSnowyPeak;
+            }
+            return kPokkeVillage;
+        }
+        if (is_cave && name.find("fortress") == std::string_view::npos &&
+            name.find("castle_schrade") == std::string_view::npos && name.find("tower") == std::string_view::npos) {
+            return kDarkCave;
+        }
+        if (name.find("desert/area2") != std::string_view::npos) return kDesertSandstorm;
+        if (name.find("desert") != std::string_view::npos) return kDesert;
+        if (name.find("great_forest") != std::string_view::npos) return kGreatForest;
+        if (name.find("forestandhills") != std::string_view::npos) return kForestHills;
+        if (name.find("jungle") != std::string_view::npos) return kJungle;
+        if (name.find("swamp") != std::string_view::npos) return kSwamp;
+        if (name.find("tower") != std::string_view::npos) {
+            is_cave = false;
+            return kTower;
+        }
+        if (name.find("castle_schrade") != std::string_view::npos || name.find("fortress") != std::string_view::npos ||
+            name.find("town") != std::string_view::npos) {
+            is_cave = false;
+            return kFortressSiege;
+        }
+        if (name.find("arena") != std::string_view::npos) return kArena;
+        return kDefaultOutdoor;
+    };
+    std::vector<std::pair<std::uint8_t, bool>> out;
+    out.reserve(std::size(kShadowZoneNames));
+    for (const char *z : kShadowZoneNames) {
+        std::string_view name(z);
+        bool cave = is_cave_zone(name);
+        const std::uint8_t biome = classify(name, cave);
+        out.emplace_back(biome, cave);
+    }
+    return out;
+}

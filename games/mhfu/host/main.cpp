@@ -1511,6 +1511,7 @@ int main(int argc, char **argv) {
             frontend.set_shadow_haze_textures({std::begin(kShadowHazeTextures), std::end(kShadowHazeTextures)});
             frontend.set_shadow_zone_suns(shadow_zone_suns());
             frontend.set_shadow_zones({std::begin(kShadowZoneNames), std::end(kShadowZoneNames)}, shadow_zone_textures());
+            frontend.set_shadow_zone_biomes(shadow_zone_biomes());
             frontend.set_hud(hud_size);
             frontend.set_widescreen(widescreen);
             const char *shadow_env = std::getenv("MHF_SHADOW"); // MHF_SHADOW=1 turns them on as --projected-shadows does

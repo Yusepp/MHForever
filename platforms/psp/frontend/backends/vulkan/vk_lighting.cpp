@@ -89,54 +89,6 @@ enum PassSlot : std::size_t {
     kPassFxaa = 9,
 };
 
-BiomeKind classify_zone_name(const std::string &name, bool &is_cave) {
-    // Pokke Farm is open-air alpine outdoors (unlike Hall/House/Kitchen).
-    if (name.find("pokke/farm") != std::string::npos || name.find("pokke/village") != std::string::npos) {
-        is_cave = false;
-        return BiomeKind::PokkeVillage;
-    }
-    if (name.find("pokke/hall") != std::string::npos || name.find("pokke/house") != std::string::npos ||
-        name.find("pokke/kitchen") != std::string::npos) {
-        is_cave = true;
-        return BiomeKind::CozyIndoor;
-    }
-    // Volcano & Battleground (even volcano/area5 is a glowing magma cavern, not a dark cold cave!).
-    if (name.find("volcano") != std::string::npos || name.find("battleground") != std::string::npos) {
-        return BiomeKind::Volcano;
-    }
-    // Snowy Mountains: distinguish Ice Caves (areas 3-5), high peaks (6-8 & Peak), and lower valley (base/1/2).
-    if (name.find("snowy_mountains") != std::string::npos) {
-        if (is_cave) return BiomeKind::IceCave;
-        if (name.find("peak") != std::string::npos || name.find("area6") != std::string::npos ||
-            name.find("area7") != std::string::npos || name.find("area8") != std::string::npos) {
-            return BiomeKind::SnowyPeak;
-        }
-        return BiomeKind::PokkeVillage;
-    }
-    // Remaining caves (Swamp, Old Swamp, Desert area10, Great Forest 7/8, Old Jungle 4/9/10).
-    if (is_cave && name.find("fortress") == std::string::npos &&
-        name.find("castle_schrade") == std::string::npos && name.find("tower") == std::string::npos) {
-        return BiomeKind::DarkCave;
-    }
-    if (name.find("desert/area2") != std::string::npos) return BiomeKind::DesertSandstorm;
-    if (name.find("desert") != std::string::npos) return BiomeKind::Desert;
-    if (name.find("great_forest") != std::string::npos) return BiomeKind::GreatForest;
-    if (name.find("forestandhills") != std::string::npos) return BiomeKind::ForestHills;
-    if (name.find("jungle") != std::string::npos) return BiomeKind::Jungle;
-    if (name.find("swamp") != std::string::npos) return BiomeKind::Swamp;
-    if (name.find("tower") != std::string::npos) {
-        is_cave = false; // Tower is high ancient ruins above the clouds!
-        return BiomeKind::Tower;
-    }
-    if (name.find("castle_schrade") != std::string::npos || name.find("fortress") != std::string::npos ||
-        name.find("town") != std::string::npos) {
-        is_cave = false; // Open-air dramatic siege / fortress skies
-        return BiomeKind::FortressSiege;
-    }
-    if (name.find("arena") != std::string::npos) return BiomeKind::Arena;
-    return BiomeKind::DefaultOutdoor;
-}
-
 } // namespace
 
 void LightingPipeline::Target2D::destroy(const Context &ctx, BindlessDescriptors &desc) {
@@ -229,9 +181,17 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
         zone_votes_.assign(zones_.size(), 0u);
         for (std::size_t i = 0; i < zones_.size(); ++i) {
             const std::string &zname = live->shadow_zone_names[i];
-            bool is_cave = caves.count(zname) > 0;
-            zones_[i].biome = classify_zone_name(zname, is_cave);
-            zones_[i].is_cave = is_cave;
+            if (i < live->shadow_zone_biomes.size()) {
+                const auto [biome_id, cave] = live->shadow_zone_biomes[i];
+                zones_[i].biome = biome_id <= static_cast<std::uint8_t>(BiomeKind::Arena)
+                                      ? static_cast<BiomeKind>(biome_id)
+                                      : BiomeKind::DefaultOutdoor;
+                zones_[i].is_cave = cave;
+            } else {
+                const bool is_cave = caves.count(zname) > 0;
+                zones_[i].biome = is_cave ? BiomeKind::DarkCave : BiomeKind::DefaultOutdoor;
+                zones_[i].is_cave = is_cave;
+            }
             if (auto it = suns.find(zname); it != suns.end()) {
                 zones_[i].sun_height_deg = it->second[0];
                 zones_[i].sun_darkness = it->second[1];

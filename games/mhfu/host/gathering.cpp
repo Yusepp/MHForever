@@ -47,8 +47,8 @@ struct Target {
     bool delivery_box;
 };
 
-bool has_deliverable_item(const psprecomp::GuestMemory &m, std::uint32_t player,
-                          std::span<const GatheringItem> items) noexcept {
+[[maybe_unused]] bool has_deliverable_item(const psprecomp::GuestMemory &m, std::uint32_t player,
+                                           std::span<const GatheringItem> items) noexcept {
     // Carrying a transport item (egg, powderstone, etc.) can always be delivered at the Red Box.
     if ((m.load32(player + kPlayerTransportFlags) & 1u) != 0u) return true;
     if constexpr (region::mh_quest_manager) {
@@ -71,7 +71,7 @@ bool has_deliverable_item(const psprecomp::GuestMemory &m, std::uint32_t player,
     return false;
 }
 
-std::uint16_t pick_virtual_slot(std::span<const GatheringItem> items) noexcept {
+[[maybe_unused]] std::uint16_t pick_virtual_slot(std::span<const GatheringItem> items) noexcept {
     for (std::size_t i = items.size(); i-- > 0;) {
         if (items[i].id == 0 || items[i].count == 0) return static_cast<std::uint16_t>(i);
     }
