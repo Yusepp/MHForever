@@ -435,6 +435,41 @@ void on_update_info(const char *id, const Json &) {
     reply(id, g_update ? update_info(*g_update) : Json(nullptr));
 }
 
+void on_check_update(const char *id, const Json &) {
+    std::string req_id = id ? id : "";
+    std::thread([req_id = std::move(req_id)] {
+        std::string error;
+        const auto release = update::check(g_app.launcher->data_dir() / "update", MHF_VERSION_STRING, error);
+        Json result;
+        if (release) {
+            {
+                std::lock_guard lock(g_update_mutex);
+                g_update = *release;
+            }
+            Json e = update_info(*release);
+            e["type"] = "update";
+            g_app.emit(e);
+            result["status"] = "available";
+            result["update"] = update_info(*release);
+        } else if (!error.empty()) {
+            result["status"] = "error";
+            result["message"] = error;
+        } else {
+            result["status"] = "upToDate";
+            result["current"] = MHF_VERSION_STRING;
+        }
+        auto *payload = new std::pair<std::string, std::string>(req_id, result.dump());
+        webview_dispatch(
+            g_app.view,
+            [](webview_t w, void *arg) {
+                auto *p = static_cast<std::pair<std::string, std::string> *>(arg);
+                webview_return(w, p->first.c_str(), 0, p->second.c_str());
+                delete p;
+            },
+            payload);
+    }).detach();
+}
+
 // Downloads the new release, checks it against the SHA-256 GitHub gives for it, puts its files in place (the replaced
 // ones are kept as <name>.old until the next start) and restarts the launcher. Nothing is changed unless all of that works.
 void on_install_update(const char *id, const Json &) {
@@ -629,6 +664,7 @@ int main(int argc, char **argv) {
     bind("mhf_savesFolder", on_saves_folder);
     bind("mhf_texturePack", on_texture_pack);
     bind("mhf_updateInfo", on_update_info);
+    bind("mhf_checkUpdate", on_check_update);
     bind("mhf_installUpdate", on_install_update);
     bind("mhf_scanSaves", on_scan_saves);
     bind("mhf_importSaves", on_import_saves);

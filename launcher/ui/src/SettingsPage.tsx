@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { motion } from 'motion/react';
-import { api, regionTag, selectedGame, type SaveImportResult, type SaveScan, type Settings, type State } from './bridge';
+import { api, regionTag, selectedGame, type SaveImportResult, type SaveScan, type Settings, type State, type UpdateInfo } from './bridge';
 import { CopyIcon } from './icons';
 import { FdxOptions } from './FdxOptions';
 import { FucOptions } from './FucOptions';
@@ -420,13 +420,35 @@ function Controls({ keys, pad, keyDefaults, padDefaults, onChange }: {
   );
 }
 
-export function SettingsPage({ state, onChange, onPseudonym, onCopyCode, friendCode, onSavesFolder }: Pick<Props, 'state' | 'onChange' | 'onPseudonym' | 'onCopyCode'> & {
+export function SettingsPage({ state, onChange, onPseudonym, onCopyCode, friendCode, onSavesFolder, update, onInstallUpdate, say }: Pick<Props, 'state' | 'onChange' | 'onPseudonym' | 'onCopyCode'> & {
   friendCode: string;
   onSavesFolder: (backToDefault: boolean) => void;
+  update: UpdateInfo | null;
+  onInstallUpdate: () => void;
+  say: (text: string) => void;
 }) {
   const s = state.settings;
   const [name, setName] = useState(state.pseudonym);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateNote, setUpdateNote] = useState<string | null>(null);
   useEffect(() => setName(state.pseudonym), [state.pseudonym]);
+  const checkNow = () => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    setUpdateNote(null);
+    api.mhf_checkUpdate().then((res) => {
+      setCheckingUpdate(false);
+      if (res.status === 'available') {
+        setUpdateNote(`Version ${res.update.version} is available.`);
+      } else if (res.status === 'upToDate') {
+        setUpdateNote(`MHForever ${res.current} is up to date.`);
+        say('MHForever is up to date');
+      } else {
+        setUpdateNote(res.message);
+        say('Update check failed');
+      }
+    });
+  };
   const commitName = () => {
     const clean = name.trim().slice(0, 16);
     if (clean && clean !== state.pseudonym) onPseudonym(clean);
@@ -494,7 +516,14 @@ export function SettingsPage({ state, onChange, onPseudonym, onCopyCode, friendC
         <div className="srow">
           <div className="slabel">
             <b>MHForever {state.version}</b>
-            <span>Free software under GPL-3.0 or later. Contains no game data and requires your own copy of the game.</span>
+            <span>{update ? `Version ${update.version} is ready to install. Your saves, paths and settings are kept.` : (updateNote ?? 'Free software under GPL-3.0 or later. Contains no game data and requires your own copy of the game.')}</span>
+          </div>
+          <div className="row-actions">
+            {update ? (
+              <button className="ghost mid" onClick={onInstallUpdate}>Update to {update.version}</button>
+            ) : (
+              <button className="ghost mid" onClick={checkNow} disabled={checkingUpdate}>{checkingUpdate ? 'Checking…' : 'Check now'}</button>
+            )}
           </div>
         </div>
         <div className="srow">

@@ -291,6 +291,14 @@ export default function App() {
                     if (r.error) say(r.error);
                     else if (r.picked) say(r.copied ? `Saves folder changed, saves of ${r.copied} game${r.copied === 1 ? '' : 's'} copied` : 'Saves folder changed');
                   })}
+                  update={update}
+                  onInstallUpdate={() => {
+                    setUpdating({ phase: 'downloading', progress: 0 });
+                    api.mhf_installUpdate().then((r) => {
+                      if (!r.started) setUpdating({ phase: 'failed', progress: 0, message: 'The update cannot start while a game is running or a copy is being added.' });
+                    });
+                  }}
+                  say={say}
                 />
               )}
               {screen === 'game' && (

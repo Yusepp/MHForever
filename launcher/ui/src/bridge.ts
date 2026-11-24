@@ -215,6 +215,11 @@ export interface UpdateInfo {
   size: number; // bytes of the archive for this system
 }
 
+export type UpdateCheckResult =
+  | { status: 'available'; update: UpdateInfo }
+  | { status: 'upToDate'; current: string }
+  | { status: 'error'; message: string };
+
 type Native = {
   mhf_getState(): Promise<State>;
   mhf_setSettings(settings: Partial<Settings>): Promise<State>;
@@ -234,6 +239,7 @@ type Native = {
   mhf_probeServer(server: string): Promise<number | null>; // milliseconds to connect to an ad hoc server, null when it cannot
   // Chooses a folder for the saves (copying them there), or goes back to the default one with 'default'.
   mhf_updateInfo(): Promise<UpdateInfo | null>; // the newer release the start-up check found, if any
+  mhf_checkUpdate(): Promise<UpdateCheckResult>; // check GitHub releases on demand
   mhf_installUpdate(): Promise<{ started: boolean }>; // download, check, install and restart (events: updateProgress...)
   mhf_savesFolder(mode: '' | 'default'): Promise<{ picked: boolean; copied?: number; error?: string; state: State }>;
   // Texture packs: 'review' asks for a folder and reviews the pack in it, 'use' uses it where it is, 'copy' copies it
@@ -341,7 +347,8 @@ function simulated(): Native {
     async mhf_scanSaves() { return { picked: true, found: [{ folder: 'ULES01213', title: 'Game Data', exists: true }], note: '' }; },
     async mhf_importSaves() { return { imported: 1, backup: 'C:\\Users\\Hunter\\Documents\\MHForever\\saves\\ULES01213\\backups\\20261022-170000', error: '' }; },
     async mhf_probeServer(server) { await new Promise((r) => setTimeout(r, 300 + Math.random() * 700)); return server.includes('nowhere') ? null : 20 + Math.round(Math.random() * 250); },
-    async mhf_updateInfo() { return { version: '0.7.0', page: 'https://github.com/Mango77x/MHForever/releases', size: 73_000_000 }; },
+    async mhf_updateInfo() { return { version: '0.16.0', page: 'https://github.com/Yusepp/MHForever/releases', size: 156_000_000 }; },
+    async mhf_checkUpdate() { return { status: 'upToDate', current: '0.15.0' }; },
     async mhf_installUpdate() {
       let p = 0;
       const tick = setInterval(() => {
