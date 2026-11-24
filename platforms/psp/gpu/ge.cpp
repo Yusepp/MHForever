@@ -233,7 +233,10 @@ void Ge::execute(std::uint32_t word, std::uint32_t) {
     default:
         if (cmd >= kMorphWeight0 && cmd < kMorphWeight0 + 8) morph_[cmd - kMorphWeight0] = float24(data);
         if ((cmd >= kViewportXScale && cmd <= kViewportZCenter) || cmd == kOffsetX || cmd == kOffsetY) ++camera_generation_;
-        regs_[cmd] = data;
+        if (regs_[cmd] != data) {
+            regs_[cmd] = data;
+            ++state_generation_;
+        }
         return;
     }
 }
@@ -1009,6 +1012,7 @@ void Ge::block_transfer(std::uint32_t data) {
 
 void Ge::load_clut(std::uint32_t data) {
     ++clut_generation_;
+    ++state_generation_;
     const std::uint32_t address = (regs_[kClutAddr] & 0xFFFFF0u) | ((regs_[kClutAddrUpper] & 0x0F0000u) << 8u);
     const std::uint32_t bytes = std::min<std::uint32_t>((data & 0x3Fu) * 32u, 1024u);
     clut_last_bytes_ = bytes;

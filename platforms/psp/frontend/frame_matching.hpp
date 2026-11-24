@@ -139,6 +139,25 @@ private:
     std::vector<Candidate> candidates_;
     std::vector<std::int32_t> instance_older_, instance_newer_, instance_partner_;
     std::vector<std::uint8_t> instance_taken_;
+    struct Object {
+        Matrix motion;
+        bool single;
+        std::uint32_t draws;
+    };
+    struct Voter {
+        Matrix motion;
+        std::uint32_t votes;
+    };
+    struct SeenSlot {
+        std::uint64_t hash{0};
+        std::int32_t object{-1};
+        bool used{false};
+    };
+    std::vector<Object> objects_;
+    std::vector<SeenSlot> seen_table_;
+    std::vector<Matrix> motion_candidates_;
+    std::vector<Voter> voters_;
+    std::vector<const Object *> singles_, all_objects_;
     Matching result_;
     bool previous_blended_{};
     float previous_angle_degrees_{}, previous_distance_{};

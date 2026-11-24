@@ -258,10 +258,12 @@ private:
         interp_active_ = false;
         interp_can_blend_ = false;
         have_newer_snap_ = false;
-        cur_snap_ = InterpSnapshot{};
-        blend_older_ = InterpSnapshot{};
-        blend_newer_ = InterpSnapshot{};
+        cur_snap_.clear();
+        blend_older_.clear();
+        blend_newer_.clear();
         cur_raw_batch_start_ = 0;
+        raw_old_slot_ = -1;
+        raw_new_slot_ = -1;
     }
     void read_back();
     void capture_clean_3d_snapshot(RenderTarget &rt);
@@ -291,6 +293,19 @@ private:
         std::vector<vk::RawGpuVertex> raw_verts;
         std::vector<GpuVertex> flat_verts;
         std::vector<RecordedBatch> batches;
+        void clear() noexcept {
+            shown_addr = 0;
+            width = 512;
+            height = 272;
+            unblendable = false;
+            summaries.clear();
+            viewports.clear();
+            draw_raw_start.clear();
+            draw_raw_count.clear();
+            raw_verts.clear();
+            flat_verts.clear();
+            batches.clear();
+        }
     };
     struct SnapRawBuf {
         VkBuffer buf = VK_NULL_HANDLE;
@@ -426,6 +441,7 @@ private:
     bool last_shown_linear_ = true;
 
     bool have_state_ = false;
+    std::uint64_t last_state_gen_ = 0;
     DrawKey state_key_{};
     DrawSetup setup_{};
     std::vector<GpuVertex> batch_;
@@ -440,11 +456,12 @@ private:
     bool cur_draw_eligible_ = false;
     std::uint32_t cur_draw_index_ = 0;
 
-    // Double-buffered so present() NEVER overwrites raw vertices while an in-flight subframe's
-    // place_v2.comp is still reading the previous 30 Hz frame's buffers!
-    SnapRawBuf snap_raw_old_[2];
-    SnapRawBuf snap_raw_new_[2];
-    int snap_buf_idx_ = 0;
+    // 3-slot ring so each 30 Hz frame uploads raw_verts ONCE (older simply reuses the previous frame's slot),
+    // and never overwrites a buffer still referenced by an in-flight subframe's place_v2.comp.
+    SnapRawBuf raw_ring_[3];
+    int raw_old_slot_ = -1;
+    int raw_new_slot_ = -1;
+    int raw_next_slot_ = 0;
 
     struct PreparedDraw {
         bool active = false;
@@ -605,9 +622,8 @@ void VkBackend::shutdown() {
             sb = SnapRawBuf{};
         }
     };
-    for (int i = 0; i < 2; ++i) {
-        destroy_snap_buf(snap_raw_old_[i]);
-        destroy_snap_buf(snap_raw_new_[i]);
+    for (int i = 0; i < 3; ++i) {
+        destroy_snap_buf(raw_ring_[i]);
     }
 
     pack_streamer_.shutdown(ctx_, descriptors_);
@@ -845,11 +861,15 @@ void VkBackend::upload_texture_2d(VkImageResource &dst, std::uint32_t w, std::ui
 }
 
 void VkBackend::apply_state(const gpu::Ge &ge) {
+    const std::uint64_t sgen = ge.state_generation();
+    if (have_state_ && sgen == last_state_gen_) return;
+
     DrawKey key{};
     for (std::size_t i = 0; i < kStateRegs.size(); ++i) key[i] = ge.reg(kStateRegs[i]);
     key[kStateRegs.size()] = static_cast<std::uint32_t>(ge.clut_generation() & 0xFFFFFFFFu);
     key[kStateRegs.size() + 1] = ge.reg(kMaskAlpha);
 
+    last_state_gen_ = sgen;
     if (have_state_ && key == state_key_) return;
     draw_batch();
     ScopedTimer prof_scope(prof_.enabled, prof_.apply_ns);
@@ -2074,6 +2094,7 @@ void VkBackend::read_back() {
         ensure_recording();
     }
     have_state_ = false;
+    last_state_gen_ = 0;
 }
 
 void VkBackend::upload_overlay_if_needed() {
@@ -2496,9 +2517,8 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
 void VkBackend::prepare_interp_draws() {
     const std::size_t ndraws = blend_older_.summaries.size();
     prepared_draws_.resize(ndraws);
-    const SnapRawBuf &cur_new_buf = snap_raw_new_[snap_buf_idx_];
-    const bool new_buf_ok = cur_new_buf.buf != VK_NULL_HANDLE &&
-                            cur_new_buf.cap >= blend_newer_.raw_verts.size() * sizeof(vk::RawGpuVertex);
+    const bool new_buf_ok = raw_new_slot_ >= 0 && raw_ring_[raw_new_slot_].buf != VK_NULL_HANDLE &&
+                            raw_ring_[raw_new_slot_].cap >= blend_newer_.raw_verts.size() * sizeof(vk::RawGpuVertex);
 
     for (std::size_t i = 0; i < ndraws; ++i) {
         PreparedDraw &pd = prepared_draws_[i];
@@ -2546,15 +2566,16 @@ void VkBackend::prepare_interp_draws() {
 void VkBackend::render_interpolated_subframe(float phase) {
     if (prof_.enabled) ++prof_.interp_calls;
     ScopedTimer prof_scope(prof_.enabled, prof_.interp_ns);
-    SnapRawBuf &cur_old_buf = snap_raw_old_[snap_buf_idx_];
-    SnapRawBuf &cur_new_buf = snap_raw_new_[snap_buf_idx_];
-    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || cur_old_buf.buf == VK_NULL_HANDLE) {
+    if (!interp_can_blend_ || blend_older_.raw_verts.empty() || raw_old_slot_ < 0 ||
+        raw_ring_[raw_old_slot_].buf == VK_NULL_HANDLE) {
         // Cut / 2D / movie screen: present latest rendered frame at target cadence so pacing & MangoHUD stay locked.
         if (last_shown_slot_ != 0) {
             show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
         }
         return;
     }
+    SnapRawBuf &cur_old_buf = raw_ring_[raw_old_slot_];
+    SnapRawBuf *cur_new_buf_ptr = (raw_new_slot_ >= 0) ? &raw_ring_[raw_new_slot_] : nullptr;
 
     ensure_recording();
     end_render_pass();
@@ -2678,9 +2699,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
     const std::uint32_t raw_count = static_cast<std::uint32_t>(blend_older_.raw_verts.size());
-    interpolator_.dispatch_place_v2(f.cmd, frame_slot_, cur_old_buf.addr, cur_new_buf.addr, tslice.address, raw_count, scene_phase);
+    const VkDeviceAddress new_addr = cur_new_buf_ptr ? cur_new_buf_ptr->addr : 0;
+    interpolator_.dispatch_place_v2(f.cmd, frame_slot_, cur_old_buf.addr, new_addr, tslice.address, raw_count, scene_phase);
     cur_old_buf.last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
-    cur_new_buf.last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
+    if (cur_new_buf_ptr) cur_new_buf_ptr->last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
 
     // 3. Render interpolated 3D + 2D batches into interp_rt_ via Dynamic Rendering.
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2727,6 +2749,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
     VkViewport vp_full{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph), 0.0f, 1.0f};
     vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
     VkPipeline last_pipe = VK_NULL_HANDLE;
+    VkBuffer last_vb = VK_NULL_HANDLE;
+    VkDeviceSize last_vb_off = UINT64_MAX;
     bool interp_saw_3d = false;
     bool interp_lit = false;
     bool interp_depth_snapped = false;
@@ -2784,22 +2808,32 @@ void VkBackend::render_interpolated_subframe(float phase) {
         }
 
         std::uint32_t draw_vcount = rb.v_count;
+        std::uint32_t first_vertex = 0;
         if (rb.use_gpu_raw) {
             if (static_cast<std::uint64_t>(rb.v_offset) + rb.v_count > interpolator_.max_in_vertices()) continue;
             VkBuffer gpu_vb = interpolator_.out_vertex_buffer(frame_slot_);
+            if (last_vb != gpu_vb || last_vb_off != 0) {
+                const VkDeviceSize zero = 0;
+                vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &zero);
+                last_vb = gpu_vb;
+                last_vb_off = 0;
+            }
             // place_v2.comp emits 2 clipped triangles (6 verts) per input triangle (3 verts).
-            const VkDeviceSize off = static_cast<VkDeviceSize>(rb.v_offset) * 2u * sizeof(GpuVertex);
-            vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &off);
+            first_vertex = rb.v_offset * 2u;
             draw_vcount = rb.v_count * 2u;
         } else {
             if (!flat_uploaded) continue;
-            const VkDeviceSize off = flat_base_off + static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
-            vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &off);
+            if (last_vb != f.vertices.buffer || last_vb_off != flat_base_off) {
+                vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &flat_base_off);
+                last_vb = f.vertices.buffer;
+                last_vb_off = flat_base_off;
+            }
+            first_vertex = rb.v_offset;
         }
         vk::DrawPush push{params_addr, 0u};
         vkCmdPushConstants(f.cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
-        vkCmdDraw(f.cmd, draw_vcount, 1, 0, 0);
+        vkCmdDraw(f.cmd, draw_vcount, 1, first_vertex, 0);
     }
 
     vkCmdEndRendering(f.cmd);
@@ -2817,6 +2851,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
 void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32_t pixel_format) {
     draw_batch();
     have_state_ = false;
+    last_state_gen_ = 0;
     ++frame_number_;
 
     // Publish quest HUD detection for Better Sharpness, Gathering Assistance, and Hunting Horn Songs.
@@ -2907,10 +2942,22 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         has_prev_cam_ = was_blending;
         interp_can_blend_ = false;
         if (have_newer_snap_) {
-            blend_older_ = std::move(blend_newer_);
-            blend_newer_ = std::move(cur_snap_);
-            cur_snap_ = InterpSnapshot{};
+            // Rotate snapshots in-place via swap + clear to retain multi-MB vector capacities (zero heap churn).
+            std::swap(blend_older_, blend_newer_);
+            std::swap(blend_newer_, cur_snap_);
+            cur_snap_.clear();
             cur_raw_batch_start_ = 0;
+
+            raw_old_slot_ = raw_new_slot_;
+            raw_new_slot_ = -1;
+            const auto ut0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            if (!blend_newer_.raw_verts.empty()) {
+                const int slot = raw_next_slot_;
+                raw_next_slot_ = (raw_next_slot_ + 1) % 3;
+                if (upload_snap_raw(raw_ring_[slot], blend_newer_.raw_verts)) {
+                    raw_new_slot_ = slot;
+                }
+            }
 
             if (have_gpu_frame && !blend_older_.unblendable && !blend_newer_.unblendable &&
                 !blend_older_.raw_verts.empty() && interpolator_.ready()) {
@@ -2924,10 +2971,15 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                 if (last_matching_.cut == nullptr) {
                     last_cam_motion_ = last_matching_.camera_found ? interpolation::rigid_motion(last_matching_.camera)
                                                                    : interpolation::RigidMotion{};
-                    const auto ut0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                    snap_buf_idx_ = 1 - snap_buf_idx_;
-                    const bool ok_old = upload_snap_raw(snap_raw_old_[snap_buf_idx_], blend_older_.raw_verts);
-                    (void)upload_snap_raw(snap_raw_new_[snap_buf_idx_], blend_newer_.raw_verts);
+                    bool ok_old = (raw_old_slot_ >= 0 && raw_ring_[raw_old_slot_].buf != VK_NULL_HANDLE);
+                    if (!ok_old) {
+                        const int slot = raw_next_slot_;
+                        raw_next_slot_ = (raw_next_slot_ + 1) % 3;
+                        if (upload_snap_raw(raw_ring_[slot], blend_older_.raw_verts)) {
+                            raw_old_slot_ = slot;
+                            ok_old = true;
+                        }
+                    }
                     if (prof_.enabled) {
                         prof_.up_raw_ns += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ut0).count());
@@ -2947,9 +2999,18 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                 has_prev_cam_ = false;
             }
         } else {
-            blend_newer_ = std::move(cur_snap_);
-            cur_snap_ = InterpSnapshot{};
+            std::swap(blend_newer_, cur_snap_);
+            cur_snap_.clear();
             cur_raw_batch_start_ = 0;
+            raw_old_slot_ = -1;
+            raw_new_slot_ = -1;
+            if (!blend_newer_.raw_verts.empty()) {
+                const int slot = raw_next_slot_;
+                raw_next_slot_ = (raw_next_slot_ + 1) % 3;
+                if (upload_snap_raw(raw_ring_[slot], blend_newer_.raw_verts)) {
+                    raw_new_slot_ = slot;
+                }
+            }
             have_newer_snap_ = true;
         }
         // Monotonic forward motion: show t = 0.0 (older frame) now, then t = 1/N .. (N-1)/N in tick()!

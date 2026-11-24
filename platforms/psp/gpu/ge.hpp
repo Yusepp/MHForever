@@ -94,6 +94,8 @@ public:
     [[nodiscard]] const Matrix44 &proj_matrix() const noexcept { return proj_; }
     // Incremented whenever the view or projection matrix, the viewport or the screen offset is written.
     [[nodiscard]] std::uint64_t camera_generation() const noexcept { return camera_generation_; }
+    // Incremented whenever any GE register or CLUT changes (O(1) fast-path for hardware backends).
+    [[nodiscard]] std::uint64_t state_generation() const noexcept { return state_generation_; }
 
 private:
     ListResult run_commands(std::uint32_t pc, std::uint32_t stall, const ListEvent &on_event);
@@ -205,6 +207,7 @@ private:
     std::vector<std::uint32_t> call_stack_;
     std::array<std::uint32_t, 256> clut_{};
     std::vector<Vertex> verts_; // draw_primitive's vertices, kept between draws so that a draw allocates nothing
+    std::uint64_t state_generation_{1};
     Stats stats_;
 };
 
