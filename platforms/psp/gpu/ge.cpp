@@ -248,12 +248,10 @@ void Ge::execute(std::uint32_t word, std::uint32_t) {
 // ---------------------------------------------------------------- vertex decoding
 
 namespace {
-struct Layout {
-    unsigned weight_offset{}, tc_offset{}, color_offset{}, normal_offset{}, pos_offset{}, size{};
-};
 unsigned type_size(unsigned format, unsigned base) { return format == 0 ? 0 : (format == 3 ? 4u : format) * base; }
 unsigned align_of(unsigned format) { return format == 3 ? 4u : format; }
 
+template <typename Layout>
 Layout layout_for(std::uint32_t vt) {
     const unsigned tc = vt & 3u, color = (vt >> 2u) & 7u, normal = (vt >> 5u) & 3u, pos = (vt >> 7u) & 3u;
     const unsigned weight = (vt >> 9u) & 3u, weights = ((vt >> 14u) & 7u) + 1u;
@@ -282,63 +280,87 @@ Layout layout_for(std::uint32_t vt) {
 std::uint32_t Ge::vertex_size() const {
     const std::uint32_t vt = regs_[kVertexType];
     const unsigned morphs = ((vt >> 18u) & 7u) + 1u;
-    return layout_for(vt).size * morphs;
+    return layout_for<VertexLayout>(vt).size * morphs;
 }
 
-Ge::DecodedVertex Ge::decode_vertex(std::uint32_t address) const {
+Ge::DecodedVertex Ge::decode_vertex(std::uint32_t address, const VertexLayout &l) const {
     const std::uint32_t vt = regs_[kVertexType];
     const bool through = (vt & (1u << 23u)) != 0;
     const unsigned tc = vt & 3u, color = (vt >> 2u) & 7u, normal = (vt >> 5u) & 3u, pos = (vt >> 7u) & 3u;
     const unsigned weight = (vt >> 9u) & 3u, weights = ((vt >> 14u) & 7u) + 1u;
     const unsigned morphs = ((vt >> 18u) & 7u) + 1u;
-    const Layout l = layout_for(vt);
-    auto s8 = [&](std::uint32_t a) { return static_cast<float>(static_cast<std::int8_t>(rd8(a))); };
-    auto u8 = [&](std::uint32_t a) { return static_cast<float>(rd8(a)); };
-    auto s16 = [&](std::uint32_t a) { return static_cast<float>(static_cast<std::int16_t>(rd16(a))); };
-    auto u16 = [&](std::uint32_t a) { return static_cast<float>(rd16(a)); };
-    auto f32 = [&](std::uint32_t a) { return std::bit_cast<float>(rd32(a)); };
+    // Resolve a single host pointer for the entire vertex (+ morph targets) to avoid 10-15 bounds checks per vertex.
+    const std::uint8_t *const base_ptr = host(address, l.size * morphs);
+    auto read_u8 = [&](std::uint32_t off) -> std::uint8_t {
+        return base_ptr != nullptr ? base_ptr[off] : rd8(address + off);
+    };
+    auto read_u16 = [&](std::uint32_t off) -> std::uint16_t {
+        if (base_ptr != nullptr) {
+            std::uint16_t v = 0;
+            std::memcpy(&v, base_ptr + off, 2);
+            return v;
+        }
+        return rd16(address + off);
+    };
+    auto read_u32 = [&](std::uint32_t off) -> std::uint32_t {
+        if (base_ptr != nullptr) {
+            std::uint32_t v = 0;
+            std::memcpy(&v, base_ptr + off, 4);
+            return v;
+        }
+        return rd32(address + off);
+    };
+    auto s8 = [&](std::uint32_t off) { return static_cast<float>(static_cast<std::int8_t>(read_u8(off))); };
+    auto u8 = [&](std::uint32_t off) { return static_cast<float>(read_u8(off)); };
+    auto s16 = [&](std::uint32_t off) { return static_cast<float>(static_cast<std::int16_t>(read_u16(off))); };
+    auto u16 = [&](std::uint32_t off) { return static_cast<float>(read_u16(off)); };
+    auto f32 = [&](std::uint32_t off) { return std::bit_cast<float>(read_u32(off)); };
 
     DecodedVertex out{};
     for (unsigned m = 0; m < morphs; ++m) {
-        const std::uint32_t v = address + m * l.size;
+        const std::uint32_t v = m * l.size;
         const float mw = morphs > 1 ? morph_[m] : 1.0f;
         if (weight != 0) {
+            const unsigned w_step = type_size(weight, 1);
             for (unsigned i = 0; i < weights && i < 8; ++i) {
-                const std::uint32_t a = v + l.weight_offset + i * type_size(weight, 1);
-                out.weights[i] += mw * (weight == 1 ? u8(a) / 128.0f : weight == 2 ? u16(a) / 32768.0f : f32(a));
+                const std::uint32_t off = v + l.weight_offset + i * w_step;
+                out.weights[i] += mw * (weight == 1 ? u8(off) / 128.0f : weight == 2 ? u16(off) / 32768.0f : f32(off));
             }
         }
         if (tc != 0) {
+            const unsigned tc_step = type_size(tc, 1);
             for (unsigned i = 0; i < 2; ++i) {
-                const std::uint32_t a = v + l.tc_offset + i * type_size(tc, 1);
-                float t = tc == 1 ? u8(a) : tc == 2 ? u16(a) : f32(a);
+                const std::uint32_t off = v + l.tc_offset + i * tc_step;
+                float t = tc == 1 ? u8(off) : tc == 2 ? u16(off) : f32(off);
                 if (!through) t = tc == 1 ? t / 128.0f : tc == 2 ? t / 32768.0f : t;
                 out.uv[i] += mw * t;
             }
         }
         if (color != 0) {
             float c[4];
-            const std::uint32_t a = v + l.color_offset;
-            if (color == 7) unpack(rd32(a), c);
-            else unpack(decode16(rd16(a), color - 4u), c);
+            const std::uint32_t off = v + l.color_offset;
+            if (color == 7) unpack(read_u32(off), c);
+            else unpack(decode16(read_u16(off), color - 4u), c);
             for (int i = 0; i < 4; ++i) out.color[i] = (m == 0 ? 0.0f : out.color[i]) + mw * c[i];
             out.has_color = true;
         }
         if (normal != 0) {
+            const unsigned n_step = type_size(normal, 1);
             for (unsigned i = 0; i < 3; ++i) {
-                const std::uint32_t a = v + l.normal_offset + i * type_size(normal, 1);
-                out.normal[i] += mw * (normal == 1 ? s8(a) / 128.0f : normal == 2 ? s16(a) / 32768.0f : f32(a));
+                const std::uint32_t off = v + l.normal_offset + i * n_step;
+                out.normal[i] += mw * (normal == 1 ? s8(off) / 128.0f : normal == 2 ? s16(off) / 32768.0f : f32(off));
             }
             out.has_normal = true;
         }
         const unsigned pf = pos != 0 ? pos : 3u;
+        const unsigned p_step = type_size(pf, 1);
         for (unsigned i = 0; i < 3; ++i) {
-            const std::uint32_t a = v + l.pos_offset + i * type_size(pf, 1);
+            const std::uint32_t off = v + l.pos_offset + i * p_step;
             float p;
             if (through) {
-                p = pf == 1 ? s8(a) : pf == 2 ? (i == 2 ? u16(a) : s16(a)) : f32(a);
+                p = pf == 1 ? s8(off) : pf == 2 ? (i == 2 ? u16(off) : s16(off)) : f32(off);
             } else {
-                p = pf == 1 ? s8(a) / 128.0f : pf == 2 ? s16(a) / 32768.0f : f32(a);
+                p = pf == 1 ? s8(off) / 128.0f : pf == 2 ? s16(off) / 32768.0f : f32(off);
             }
             out.pos[i] += mw * p;
         }
@@ -553,11 +575,9 @@ Vertex Ge::transform(const DecodedVertex &in) const {
 Vertex Ge::to_screen(const Vertex &c) const {
     Vertex s = c;
     const float inv_w = c.w != 0 ? 1.0f / c.w : 1.0f;
-    const float offset_x = static_cast<float>(regs_[kOffsetX] & 0xFFFFu) / 16.0f;
-    const float offset_y = static_cast<float>(regs_[kOffsetY] & 0xFFFFu) / 16.0f;
-    s.x = c.x * inv_w * float24(regs_[kViewportXScale]) + float24(regs_[kViewportXCenter]) - offset_x;
-    s.y = c.y * inv_w * float24(regs_[kViewportYScale]) + float24(regs_[kViewportYCenter]) - offset_y;
-    s.z = c.z * inv_w * float24(regs_[kViewportZScale]) + float24(regs_[kViewportZCenter]);
+    s.x = c.x * inv_w * vp_setup_.xscale + vp_setup_.xcenter - vp_setup_.offset_x;
+    s.y = c.y * inv_w * vp_setup_.yscale + vp_setup_.ycenter - vp_setup_.offset_y;
+    s.z = c.z * inv_w * vp_setup_.zscale + vp_setup_.zcenter;
     s.w = inv_w; // keep 1/w for perspective-correct interpolation
     return s;
 }
@@ -570,11 +590,23 @@ void Ge::draw_primitive(std::uint32_t data) {
     const std::uint32_t vt = regs_[kVertexType];
     const unsigned index_format = (vt >> 11u) & 3u;
     const bool through = (vt & (1u << 23u)) != 0;
-    const std::uint32_t vsize = vertex_size();
+    const unsigned morphs = ((vt >> 18u) & 7u) + 1u;
+    const VertexLayout layout = layout_for<VertexLayout>(vt);
+    const std::uint32_t vsize = layout.size * morphs;
     std::uint32_t vaddr = regs_[kVaddr];
     std::uint32_t iaddr = regs_[kIaddr];
     ++stats_.primitives;
     stats_.vertices += count;
+
+    // Hoist viewport & screen-offset float24 unpacks once per draw (used by draw.viewport, to_screen, draw_triangle).
+    vp_setup_.xscale = float24(regs_[kViewportXScale]);
+    vp_setup_.yscale = float24(regs_[kViewportYScale]);
+    vp_setup_.zscale = float24(regs_[kViewportZScale]);
+    vp_setup_.xcenter = float24(regs_[kViewportXCenter]);
+    vp_setup_.ycenter = float24(regs_[kViewportYCenter]);
+    vp_setup_.zcenter = float24(regs_[kViewportZCenter]);
+    vp_setup_.offset_x = static_cast<float>(regs_[kOffsetX] & 0xFFFFu) / 16.0f;
+    vp_setup_.offset_y = static_cast<float>(regs_[kOffsetY] & 0xFFFFu) / 16.0f;
 
     if (backend_ != nullptr) {
         DrawInfo draw;
@@ -593,25 +625,42 @@ void Ge::draw_primitive(std::uint32_t data) {
         draw.world = world_.m;
         draw.view = view_.m;
         draw.projection = proj_.m;
-        draw.viewport = {float24(regs_[kViewportXScale]), float24(regs_[kViewportYScale]), float24(regs_[kViewportZScale]),
-                         float24(regs_[kViewportXCenter]), float24(regs_[kViewportYCenter]), float24(regs_[kViewportZCenter]),
-                         static_cast<float>(regs_[kOffsetX] & 0xFFFFu) / 16.0f, static_cast<float>(regs_[kOffsetY] & 0xFFFFu) / 16.0f};
+        draw.viewport = {vp_setup_.xscale, vp_setup_.yscale, vp_setup_.zscale,
+                         vp_setup_.xcenter, vp_setup_.ycenter, vp_setup_.zcenter,
+                         vp_setup_.offset_x, vp_setup_.offset_y};
         backend_->draw_started(draw);
     }
     // Timing the drawing commands costs a clock read each; only when the interpolation log is on.
     static const bool timed = std::getenv("MHF_INTERP_LOG") != nullptr;
     const auto t_start = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (!through && (regs_[kLightingEnable] & 1u) != 0) prepare_lighting(); // once per draw (see LightSetup)
+    const std::uint32_t idx_stride = index_format == 1 ? 1u : index_format == 2 ? 2u : index_format == 3 ? 4u : 0u;
+    const std::uint8_t *const idx_ptr = (idx_stride != 0u && count > 0u) ? host(iaddr, count * idx_stride) : nullptr;
     std::vector<Vertex> &verts = verts_;
     verts.clear();
     verts.reserve(count);
     for (unsigned i = 0; i < count; ++i) {
         std::uint32_t index = i;
-        if (index_format == 1) index = rd8(iaddr + i);
-        else if (index_format == 2) index = rd16(iaddr + i * 2u);
-        else if (index_format == 3) index = rd32(iaddr + i * 4u);
-        verts.push_back(transform(decode_vertex(vaddr + index * vsize)));
-        verts.back().source = vaddr + index * vsize;
+        if (index_format == 1) {
+            index = idx_ptr != nullptr ? idx_ptr[i] : rd8(iaddr + i);
+        } else if (index_format == 2) {
+            if (idx_ptr != nullptr) {
+                std::uint16_t v = 0;
+                std::memcpy(&v, idx_ptr + i * 2u, 2);
+                index = v;
+            } else {
+                index = rd16(iaddr + i * 2u);
+            }
+        } else if (index_format == 3) {
+            if (idx_ptr != nullptr) {
+                std::memcpy(&index, idx_ptr + i * 4u, 4);
+            } else {
+                index = rd32(iaddr + i * 4u);
+            }
+        }
+        const std::uint32_t src_addr = vaddr + index * vsize;
+        verts.push_back(transform(decode_vertex(src_addr, layout)));
+        verts.back().source = src_addr;
     }
     const auto t_vertices = timed ? std::chrono::steady_clock::now() : t_start;
     // The vertex (or index) pointer advances past what was consumed.
@@ -675,8 +724,8 @@ void Ge::draw_bezier_or_spline(std::uint32_t cmd, std::uint32_t) {
 void Ge::draw_triangle(const Vertex &a, const Vertex &b, const Vertex &c) {
     if (backend_ != nullptr) backend_->triangle_unclipped(*this, a, b, c);
     const Vertex *const in[3] = {&a, &b, &c};
-    const float offset_x = static_cast<float>(regs_[kOffsetX] & 0xFFFFu) / 16.0f;
-    const float offset_y = static_cast<float>(regs_[kOffsetY] & 0xFFFFu) / 16.0f;
+    const float offset_x = vp_setup_.offset_x;
+    const float offset_y = vp_setup_.offset_y;
     bool any_clipped = false;
     Vertex screen[3]; // each vertex is taken to the screen once: for the guard band test and, unclipped, for drawing
     for (int i = 0; i < 3; ++i) {

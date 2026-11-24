@@ -106,12 +106,15 @@ private:
     void load_clut(std::uint32_t data);
 
     // Vertex pipeline.
+    struct VertexLayout {
+        unsigned weight_offset{}, tc_offset{}, color_offset{}, normal_offset{}, pos_offset{}, size{};
+    };
     struct DecodedVertex {
         float pos[3]{}, uv[2]{}, color[4]{255, 255, 255, 255}, normal[3]{}, weights[8]{};
         bool has_color{};
         bool has_normal{};
     };
-    [[nodiscard]] DecodedVertex decode_vertex(std::uint32_t address) const;
+    [[nodiscard]] DecodedVertex decode_vertex(std::uint32_t address, const VertexLayout &layout) const;
     [[nodiscard]] std::uint32_t vertex_size() const;
     [[nodiscard]] Vertex transform(const DecodedVertex &in) const;
     void light(const float world_pos[3], const float world_normal[3], Vertex &out, const DecodedVertex &in) const;
@@ -132,6 +135,13 @@ private:
     };
     void prepare_lighting();
     LightSetup light_setup_;
+
+    struct ViewportSetup {
+        float xscale{}, yscale{}, zscale{};
+        float xcenter{}, ycenter{}, zcenter{};
+        float offset_x{}, offset_y{};
+    };
+    ViewportSetup vp_setup_{};
 
     // Rasterizer.
     void draw_triangle(const Vertex &a, const Vertex &b, const Vertex &c);
