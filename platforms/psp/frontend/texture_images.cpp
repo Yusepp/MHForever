@@ -47,7 +47,7 @@ bool read_file(const fs::path &path, std::vector<std::uint8_t> &data, std::strin
     return true;
 }
 
-bool decode_ktx2(const std::vector<std::uint8_t> &data, Image &image, std::string &error) {
+bool decode_ktx2(const std::vector<std::uint8_t> &data, Image &image, std::string &error, bool prefer_bc7) {
     static std::once_flag once;
     std::call_once(once, [] { basist::basisu_transcoder_init(); });
     basist::ktx2_transcoder tr;
@@ -68,8 +68,13 @@ bool decode_ktx2(const std::vector<std::uint8_t> &data, Image &image, std::strin
         error = "cannot start transcoding";
         return false;
     }
+    const bool use_bc7 = prefer_bc7 &&
+                         basist::basis_is_format_supported(
+                             basist::transcoder_texture_format::cTFBC7_RGBA,
+                             tr.is_uastc() ? basist::basis_tex_format::cUASTC_LDR_4x4 : basist::basis_tex_format::cETC1S);
     image.width = w;
     image.height = h;
+    image.format = use_bc7 ? Image::Format::Bc7 : Image::Format::Rgba8;
     image.levels.clear();
     const std::uint32_t levels = std::max(1u, tr.get_levels());
     for (std::uint32_t level = 0; level < levels; ++level) {
@@ -77,16 +82,32 @@ bool decode_ktx2(const std::vector<std::uint8_t> &data, Image &image, std::strin
         if (!tr.get_image_level_info(info, level, 0, 0)) break;
         const std::uint32_t lw = info.m_orig_width, lh = info.m_orig_height;
         if (level > 0 && (lw != std::max(1u, w >> level) || lh != std::max(1u, h >> level))) break;
-        std::vector<std::uint8_t> rgba(std::size_t(lw) * lh * 4u);
-        // An uncompressed output's size is counted in pixels.
-        if (!tr.transcode_image_level(level, 0, 0, rgba.data(), lw * lh, basist::transcoder_texture_format::cTFRGBA32, 0, lw, lh)) {
-            if (level == 0) {
-                error = "transcoding failed";
-                return false;
+        if (use_bc7) {
+            const std::uint32_t blocks_x = (lw + 3u) / 4u;
+            const std::uint32_t blocks_y = (lh + 3u) / 4u;
+            const std::uint32_t total_blocks = blocks_x * blocks_y;
+            std::vector<std::uint8_t> bc7(std::size_t(total_blocks) * 16u);
+            if (!tr.transcode_image_level(level, 0, 0, bc7.data(), total_blocks,
+                                          basist::transcoder_texture_format::cTFBC7_RGBA, 0)) {
+                if (level == 0) {
+                    error = "transcoding failed";
+                    return false;
+                }
+                break;
             }
-            break;
+            image.levels.push_back(std::move(bc7));
+        } else {
+            std::vector<std::uint8_t> rgba(std::size_t(lw) * lh * 4u);
+            // An uncompressed output's size is counted in pixels.
+            if (!tr.transcode_image_level(level, 0, 0, rgba.data(), lw * lh, basist::transcoder_texture_format::cTFRGBA32, 0, lw, lh)) {
+                if (level == 0) {
+                    error = "transcoding failed";
+                    return false;
+                }
+                break;
+            }
+            image.levels.push_back(std::move(rgba));
         }
-        image.levels.push_back(std::move(rgba));
     }
     return !image.levels.empty();
 }
@@ -105,6 +126,7 @@ bool decode_png(const std::vector<std::uint8_t> &data, Image &image, std::string
     }
     image.width = static_cast<std::uint32_t>(w);
     image.height = static_cast<std::uint32_t>(h);
+    image.format = Image::Format::Rgba8;
     image.levels.assign(1, std::vector<std::uint8_t>(pixels, pixels + std::size_t(w) * h * 4u));
     stbi_image_free(pixels);
     return true;
@@ -118,7 +140,7 @@ std::string lower_extension(const fs::path &path) {
 
 } // namespace
 
-bool decode_image(const fs::path &path, Image &image, std::string &error) {
+bool decode_image(const fs::path &path, Image &image, std::string &error, bool prefer_bc7) {
     const std::string ext = lower_extension(path);
     if (ext != ".ktx2" && ext != ".png") {
         error = ext.empty() ? "an image without a type" : ext.substr(1) + " images are not supported (PNG and KTX2 are)";
@@ -129,7 +151,9 @@ bool decode_image(const fs::path &path, Image &image, std::string &error) {
     // By content, not by name: a mislabelled file still decodes.
     static constexpr std::uint8_t kKtx2[12] = {0xAB, 'K', 'T', 'X', ' ', '2', '0', 0xBB, '\r', '\n', 0x1A, '\n'};
     static constexpr std::uint8_t kPng[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
-    if (data.size() >= sizeof kKtx2 && std::memcmp(data.data(), kKtx2, sizeof kKtx2) == 0) return decode_ktx2(data, image, error);
+    if (data.size() >= sizeof kKtx2 && std::memcmp(data.data(), kKtx2, sizeof kKtx2) == 0) {
+        return decode_ktx2(data, image, error, prefer_bc7);
+    }
     if (data.size() >= sizeof kPng && std::memcmp(data.data(), kPng, sizeof kPng) == 0) return decode_png(data, image, error);
     error = "neither a PNG nor a KTX2 file";
     return false;
@@ -166,12 +190,12 @@ bool decode_coverage(const fs::path &path, std::uint32_t &width, std::uint32_t &
     return true;
 }
 
-bool decode_levels(const std::vector<fs::path> &files, Image &image, std::string &error) {
+bool decode_levels(const std::vector<fs::path> &files, Image &image, std::string &error, bool prefer_bc7) {
     if (files.empty()) {
         error = "no image";
         return false;
     }
-    if (!decode_image(files.front(), image, error)) {
+    if (!decode_image(files.front(), image, error, prefer_bc7)) {
         error = utf8(files.front().filename()) + ": " + error;
         return false;
     }
@@ -179,7 +203,8 @@ bool decode_levels(const std::vector<fs::path> &files, Image &image, std::string
     for (std::size_t i = 1; i < files.size() && image.levels.size() == i; ++i) {
         Image level;
         std::string ignored;
-        if (!decode_image(files[i], level, ignored)) break;
+        if (!decode_image(files[i], level, ignored, prefer_bc7)) break;
+        if (level.format != image.format) break;
         if (level.width != std::max(1u, image.width >> i) || level.height != std::max(1u, image.height >> i)) break;
         image.levels.push_back(std::move(level.levels.front()));
     }
@@ -197,7 +222,8 @@ bool write_png(const fs::path &path, std::uint32_t width, std::uint32_t height, 
     return ok != 0 && static_cast<bool>(out);
 }
 
-Loader::Loader(unsigned threads, std::size_t ready_budget) : ready_budget_(ready_budget) {
+Loader::Loader(unsigned threads, std::size_t ready_budget, bool prefer_bc7)
+    : ready_budget_(ready_budget), prefer_bc7_(prefer_bc7) {
     threads = std::max(1u, threads);
     for (unsigned i = 0; i < threads; ++i) threads_.emplace_back([this] { run(); });
 }
@@ -266,7 +292,7 @@ void Loader::run() {
         const auto start = std::chrono::steady_clock::now();
         auto image = std::make_shared<Image>();
         std::string error;
-        const bool ok = decode_levels(job.files, *image, error);
+        const bool ok = decode_levels(job.files, *image, error, prefer_bc7_);
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
         if (!ok) std::fprintf(stderr, "[textures] %s\n", error.c_str());
         {

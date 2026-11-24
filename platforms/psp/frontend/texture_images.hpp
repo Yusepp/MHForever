@@ -20,9 +20,11 @@
 
 namespace mhf::psp::textures {
 
-// An image in RGBA8, with the mip levels its files had (level 0 first, each half the size of the one before).
+// An image in RGBA8 or BC7, with the mip levels its files had (level 0 first, each half the size of the one before).
 struct Image {
+    enum class Format : std::uint8_t { Rgba8 = 0, Bc7 = 1 };
     std::uint32_t width = 0, height = 0;
+    Format format = Format::Rgba8;
     std::vector<std::vector<std::uint8_t>> levels;
     [[nodiscard]] std::size_t bytes() const {
         std::size_t n = 0;
@@ -32,9 +34,9 @@ struct Image {
 };
 
 // Decodes one file (all its levels: a KTX2 file may hold mips). False with `error` set when it cannot.
-bool decode_image(const std::filesystem::path &path, Image &image, std::string &error);
+bool decode_image(const std::filesystem::path &path, Image &image, std::string &error, bool prefer_bc7 = false);
 // Decodes an entry's files: the first is level 0, each next one a mip level (kept while it halves the size).
-bool decode_levels(const std::vector<std::filesystem::path> &files, Image &image, std::string &error);
+bool decode_levels(const std::vector<std::filesystem::path> &files, Image &image, std::string &error, bool prefer_bc7 = false);
 // Writes RGBA8 pixels as a PNG (texture dumps for pack makers).
 bool write_png(const std::filesystem::path &path, std::uint32_t width, std::uint32_t height, const std::uint32_t *rgba);
 // A PNG as one byte a texel: its alpha, or its grey when it has none (decoded at that size when it is greyscale).
@@ -46,7 +48,7 @@ bool decode_coverage(const std::filesystem::path &path, std::uint32_t &width, st
 // first, past `ready_budget` bytes.
 class Loader {
 public:
-    explicit Loader(unsigned threads = 2, std::size_t ready_budget = 512u << 20);
+    explicit Loader(unsigned threads = 2, std::size_t ready_budget = 512u << 20, bool prefer_bc7 = false);
     ~Loader();
     Loader(const Loader &) = delete;
     Loader &operator=(const Loader &) = delete;
@@ -84,6 +86,7 @@ private:
     std::unordered_map<std::string, Slot> slots_;
     std::list<std::string> ready_order_;
     std::size_t ready_bytes_ = 0, ready_budget_;
+    bool prefer_bc7_ = false;
     std::atomic<std::uint64_t> generation_{0};
     Counters counters_;
     bool stop_ = false;

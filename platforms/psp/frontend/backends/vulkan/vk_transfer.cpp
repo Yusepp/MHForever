@@ -31,7 +31,7 @@ bool PackStreamer::init(const Context &ctx, const std::string &pack_folder, cons
     }
     if (!pack_ && !builtin_pack_) return true;
 
-    loader_ = std::make_unique<textures::Loader>(2, 512u << 20);
+    loader_ = std::make_unique<textures::Loader>(2, 512u << 20, ctx.caps.bc_compression);
     VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr,
                                  VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, ctx.families.graphics};
     if (vkCreateCommandPool(ctx.device, &cpci, nullptr, &transfer_pool_) != VK_SUCCESS) return false;
@@ -68,8 +68,10 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
                                               const textures::Image &img, PackGpuImage &out) {
     if (img.width == 0 || img.height == 0 || img.levels.empty()) return false;
 
+    const bool is_bc7 = (img.format == textures::Image::Format::Bc7 && ctx.caps.bc_compression);
+    const VkFormat vk_fmt = is_bc7 ? VK_FORMAT_BC7_UNORM_BLOCK : VK_FORMAT_R8G8B8A8_UNORM;
     const std::uint32_t file_mips = static_cast<std::uint32_t>(img.levels.size());
-    const bool gen_mips = generate_mips_ && file_mips == 1u && img.width > 1u && img.height > 1u;
+    const bool gen_mips = !is_bc7 && generate_mips_ && file_mips == 1u && img.width > 1u && img.height > 1u;
     const std::uint32_t mip_levels = gen_mips
         ? (static_cast<std::uint32_t>(std::floor(std::log2(static_cast<double>(std::max(img.width, img.height))))) + 1u)
         : file_mips;
@@ -77,7 +79,7 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.format = vk_fmt;
     ici.extent = {img.width, img.height, 1};
     ici.mipLevels = mip_levels;
     ici.arrayLayers = 1;
@@ -192,7 +194,7 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
     ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     ivci.image = out.image;
     ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.format = vk_fmt;
     ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, 1};
     if (vkCreateImageView(ctx.device, &ivci, nullptr, &out.view) != VK_SUCCESS) {
         vmaDestroyImage(ctx.allocator, out.image, out.alloc);
@@ -200,7 +202,7 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
         return false;
     }
     out.mip_levels = mip_levels;
-    out.vram_bytes = static_cast<std::size_t>(img.width) * img.height * 4u * (mip_levels > 1u ? 4u : 3u) / 3u;
+    out.vram_bytes = gen_mips ? (static_cast<std::size_t>(img.width) * img.height * 4u * 4u / 3u) : staging_bytes;
     out.bindless_slot = desc.allocate_texture(ctx, out.view);
     return out.bindless_slot != 0;
 }
@@ -293,17 +295,21 @@ bool PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std:
     // Wait for all in-flight GPU work before destroying evicted pack images so no command buffer
     // or frame-gen snapshot can sample an unmapped GPUVM page!
     ctx.wait_idle();
+    // Sort entries once by last_used (O(N log N)) instead of repeated O(N) full-map scans.
+    std::vector<std::pair<std::uint64_t, std::string>> order;
+    order.reserve(uploaded_.size());
+    for (const auto &[id, img] : uploaded_) order.emplace_back(img.last_used, id);
+    std::sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
     bool evicted = false;
-    while (total_vram_bytes_ > budget && !uploaded_.empty()) {
-        auto oldest = uploaded_.begin();
-        for (auto it = uploaded_.begin(); it != uploaded_.end(); ++it) {
-            if (it->second.last_used < oldest->second.last_used) oldest = it;
-        }
-        if (oldest->second.bindless_slot != 0) desc.free_texture(oldest->second.bindless_slot, retire_timeline);
-        if (oldest->second.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, oldest->second.view, nullptr);
-        if (oldest->second.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, oldest->second.image, oldest->second.alloc);
-        total_vram_bytes_ = total_vram_bytes_ > oldest->second.vram_bytes ? (total_vram_bytes_ - oldest->second.vram_bytes) : 0;
-        uploaded_.erase(oldest);
+    for (const auto &[used, id] : order) {
+        if (total_vram_bytes_ <= budget) break;
+        const auto it = uploaded_.find(id);
+        if (it == uploaded_.end()) continue;
+        if (it->second.bindless_slot != 0) desc.free_texture(it->second.bindless_slot, retire_timeline);
+        if (it->second.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, it->second.view, nullptr);
+        if (it->second.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, it->second.image, it->second.alloc);
+        total_vram_bytes_ = total_vram_bytes_ > it->second.vram_bytes ? (total_vram_bytes_ - it->second.vram_bytes) : 0;
+        uploaded_.erase(it);
         evicted = true;
     }
     return evicted;
