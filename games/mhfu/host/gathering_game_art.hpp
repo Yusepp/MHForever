@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gathering_art.hpp"
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -36,6 +37,9 @@ struct LoadoutIcons {
     LoadoutSprite ammo;
     LoadoutSprite weapon_blade;
     LoadoutSprite weapon_gun;
+    // Per-class 16x16 native weapon icons indexed by MHFU weapon class (0..10):
+    // 0:GS, 1:HBG, 2:Hammer, 3:Lance, 4:SnS, 5:LBG, 6:DB, 7:LS, 8:HH, 9:GL, 10:Bow.
+    std::array<LoadoutSprite, 11u> weapon_classes{};
     LoadoutSprite head;
     LoadoutSprite chest_armor;
     LoadoutSprite arms;

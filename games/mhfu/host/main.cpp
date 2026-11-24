@@ -606,7 +606,8 @@ std::atomic<std::uint16_t> g_camera_yaw{0};
 std::atomic<bool> g_camera_yaw_valid{false};
 mhf::mhfu::QuestTimerSkip g_quest_timer_skip{{region::mh_quest_manager, region::mh_game_sys}};
 mhf::mhfu::InfiniteConsumables g_infinite_consumables{{region::mh_game_sys}};
-mhf::mhfu::ItemLoadouts g_item_loadouts{{region::mh_game_sys, region::mh_resource_manager}};
+mhf::mhfu::ItemLoadouts g_item_loadouts{
+    {region::mh_game_sys, region::mh_resource_manager, region::mh_blademaster_weapons, region::mh_weapon_model_classes}};
 mhf::mhfu::MonsterTracker g_monster_tracker{
     {region::mh_game_sys, region::mh_player_manager, region::mh_enemy_manager, region::mh_enemy_species_table,
      region::mh_quest_manager}};

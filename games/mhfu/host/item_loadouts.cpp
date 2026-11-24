@@ -202,6 +202,94 @@ void draw_ps_button(mhf::overlay::Painter &painter, float x, float y, float w, f
     painter.text(x + (w - tw) * 0.5f, y + h * 0.74f, label, fsize, fg, 0.98f, true, 0.15f);
 }
 
+// MHFU authentic rarity color palette (0-based rarity 0..9 -> RARE 1..10).
+mhf::overlay::Color rarity_color(std::uint8_t rarity) noexcept {
+    switch (rarity) {
+        case 0u:
+        case 1u:
+        case 2u: return {0.95f, 0.95f, 0.93f}; // RARE 1-3: White
+        case 3u: return {0.38f, 0.86f, 0.48f}; // RARE 4: Green
+        case 4u: return {0.95f, 0.36f, 0.36f}; // RARE 5: Red
+        case 5u: return {0.38f, 0.72f, 0.96f}; // RARE 6: Sky Blue
+        case 6u: return {0.96f, 0.86f, 0.34f}; // RARE 7: Gold
+        case 7u: return {0.96f, 0.58f, 0.26f}; // RARE 8: Orange
+        case 8u: return {0.78f, 0.48f, 0.96f}; // RARE 9: Violet
+        default: return {0.96f, 0.42f, 0.74f}; // RARE 10: Magenta
+    }
+}
+
+// Draws a premultiplied RGBA sprite tinted by `tint` while keeping alpha and dark outlines crisp.
+void draw_tinted_icon(mhf::overlay::Painter &painter, float x, float y, float draw_size,
+                      const LoadoutSprite &sprite, mhf::overlay::Color tint, float opacity = 1.0f) {
+    if (!sprite.valid()) return;
+    if (tint.r >= 0.94f && tint.g >= 0.94f && tint.b >= 0.92f) {
+        painter.image(x, y, draw_size, sprite.pixels->data(), sprite.size, opacity);
+        return;
+    }
+    const auto &src = *sprite.pixels;
+    std::vector<std::uint32_t> tinted(src.size());
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        const std::uint32_t px = src[i];
+        const std::uint32_t a = (px >> 24u) & 0xFFu;
+        if (a == 0u) continue;
+        const std::uint32_t r = static_cast<std::uint32_t>(std::clamp(static_cast<float>(px & 0xFFu) * tint.r, 0.0f, 255.0f));
+        const std::uint32_t g = static_cast<std::uint32_t>(std::clamp(static_cast<float>((px >> 8u) & 0xFFu) * tint.g, 0.0f, 255.0f));
+        const std::uint32_t b = static_cast<std::uint32_t>(std::clamp(static_cast<float>((px >> 16u) & 0xFFu) * tint.b, 0.0f, 255.0f));
+        tinted[i] = r | (g << 8u) | (b << 16u) | (a << 24u);
+    }
+    painter.image(x, y, draw_size, tinted.data(), sprite.size, opacity);
+}
+
+struct EquipMeta {
+    std::optional<std::uint8_t> weapon_class;
+    std::uint8_t rarity{0u};
+};
+
+EquipMeta resolve_equip_meta(const psprecomp::GuestMemory &memory, const ItemLoadoutsSymbols &symbols,
+                             std::size_t raw_slot, const EquipPiece &piece) noexcept {
+    EquipMeta meta{};
+    if (!piece_non_empty(piece)) return meta;
+    const std::uint16_t piece_id = static_cast<std::uint16_t>(piece[2]) | (static_cast<std::uint16_t>(piece[3]) << 8u);
+    constexpr std::uint32_t kBlademasterCount = 1150u;
+    constexpr std::uint32_t kBlademasterStride = 24u;
+    constexpr std::uint32_t kGunnerStride = 28u;
+    constexpr std::uint32_t kWeaponModels = 553u;
+    constexpr std::uint32_t kArmorStride = 40u;
+
+    if (raw_slot == 0u) {
+        if (!symbols.blademaster_weapons || !symbols.weapon_model_classes) return meta;
+        std::uint32_t entry = 0u;
+        if (piece[1] == 5u && piece_id < kBlademasterCount) {
+            entry = *symbols.blademaster_weapons + static_cast<std::uint32_t>(piece_id) * kBlademasterStride;
+        } else if (piece[1] == 6u && piece_id < 512u) {
+            entry = *symbols.blademaster_weapons + kBlademasterCount * kBlademasterStride +
+                    static_cast<std::uint32_t>(piece_id) * kGunnerStride;
+        }
+        if (entry != 0u && memory.contains(entry, 4u)) {
+            const std::uint16_t model = memory.load16(entry);
+            meta.rarity = std::min<std::uint8_t>(memory.load8(entry + 2u), 9u);
+            if (model < kWeaponModels && memory.contains(*symbols.weapon_model_classes + model, 1u)) {
+                const std::uint8_t cls = memory.load8(*symbols.weapon_model_classes + model);
+                if (cls < 11u) meta.weapon_class = cls;
+            }
+        }
+        return meta;
+    }
+
+    // Armor tables (Legs=0, Head=1, Chest=2, Arms=3, Waist=4) are pointed to by u32[5] immediately before mh_weapon_model_classes.
+    if (raw_slot >= 1u && raw_slot <= 5u && symbols.weapon_model_classes && *symbols.weapon_model_classes >= 20u) {
+        const std::uint32_t ptr_addr = *symbols.weapon_model_classes - 20u + static_cast<std::uint32_t>(raw_slot - 1u) * 4u;
+        if (readable_word_address(memory, ptr_addr)) {
+            const std::uint32_t table = memory.load32(ptr_addr);
+            const std::uint32_t entry = table + static_cast<std::uint32_t>(piece_id) * kArmorStride;
+            if (table != 0u && piece_id < 512u && memory.contains(entry + 5u, 1u)) {
+                meta.rarity = std::min<std::uint8_t>(memory.load8(entry + 5u), 9u);
+            }
+        }
+    }
+    return meta;
+}
+
 const LoadoutSprite *pick_item_icon(const LoadoutIcons &icons, std::uint16_t id) noexcept {
     auto use = [](const LoadoutSprite &s) -> const LoadoutSprite * { return s.valid() ? &s : nullptr; };
     if (id >= 1u && id <= 5u) return use(icons.book);
@@ -215,10 +303,31 @@ const LoadoutSprite *pick_item_icon(const LoadoutIcons &icons, std::uint16_t id)
     return use(icons.pouch);
 }
 
-const LoadoutSprite *pick_equip_icon(const LoadoutIcons &icons, std::size_t raw_slot, const EquipPiece &piece) noexcept {
+mhf::overlay::Color item_icon_tint(std::uint16_t id) noexcept {
+    if (id >= 1u && id <= 5u) return {0.94f, 0.80f, 0.38f};   // Books of Combos: Gold
+    if (id == 7u || id == 8u) return {0.38f, 0.88f, 0.46f};   // Potion / Mega Potion: Green
+    if (id == 11u || id == 12u) return {0.96f, 0.86f, 0.34f}; // Max / Ancient Potion: Gold
+    if (id == 13u || id == 15u || id == 21u) return {0.38f, 0.74f, 0.96f}; // Antidote / Cool Drink: Sky Blue
+    if (id == 14u || id == 16u || id == 17u || id == 20u) return {0.95f, 0.38f, 0.38f}; // Hot Drink / Demondrug: Red
+    if (id >= 7u && id <= 28u) return {0.46f, 0.86f, 0.56f};  // Other consumables: Green
+    if (id == 64u) return {0.96f, 0.44f, 0.78f};              // Paintball: Magenta
+    if (id >= 60u && id <= 76u) return {0.96f, 0.56f, 0.26f}; // Bombs: Orange
+    if (id >= 77u && id <= 84u) return {0.94f, 0.84f, 0.36f}; // Traps: Yellow
+    if (id == 135u || id == 867u) return {0.58f, 0.82f, 0.96f}; // Whetstone: Steel Blue
+    if (id >= 136u && id <= 165u) return {0.68f, 0.84f, 0.96f}; // Gathering Tools: Light Blue
+    if (id >= 85u && id <= 134u) return {0.90f, 0.68f, 0.38f};  // Ammo / Coatings: Amber
+    return kMhWhite;
+}
+
+const LoadoutSprite *pick_equip_icon(const LoadoutIcons &icons, std::size_t raw_slot, const EquipPiece &piece,
+                                     std::optional<std::uint8_t> weapon_class) noexcept {
     auto use = [](const LoadoutSprite &s) -> const LoadoutSprite * { return s.valid() ? &s : nullptr; };
     switch (raw_slot) {
-        case 0u: return use(piece[1] == 5u ? icons.weapon_blade : icons.weapon_gun);
+        case 0u:
+            if (weapon_class && *weapon_class < icons.weapon_classes.size() && icons.weapon_classes[*weapon_class].valid()) {
+                return &icons.weapon_classes[*weapon_class];
+            }
+            return use(piece[1] == 5u ? icons.weapon_blade : icons.weapon_gun);
         case 1u: return use(icons.legs);
         case 2u: return use(icons.head);
         case 3u: return use(icons.chest_armor);
@@ -321,20 +430,6 @@ std::string fit_text(mhf::overlay::Painter &painter, std::string text, float fsi
         if (painter.measure(text + "..", fsize, false) <= max_w) return text + "..";
     }
     return text;
-}
-
-mhf::overlay::Color item_accent_color(std::uint16_t id) noexcept {
-    constexpr mhf::overlay::Color kHeal{0.34f, 0.78f, 0.45f};
-    constexpr mhf::overlay::Color kTool{0.44f, 0.72f, 0.92f};
-    constexpr mhf::overlay::Color kBomb{0.92f, 0.55f, 0.24f};
-    constexpr mhf::overlay::Color kBook{0.89f, 0.74f, 0.36f};
-    constexpr mhf::overlay::Color kMisc{0.76f, 0.70f, 0.58f};
-
-    if (id >= 1u && id <= 5u) return kBook;
-    if (id >= 7u && id <= 25u) return kHeal;
-    if (id >= 60u && id <= 80u) return kBomb;
-    if ((id >= 135u && id <= 160u) || id == 867u) return kTool;
-    return kMisc;
 }
 
 std::optional<std::string> read_text_entry_from_bytes(const std::vector<std::uint8_t> &buf,
@@ -955,10 +1050,10 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
 
             float name_x = cx + 4.0f;
             if (const LoadoutSprite *ico = pick_item_icon(icons_, s.id)) {
-                painter.image(cx + 2.5f, cy + 4.0f, 14.0f, ico->pixels->data(), ico->size, 0.98f);
+                draw_tinted_icon(painter, cx + 2.5f, cy + 4.0f, 14.0f, *ico, item_icon_tint(s.id), 0.98f);
                 name_x = cx + 18.0f;
             } else {
-                painter.rect(cx + 2.5f, cy + 4.0f, 2.5f, cell_h - 8.0f, item_accent_color(s.id), 0.96f);
+                painter.rect(cx + 2.5f, cy + 4.0f, 2.5f, cell_h - 8.0f, item_icon_tint(s.id), 0.96f);
                 name_x = cx + 7.5f;
             }
 
@@ -1022,15 +1117,18 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             }
             const bool in_box = occ && (equipped_now || piece_in_equip_box(memory, gs, piece, view_armor.box_indices[sv.raw_slot]));
 
+            const EquipMeta meta = resolve_equip_meta(memory, symbols_, sv.raw_slot, piece);
+            const mhf::overlay::Color rare_col = occ ? rarity_color(meta.rarity) : kMhDimText;
+
             // Square equipment icon box (blue highlight + yellow 'E' badge when equipped, matching Equipment Box screenshot!)
             const float box_s = 22.0f;
             const float bx = r_in_x + 3.0f;
             const float by = cy + 3.0f;
             painter.rect(bx, by, box_s, box_s, equipped_now ? kMhEquippedBlue : kMhFrameInk, 0.94f);
-            if (const LoadoutSprite *ico = pick_equip_icon(icons_, sv.raw_slot, piece)) {
-                painter.image(bx + 2.0f, by + 2.0f, 18.0f, ico->pixels->data(), ico->size, occ ? 1.0f : 0.35f);
+            if (const LoadoutSprite *ico = pick_equip_icon(icons_, sv.raw_slot, piece, meta.weapon_class)) {
+                draw_tinted_icon(painter, bx + 2.0f, by + 2.0f, 18.0f, *ico, rare_col, occ ? 1.0f : 0.35f);
             } else {
-                painter.text(bx + 3.0f, by + 14.0f, sv.tag, 5.5f, occ ? kMhWhite : kMhDimText, 0.92f, true);
+                painter.text(bx + 3.0f, by + 14.0f, sv.tag, 5.5f, rare_col, 0.92f, true);
             }
             if (equipped_now) {
                 painter.rect(bx + box_s - 7.5f, by + box_s - 8.5f, 7.5f, 8.5f, kMhFrameInk, 0.88f);
@@ -1051,7 +1149,8 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             const float st_w = painter.font_ok() ? painter.measure(status, 6.8f, false) + 8.0f : 38.0f;
             const std::string fitted = fit_text(painter, std::move(desc), 7.8f, r_in_w - 31.0f - st_w - 8.0f);
             painter.text(r_in_x + 31.0f, cy + 12.2f, fitted, 7.8f, kMhWhite, 0.98f, false);
-            painter.text(r_in_x + 31.0f, cy + 22.8f, sv.tag, 6.4f, kMhDimText, 0.90f, false);
+            const std::string sub = std::string(sv.tag) + "  RARE-" + std::to_string(static_cast<unsigned>(meta.rarity) + 1u);
+            painter.text(r_in_x + 31.0f, cy + 22.8f, sub, 6.4f, rare_col, 0.92f, false);
 
             const mhf::overlay::Color st_fg = equipped_now ? kMhHeaderYellow : (in_box ? kMhOkText : kMhErrText);
             const float st_tw = painter.font_ok() ? painter.measure(status, 6.8f, false) : 26.0f;

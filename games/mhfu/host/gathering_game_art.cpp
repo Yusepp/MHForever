@@ -192,8 +192,8 @@ std::optional<LoadoutIcons> decode_game_loadout_icons(Bytes items, const psp::te
     const auto actions = atlas(items, 0);
     if (!actions) return {};
     const auto item_image = replacement(*actions, pack);
-    const auto pick = [&](unsigned x, unsigned y) -> LoadoutSprite {
-        auto img = item_image ? crop(*item_image, x, y, 24) : crop(*actions, x, y, 24);
+    const auto pick = [&](unsigned x, unsigned y, unsigned size = 24u) -> LoadoutSprite {
+        auto img = item_image ? crop(*item_image, x, y, size) : crop(*actions, x, y, size);
         return {img.size, std::move(img.pixels)};
     };
     return LoadoutIcons{
@@ -209,6 +209,19 @@ std::optional<LoadoutIcons> decode_game_loadout_icons(Bytes items, const psp::te
         .ammo = pick(72, 72),
         .weapon_blade = pick(24, 120),
         .weapon_gun = pick(120, 120),
+        .weapon_classes = {{
+            pick(208, 144, 16u), // 0: Great Sword
+            pick(208, 192, 16u), // 1: Heavy Bowgun
+            pick(144, 160, 16u), // 2: Hammer
+            pick(240, 144, 16u), // 3: Lance
+            pick(224, 144, 16u), // 4: Sword & Shield
+            pick(160, 160, 16u), // 5: Light Bowgun
+            pick(176, 160, 16u), // 6: Dual Blades
+            pick(240, 192, 16u), // 7: Long Sword
+            pick(224, 192, 16u), // 8: Hunting Horn
+            pick(224, 208, 16u), // 9: Gunlance
+            pick(192, 160, 16u), // 10: Bow
+        }},
         .head = pick(0, 144),
         .chest_armor = pick(24, 144),
         .arms = pick(72, 144),
