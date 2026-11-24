@@ -672,6 +672,7 @@ void VkBackend::retire_image(VkImageResource &res) {
 
 void VkBackend::collect_retired(std::uint64_t completed) {
     descriptors_.collect_retired(completed);
+    pack_streamer_.collect_staging(ctx_, completed);
     while (!retired_images_.empty() && retired_images_.front().retire_value <= completed) {
         const auto &r = retired_images_.front();
         if (r.view != VK_NULL_HANDLE) vkDestroyImageView(ctx_.device, r.view, nullptr);
@@ -1026,6 +1027,12 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                         const std::uint32_t slot = pack_streamer_.lookup_or_queue(
                             ctx_, descriptors_, facts,
                             [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
+                            [this]() -> VkCommandBuffer {
+                                ensure_recording();
+                                end_render_pass();
+                                return frames_[frame_slot_].cmd;
+                            },
+                            ctx_.graphics_timeline_value + 1u,
                             frame_number_, has_mips, pfilter, pending);
                         PackCacheEntry entry{};
                         entry.slot = slot;

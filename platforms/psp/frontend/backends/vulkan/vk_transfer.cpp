@@ -32,20 +32,22 @@ bool PackStreamer::init(const Context &ctx, const std::string &pack_folder, cons
     if (!pack_ && !builtin_pack_) return true;
 
     loader_ = std::make_unique<textures::Loader>(2, 512u << 20, ctx.caps.bc_compression);
-    VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr,
-                                 VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, ctx.families.graphics};
-    if (vkCreateCommandPool(ctx.device, &cpci, nullptr, &transfer_pool_) != VK_SUCCESS) return false;
-    VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr,
-                                     transfer_pool_, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-    if (vkAllocateCommandBuffers(ctx.device, &cbai, &transfer_cmd_) != VK_SUCCESS) return false;
-    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
-    return vkCreateFence(ctx.device, &fci, nullptr, &upload_fence_) == VK_SUCCESS;
+    return true;
+}
+
+void PackStreamer::collect_staging(const Context &ctx, std::uint64_t completed_timeline) {
+    while (!retired_staging_.empty() && retired_staging_.front().retire_value <= completed_timeline) {
+        const auto &s = retired_staging_.front();
+        if (s.buffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator, s.buffer, s.alloc);
+        retired_staging_.pop_front();
+    }
 }
 
 void PackStreamer::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     loader_.reset();
     pack_.reset();
     builtin_pack_.reset();
+    collect_staging(ctx, UINT64_MAX);
     for (auto &[id, img] : uploaded_) {
         if (img.bindless_slot != 0) desc.free_texture(img.bindless_slot, 0);
         if (img.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, img.view, nullptr);
@@ -53,20 +55,11 @@ void PackStreamer::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     }
     uploaded_.clear();
     total_vram_bytes_ = 0;
-    if (upload_fence_ != VK_NULL_HANDLE) {
-        vkDestroyFence(ctx.device, upload_fence_, nullptr);
-        upload_fence_ = VK_NULL_HANDLE;
-    }
-    if (transfer_pool_ != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(ctx.device, transfer_pool_, nullptr);
-        transfer_pool_ = VK_NULL_HANDLE;
-        transfer_cmd_ = VK_NULL_HANDLE;
-    }
 }
 
-bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescriptors &desc,
-                                              const textures::Image &img, PackGpuImage &out) {
-    if (img.width == 0 || img.height == 0 || img.levels.empty()) return false;
+bool PackStreamer::upload_image_async(const Context &ctx, BindlessDescriptors &desc, VkCommandBuffer cmd,
+                                      std::uint64_t retire_timeline, const textures::Image &img, PackGpuImage &out) {
+    if (cmd == VK_NULL_HANDLE || img.width == 0 || img.height == 0 || img.levels.empty()) return false;
 
     const bool is_bc7 = (img.format == textures::Image::Format::Bc7 && ctx.caps.bc_compression);
     const VkFormat vk_fmt = is_bc7 ? VK_FORMAT_BC7_UNORM_BLOCK : VK_FORMAT_R8G8B8A8_UNORM;
@@ -126,24 +119,19 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
         mh = std::max(1u, mh >> 1u);
     }
 
-    vkResetCommandBuffer(transfer_cmd_, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
-                                VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
-    vkBeginCommandBuffer(transfer_cmd_, &bi);
-
-    Context::cmd_transition_image(transfer_cmd_, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+    Context::cmd_transition_image(cmd, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                   VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
                                   VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                                   0, mip_levels);
-    vkCmdCopyBufferToImage(transfer_cmd_, staging, out.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    vkCmdCopyBufferToImage(cmd, staging, out.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            static_cast<std::uint32_t>(copies.size()), copies.data());
 
     if (gen_mips) {
         std::int32_t bw = static_cast<std::int32_t>(img.width);
         std::int32_t bh = static_cast<std::int32_t>(img.height);
         for (std::uint32_t m = 1; m < mip_levels; ++m) {
-            Context::cmd_transition_image(transfer_cmd_, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+            Context::cmd_transition_image(cmd, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                           VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                                           VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
@@ -155,9 +143,9 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
             blit.srcOffsets[1] = {bw, bh, 1};
             blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1};
             blit.dstOffsets[1] = {nw, nh, 1};
-            vkCmdBlitImage(transfer_cmd_, out.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkCmdBlitImage(cmd, out.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            out.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-            Context::cmd_transition_image(transfer_cmd_, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+            Context::cmd_transition_image(cmd, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                           VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
@@ -165,30 +153,21 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
             bw = nw;
             bh = nh;
         }
-        Context::cmd_transition_image(transfer_cmd_, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+        Context::cmd_transition_image(cmd, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                       VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                                       mip_levels - 1u, 1u);
     } else {
-        Context::cmd_transition_image(transfer_cmd_, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+        Context::cmd_transition_image(cmd, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                       VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                                       0, mip_levels);
     }
 
-    vkEndCommandBuffer(transfer_cmd_);
-
-    VkCommandBufferSubmitInfo cbsi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, transfer_cmd_, 0};
-    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cbsi, 0, nullptr};
-    vkResetFences(ctx.device, 1, &upload_fence_);
-    {
-        std::lock_guard lock(ctx.graphics_queue_mutex);
-        vkQueueSubmit2(ctx.graphics_queue, 1, &si, upload_fence_);
-    }
-    vkWaitForFences(ctx.device, 1, &upload_fence_, VK_TRUE, UINT64_MAX);
-    vmaDestroyBuffer(ctx.allocator, staging, staging_alloc);
+    // Retire staging buffer asynchronously once this frame's GPU submission completes.
+    retired_staging_.push_back({staging, staging_alloc, retire_timeline});
 
     VkImageViewCreateInfo ivci{};
     ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -210,6 +189,8 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
 std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescriptors &desc,
                                             const textures::TextureFacts &facts,
                                             const textures::MemoryReader &reader,
+                                            const std::function<VkCommandBuffer()> &begin_upload_cmd,
+                                            std::uint64_t retire_timeline,
                                             std::uint64_t frame_num, bool &has_mips,
                                             textures::Filter &filter_out,
                                             bool &pending_out) {
@@ -242,13 +223,12 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
     files.reserve(match.entry->levels.size());
     for (const auto &[lvl, name] : match.entry->levels) files.push_back(chosen->path_of(name));
 
-    // Budget synchronous GPU texture uploads to at most 2 per frame so entering a new zone
-    // with a large HD texture pack never stalls frame pacing (native PSP textures display seamlessly meanwhile).
+    // Budget async GPU texture uploads per frame to keep staging memory bounded while streaming HD packs smoothly.
     if (frame_num != last_upload_frame_) {
         last_upload_frame_ = frame_num;
         uploads_this_frame_ = 0;
     }
-    constexpr std::uint32_t kMaxUploadsPerFrame = 2u;
+    constexpr std::uint32_t kMaxUploadsPerFrame = 4u;
 
     std::shared_ptr<const textures::Image> decoded;
     const auto st = loader_->get(id, files, decoded);
@@ -258,8 +238,9 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
             return 0;
         }
         ++uploads_this_frame_;
+        const VkCommandBuffer cmd = begin_upload_cmd ? begin_upload_cmd() : VK_NULL_HANDLE;
         PackGpuImage gpu_img{};
-        if (upload_image_sync_transfer(ctx, desc, *decoded, gpu_img)) {
+        if (upload_image_async(ctx, desc, cmd, retire_timeline, *decoded, gpu_img)) {
             gpu_img.last_used = frame_num;
             total_vram_bytes_ += gpu_img.vram_bytes;
             has_mips = gpu_img.mip_levels > 1u;

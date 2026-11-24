@@ -9,6 +9,8 @@
 #include "texture_pack.hpp"
 
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -36,32 +38,42 @@ public:
 
     // Non-blocking lookup: returns bindless slot > 0 when the replacement image is resident on GPU, or 0 while
     // loading/missing (so the caller draws the original PSP texture until ready).
-    // Sets `pending_out = true` when a replacement exists in the pack and is still decoding/uploading.
+    // When a decoded image is ready to upload, `begin_upload_cmd()` is called to obtain the active frame's
+    // recording command buffer (outside any render pass), avoiding any synchronous vkWaitForFences stall.
     [[nodiscard]] std::uint32_t lookup_or_queue(const Context &ctx, BindlessDescriptors &desc,
                                                 const textures::TextureFacts &facts,
                                                 const textures::MemoryReader &reader,
+                                                const std::function<VkCommandBuffer()> &begin_upload_cmd,
+                                                std::uint64_t retire_timeline,
                                                 std::uint64_t frame_num, bool &has_mips,
                                                 textures::Filter &filter_out,
                                                 bool &pending_out);
+
+    // Frees staging buffers whose upload submissions have completed on the GPU timeline.
+    void collect_staging(const Context &ctx, std::uint64_t completed_timeline);
 
     // Checks VMA heap budgets (VK_EXT_memory_budget when available) and evicts LRU pack images under pressure.
     // Returns true if any pack textures were evicted (so callers can invalidate cached slot lookups).
     bool trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline);
 
 private:
-    bool upload_image_sync_transfer(const Context &ctx, BindlessDescriptors &desc,
-                                    const textures::Image &img, PackGpuImage &out);
+    struct RetiredStaging {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+        std::uint64_t retire_value = 0;
+    };
+
+    bool upload_image_async(const Context &ctx, BindlessDescriptors &desc, VkCommandBuffer cmd,
+                            std::uint64_t retire_timeline, const textures::Image &img, PackGpuImage &out);
 
     std::unique_ptr<textures::Pack> pack_;
     std::unique_ptr<textures::Pack> builtin_pack_;
     std::unique_ptr<textures::Loader> loader_;
     bool generate_mips_ = false;
 
-    VkCommandPool transfer_pool_ = VK_NULL_HANDLE;
-    VkCommandBuffer transfer_cmd_ = VK_NULL_HANDLE;
-    VkFence upload_fence_ = VK_NULL_HANDLE;
     std::uint64_t last_upload_frame_ = UINT64_MAX;
     std::uint32_t uploads_this_frame_ = 0;
+    std::deque<RetiredStaging> retired_staging_;
 
     std::unordered_map<std::string, PackGpuImage> uploaded_;
     std::size_t total_vram_bytes_ = 0;
