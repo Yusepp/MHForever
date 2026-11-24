@@ -26,24 +26,30 @@ constexpr std::uint64_t kBoxHeartbeatUs = 80'000u;   // disappears promptly (~2-
 constexpr std::uint64_t kSelectHoldOpenUs = 350'000u; // hold SELECT 0.35s to open Loadouts; tap SELECT to Sort
 constexpr std::uint64_t kSortPulseUs = 50'000u;       // brief SELECT pulse forwarded to MHFU for native Sort
 
-// Monster Hunter warm leather-slate & antique-gold palette.
-constexpr mhf::overlay::Color kMhTop{0.125f, 0.106f, 0.086f};
-constexpr mhf::overlay::Color kMhBot{0.059f, 0.051f, 0.043f};
-constexpr mhf::overlay::Color kMhHeader{0.184f, 0.149f, 0.102f};
-constexpr mhf::overlay::Color kMhGold{0.847f, 0.706f, 0.392f};
-constexpr mhf::overlay::Color kMhGoldBright{0.988f, 0.843f, 0.451f};
-constexpr mhf::overlay::Color kMhGoldDim{0.443f, 0.357f, 0.204f};
-constexpr mhf::overlay::Color kMhParchment{0.969f, 0.937f, 0.855f};
-constexpr mhf::overlay::Color kMhMuted{0.667f, 0.620f, 0.525f};
-constexpr mhf::overlay::Color kMhRow{0.118f, 0.106f, 0.090f};
-constexpr mhf::overlay::Color kMhSelectTop{0.784f, 0.569f, 0.176f};
-constexpr mhf::overlay::Color kMhSelectBot{0.588f, 0.400f, 0.106f};
-constexpr mhf::overlay::Color kMhPillTop{0.216f, 0.184f, 0.141f};
-constexpr mhf::overlay::Color kMhPillBot{0.118f, 0.098f, 0.075f};
-constexpr mhf::overlay::Color kMhOkBg{0.118f, 0.235f, 0.145f};
-constexpr mhf::overlay::Color kMhOkText{0.765f, 0.965f, 0.745f};
-constexpr mhf::overlay::Color kMhErrBg{0.275f, 0.110f, 0.110f};
-constexpr mhf::overlay::Color kMhErrText{1.0f, 0.725f, 0.705f};
+// Native MHFU menu palette (matched to Pokke House Item Box, Equipment Box, and Smithy UI).
+constexpr mhf::overlay::Color kMhPanelBg{0.075f, 0.070f, 0.062f};
+constexpr mhf::overlay::Color kMhCellBg{0.032f, 0.032f, 0.032f};
+constexpr mhf::overlay::Color kMhBrassLight{0.804f, 0.651f, 0.373f};
+constexpr mhf::overlay::Color kMhBrassDark{0.463f, 0.349f, 0.188f};
+constexpr mhf::overlay::Color kMhFrameInk{0.055f, 0.047f, 0.039f};
+constexpr mhf::overlay::Color kMhSelectGreen{0.110f, 0.635f, 0.220f};
+constexpr mhf::overlay::Color kMhArrowGreen{0.180f, 0.880f, 0.240f};
+constexpr mhf::overlay::Color kMhHeaderYellow{0.925f, 0.871f, 0.341f};
+constexpr mhf::overlay::Color kMhRuleGreen{0.455f, 0.678f, 0.420f};
+constexpr mhf::overlay::Color kMhRibbonBg{0.114f, 0.251f, 0.078f};
+constexpr mhf::overlay::Color kMhRibbonEdge{0.278f, 0.420f, 0.180f};
+constexpr mhf::overlay::Color kMhRibbonTribal{0.235f, 0.392f, 0.145f};
+constexpr mhf::overlay::Color kMhWhite{0.960f, 0.955f, 0.935f};
+constexpr mhf::overlay::Color kMhDimText{0.620f, 0.612f, 0.576f};
+constexpr mhf::overlay::Color kMhEquippedBlue{0.118f, 0.361f, 0.620f};
+constexpr mhf::overlay::Color kMhOkText{0.640f, 0.940f, 0.580f};
+constexpr mhf::overlay::Color kMhErrBg{0.340f, 0.110f, 0.100f};
+constexpr mhf::overlay::Color kMhErrText{1.0f, 0.680f, 0.640f};
+constexpr mhf::overlay::Color kBtnCapBg{0.130f, 0.130f, 0.130f};
+constexpr mhf::overlay::Color kBtnCapBorder{0.580f, 0.575f, 0.545f};
+constexpr mhf::overlay::Color kBtnCircle{0.930f, 0.350f, 0.350f};
+constexpr mhf::overlay::Color kBtnTriangle{0.280f, 0.860f, 0.480f};
+constexpr mhf::overlay::Color kBtnCross{0.430f, 0.670f, 0.960f};
 
 bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
     return (address & 3u) == 0u && memory.contains(address, 4u);
@@ -105,15 +111,121 @@ std::size_t count_non_empty_armor(const ArmorLoadoutPreset &p) noexcept {
     return n;
 }
 
-void draw_button_pill(mhf::overlay::Painter &painter, float x, float y, float w, float h, const std::string &label,
-                      bool highlight = false) {
-    painter.rrect(x, y, w, h, h * 0.5f, highlight ? kMhGold : kMhPillTop, 0.96f, 0.0f,
-                  highlight ? &kMhGoldBright : &kMhPillBot);
-    painter.rrect(x, y, w, h, h * 0.5f, highlight ? kMhGoldBright : kMhGold, 0.92f, 0.85f);
-    const float fsize = 6.2f;
-    const float tw = painter.font_ok() ? painter.measure(label, fsize, true, 0.25f) : w * 0.6f;
-    painter.text(x + (w - tw) * 0.5f, y + h * 0.71f, label, fsize,
-                 highlight ? mhf::overlay::kInk : kMhParchment, 0.98f, true, 0.25f);
+// Draws MHFU's signature translucent charcoal window with notched antique-brass borders and 4 corner clasps.
+void draw_mh_window(mhf::overlay::Painter &painter, float x, float y, float w, float h, float bg_alpha = 0.80f) {
+    // Smoked translucent interior
+    painter.rect(x + 2.0f, y + 2.0f, w - 4.0f, h - 4.0f, kMhPanelBg, bg_alpha);
+
+    // Outer dark ink outline
+    painter.rect(x, y, w, 1.0f, kMhFrameInk, 0.96f);
+    painter.rect(x, y + h - 1.0f, w, 1.0f, kMhFrameInk, 0.96f);
+    painter.rect(x, y, 1.0f, h, kMhFrameInk, 0.96f);
+    painter.rect(x + w - 1.0f, y, 1.0f, h, kMhFrameInk, 0.96f);
+
+    // Antique-brass rails (2px thick)
+    painter.rect(x + 1.0f, y + 1.0f, w - 2.0f, 2.0f, kMhBrassLight, 0.96f);
+    painter.rect(x + 1.0f, y + h - 3.0f, w - 2.0f, 2.0f, kMhBrassLight, 0.96f);
+    painter.rect(x + 1.0f, y + 1.0f, 2.0f, h - 2.0f, kMhBrassLight, 0.96f);
+    painter.rect(x + w - 3.0f, y + 1.0f, 2.0f, h - 2.0f, kMhBrassLight, 0.96f);
+
+    // Inner dark hairline
+    painter.rect(x + 3.0f, y + 3.0f, w - 6.0f, 0.75f, kMhFrameInk, 0.92f);
+    painter.rect(x + 3.0f, y + h - 3.75f, w - 6.0f, 0.75f, kMhFrameInk, 0.92f);
+    painter.rect(x + 3.0f, y + 3.0f, 0.75f, h - 6.0f, kMhFrameInk, 0.92f);
+    painter.rect(x + w - 3.75f, y + 3.0f, 0.75f, h - 6.0f, kMhFrameInk, 0.92f);
+
+    // Repeating dark square notches along all 4 rails (iconic MHFU riveted border)
+    constexpr float kStep = 6.5f;
+    for (float nx = x + 6.5f; nx < x + w - 8.5f; nx += kStep) {
+        painter.rect(nx, y + 1.0f, 2.2f, 2.0f, kMhFrameInk, 0.90f);
+        painter.rect(nx, y + h - 3.0f, 2.2f, 2.0f, kMhFrameInk, 0.90f);
+    }
+    for (float ny = y + 6.5f; ny < y + h - 8.5f; ny += kStep) {
+        painter.rect(x + 1.0f, ny, 2.0f, 2.2f, kMhFrameInk, 0.90f);
+        painter.rect(x + w - 3.0f, ny, 2.0f, 2.2f, kMhFrameInk, 0.90f);
+    }
+
+    // 4-corner square brass clasps
+    auto draw_clasp = [&](float cx, float cy) {
+        painter.rect(cx, cy, 4.6f, 4.6f, kMhFrameInk, 0.98f);
+        painter.rect(cx + 0.7f, cy + 0.7f, 3.2f, 3.2f, kMhBrassLight, 0.98f);
+        painter.rect(cx + 1.6f, cy + 1.6f, 1.4f, 1.4f, kMhBrassDark, 0.98f);
+    };
+    draw_clasp(x - 0.5f, y - 0.5f);
+    draw_clasp(x + w - 4.1f, y - 0.5f);
+    draw_clasp(x - 0.5f, y + h - 4.1f);
+    draw_clasp(x + w - 4.1f, y + h - 4.1f);
+}
+
+// Draws MHFU's dark forest-green prompt ribbon with geometric tribal right-end cap and optional hold fill.
+void draw_mh_ribbon(mhf::overlay::Painter &painter, float x, float y, float w, float h, float progress = 0.0f) {
+    painter.rect(x, y, w, h, kMhRibbonBg, 0.92f);
+    painter.rect(x, y, w, 0.85f, kMhRibbonEdge, 0.92f);
+    painter.rect(x, y + h - 0.85f, w, 0.85f, kMhRibbonEdge, 0.92f);
+    painter.rect(x, y, 0.85f, h, kMhRibbonEdge, 0.92f);
+
+    if (progress > 0.001f) {
+        const float fw = std::clamp(progress, 0.0f, 1.0f) * (w - 14.0f);
+        painter.rect(x + 1.0f, y + 1.0f, fw, h - 2.0f, kMhSelectGreen, 0.88f);
+    }
+
+    // Geometric tribal motif on the right edge (matching Pokke House / Smithy green bars)
+    const float tx = x + w - 12.0f;
+    painter.rect(tx, y + 1.5f, 1.2f, h - 3.0f, kMhRibbonTribal, 0.90f);
+    painter.rect(tx + 2.5f, y + 2.2f, 7.0f, 1.2f, kMhRibbonTribal, 0.90f);
+    painter.rect(tx + 2.5f, y + h - 3.4f, 7.0f, 1.2f, kMhRibbonTribal, 0.90f);
+    painter.rect(tx + 5.2f, y + 4.5f, 3.2f, h - 9.0f, kMhRibbonTribal, 0.85f);
+    painter.rect(x + w - 1.5f, y + 3.0f, 1.5f, h - 6.0f, kMhRibbonEdge, 0.78f);
+}
+
+// Draws MHFU's iconic emerald-green horizontal selection glow (strong on the left, fading right).
+void draw_mh_select_bar(mhf::overlay::Painter &painter, float x, float y, float w, float h) {
+    constexpr int kBands = 14;
+    const float bw = w / static_cast<float>(kBands);
+    for (int i = 0; i < kBands; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(kBands - 1);
+        const float alpha = 0.86f * (1.0f - 0.72f * t * t);
+        painter.rect(x + static_cast<float>(i) * bw, y, bw + 0.35f, h, kMhSelectGreen, alpha);
+    }
+    painter.rect(x, y, w, 0.65f, kMhArrowGreen, 0.55f);
+    painter.rect(x, y + h - 0.65f, w, 0.65f, kMhArrowGreen, 0.45f);
+}
+
+// Draws a PSP-style dark keycap ("SELECT", "L1", "R1") or colored PlayStation face-button badge ("O", "△", "X").
+void draw_ps_button(mhf::overlay::Painter &painter, float x, float y, float w, float h, const std::string &label,
+                    mhf::overlay::Color fg, bool round_badge) {
+    const float rad = round_badge ? h * 0.5f : 1.8f;
+    painter.rrect(x, y, w, h, rad, kBtnCapBg, 0.96f);
+    painter.rrect(x, y, w, h, rad, round_badge ? fg : kBtnCapBorder, 0.92f, 0.8f);
+    const float fsize = round_badge ? 6.8f : 5.8f;
+    const float tw = painter.font_ok() ? painter.measure(label, fsize, true, 0.15f) : w * 0.6f;
+    painter.text(x + (w - tw) * 0.5f, y + h * 0.74f, label, fsize, fg, 0.98f, true, 0.15f);
+}
+
+const LoadoutSprite *pick_item_icon(const LoadoutIcons &icons, std::uint16_t id) noexcept {
+    auto use = [](const LoadoutSprite &s) -> const LoadoutSprite * { return s.valid() ? &s : nullptr; };
+    if (id >= 1u && id <= 5u) return use(icons.book);
+    if (id >= 7u && id <= 28u) return use(icons.potion);
+    if (id == 64u) return use(icons.paintball);
+    if (id >= 60u && id <= 76u) return use(icons.bomb);
+    if (id >= 77u && id <= 84u) return use(icons.trap);
+    if (id == 135u || id == 867u) return use(icons.whetstone);
+    if (id >= 136u && id <= 165u) return use(icons.pickaxe);
+    if (id >= 85u && id <= 134u) return use(icons.ammo);
+    return use(icons.pouch);
+}
+
+const LoadoutSprite *pick_equip_icon(const LoadoutIcons &icons, std::size_t raw_slot, const EquipPiece &piece) noexcept {
+    auto use = [](const LoadoutSprite &s) -> const LoadoutSprite * { return s.valid() ? &s : nullptr; };
+    switch (raw_slot) {
+        case 0u: return use(piece[1] == 5u ? icons.weapon_blade : icons.weapon_gun);
+        case 1u: return use(icons.legs);
+        case 2u: return use(icons.head);
+        case 3u: return use(icons.chest_armor);
+        case 4u: return use(icons.arms);
+        case 5u: return use(icons.waist);
+        default: return nullptr;
+    }
 }
 
 // Master localized text archive layout in ResourceManager (same format across EU, US, JP, FUComplete):
@@ -672,92 +784,119 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
     if (!box_open(now_us)) return false;
 
     if (!panel_open_) {
-        // Sleek MH-styled bottom-right prompt card inside House & Guild Hall Item Box.
-        const std::string lbl = "Item & Armor Sets";
-        const float fsize = 8.5f;
-        const float tw = painter.font_ok() ? painter.measure(lbl, fsize, true) : 78.0f;
-        const float pill_w = 36.0f;
-        const float cw = 8.0f * 2.0f + pill_w + 6.0f + tw;
-        const float ch = 22.0f;
-        const float cx = 480.0f - cw - 8.0f;
-        const float cy = 272.0f - ch - 8.0f;
+        // Native MHFU dark forest-green prompt ribbon tucked cleanly in the top-right open margin
+        // so it never overlaps "SELECT Sort", item names, or "START Menu Off".
+        const float hold = select_hold_progress(now_us);
+        const std::string lbl = hold > 0.01f ? "Opening Loadouts..." : "Hold: Loadouts";
+        const float fsize = 7.6f;
+        const float tw = painter.font_ok() ? painter.measure(lbl, fsize, false) : 64.0f;
+        const float cap_w = 27.0f;
+        const float rw = 6.0f + cap_w + 5.0f + tw + 16.0f;
+        const float rh = 14.5f;
+        const float rx = 480.0f - rw - 6.0f;
+        const float ry = 5.0f;
 
-        painter.rrect(cx + 1.5f, cy + 1.5f, cw, ch, 4.5f, mhf::overlay::kBlack, 0.45f);
-        painter.rrect(cx, cy, cw, ch, 4.0f, kMhTop, 0.90f, 0.0f, &kMhBot);
-        painter.rrect(cx, cy, cw, ch, 4.0f, kMhGold, 0.92f, 1.0f);
-        draw_button_pill(painter, cx + 7.0f, cy + 4.5f, pill_w, 13.0f, "SELECT");
-        painter.text(cx + 7.0f + pill_w + 6.0f, cy + 14.0f, lbl, fsize, kMhParchment, 0.98f, true);
+        draw_mh_ribbon(painter, rx, ry, rw, rh, hold);
+        draw_ps_button(painter, rx + 5.0f, ry + 2.2f, cap_w, 10.0f, "SELECT", kMhWhite, false);
+        painter.text(rx + 5.0f + cap_w + 5.0f, ry + 10.1f, lbl, fsize,
+                     hold > 0.01f ? kMhHeaderYellow : kMhWhite, 0.98f, hold > 0.01f);
         return true;
     }
 
-    // Modern MH (World/Rise/Wilds) two-column Hunter Loadouts window rendered at native HD.
-    const float px = 24.0f, py = 24.0f, pw = 432.0f, ph = 224.0f;
-    painter.rrect(px + 2.5f, py + 3.0f, pw, ph, 6.5f, mhf::overlay::kBlack, 0.58f);
-    painter.rrect(px, py, pw, ph, 6.0f, kMhTop, 0.95f, 0.0f, &kMhBot);
-    painter.rrect(px, py, pw, ph, 6.0f, kMhGold, 0.95f, 1.2f);
-    painter.rrect(px + 2.5f, py + 2.5f, pw - 5.0f, ph - 5.0f, 4.0f, kMhGoldDim, 0.58f, 0.75f);
-
-    // Ornamental Header Bar
-    painter.rrect(px + 3.0f, py + 3.0f, pw - 6.0f, 22.0f, 3.5f, kMhHeader, 0.96f);
-    painter.rect(px + 4.0f, py + 25.0f, pw - 8.0f, 1.0f, kMhGoldDim, 0.85f);
-    painter.text(px + 12.0f, py + 17.5f, "Hunter Loadouts", 10.5f, kMhGoldBright, 0.98f, true);
-    const std::string sub = "Box Controls Locked";
-    const float sub_w = painter.font_ok() ? painter.measure(sub, 7.2f, false) : 64.0f;
-    painter.text(px + pw - 12.0f - sub_w, py + 16.8f, sub, 7.2f, kMhMuted, 0.90f, false);
-
-    // Left Column: Tabs + 5 Loadout Slots
-    const float lx = px + 10.0f;
-    const float lw = 148.0f;
     const bool on_items = tab_ == Tab::Items;
-    const float tab_y = py + 31.0f;
-    const float tab_w = (lw - 4.0f) * 0.5f;
-    auto draw_tab = [&](float x, const std::string &title, bool active) {
-        painter.rrect(x, tab_y, tab_w, 16.5f, 3.5f, active ? kMhSelectTop : kMhRow, active ? 0.95f : 0.80f, 0.0f,
-                      active ? &kMhSelectBot : nullptr);
-        painter.rrect(x, tab_y, tab_w, 16.5f, 3.5f, active ? kMhGoldBright : kMhGoldDim, active ? 0.95f : 0.55f, 0.85f);
-        const float tw = painter.font_ok() ? painter.measure(title, 7.8f, true) : 42.0f;
-        painter.text(x + (tab_w - tw) * 0.5f, tab_y + 11.2f, title, 7.8f,
-                     active ? mhf::overlay::kInk : kMhMuted, 0.98f, true);
-    };
-    draw_tab(lx, "Item Sets", on_items);
-    draw_tab(lx + tab_w + 4.0f, "Armor Sets", !on_items);
-
-    for (std::size_t i = 0; i < kItemLoadoutCount; ++i) {
-        const float ry = py + 54.0f + static_cast<float>(i) * 23.0f;
-        const bool sel = i == selected_;
-        painter.rrect(lx, ry, lw, 19.5f, 3.5f, sel ? kMhSelectTop : kMhRow, sel ? 0.94f : 0.82f, 0.0f,
-                      sel ? &kMhSelectBot : nullptr);
-        if (sel) painter.rrect(lx, ry, lw, 19.5f, 3.5f, kMhGoldBright, 0.98f, 1.0f);
-
-        const std::string name = (on_items ? "Item Set " : "Armor Set ") + std::to_string(i + 1);
-        painter.text(lx + 8.0f, ry + 12.8f, name, 8.2f, sel ? mhf::overlay::kInk : kMhParchment, 0.98f, true);
-
-        const bool saved = on_items ? presets_[i].saved : armor_presets_[i].saved;
-        const std::string detail = !saved ? "Empty"
-                                          : (on_items ? std::to_string(count_non_empty_items(presets_[i])) + "/24"
-                                                      : std::to_string(count_non_empty_armor(armor_presets_[i])) + "/6");
-        const float dw = painter.font_ok() ? painter.measure(detail, 7.6f, false) : 26.0f;
-        painter.text(lx + lw - 8.0f - dw, ry + 12.6f, detail, 7.6f,
-                     sel ? mhf::overlay::kInk : (saved ? kMhGold : kMhMuted), 0.95f, sel);
-    }
-
-    // Status Toast inside Left Column below slots
-    if (!toast_.empty() && now_us < toast_until_us_) {
-        const float ty = py + 174.0f;
-        painter.rrect(lx, ty, lw, 17.0f, 3.0f, toast_ok_ ? kMhOkBg : kMhErrBg, 0.94f);
-        painter.rrect(lx, ty, lw, 17.0f, 3.0f, toast_ok_ ? kMhOkText : kMhErrText, 0.55f, 0.7f);
-        painter.text(lx + 6.0f, ty + 11.4f, toast_, 7.2f, toast_ok_ ? kMhOkText : kMhErrText, 0.98f, true);
-    }
-
-    // Vertical Divider between Set List and Live Visualizer
-    const float div_x = lx + lw + 8.0f;
-    painter.rect(div_x, py + 31.0f, 0.8f, ph - 55.0f, kMhGoldDim, 0.70f);
-
-    // Right Column: Live Modern MH Visualizer
-    const float rx = div_x + 8.0f;
-    const float rw = (px + pw - 10.0f) - rx;
     const std::uint32_t gs = valid_game_sys(memory, symbols_);
     const std::uint32_t text_res = find_master_text_resource(memory, symbols_);
+
+    // Two-window native MHFU layout (matching Equipment Box & Smithy screens).
+    const float win_y = 14.0f;
+    const float win_h = 234.0f;
+    const float lx = 10.0f, lw = 152.0f;
+    const float rx = 168.0f, rw = 302.0f;
+
+    draw_mh_window(painter, lx, win_y, lw, win_h, 0.82f);
+    draw_mh_window(painter, rx, win_y, rw, win_h, 0.82f);
+
+    // --- Left Window: Set Category Header & 5 Loadout Slots ---
+    const float l_in_x = lx + 8.0f;
+    const float l_in_w = lw - 16.0f;
+    painter.text(l_in_x, win_y + 16.5f, on_items ? "[Item Sets]" : "[Armor Sets]", 8.6f, kMhHeaderYellow, 0.98f, false);
+    // Page/Tab indicator matching MHFU's green << 1 / 2 >> style
+    const std::string tab_num = on_items ? "1/2" : "2/2";
+    const float tn_w = painter.font_ok() ? painter.measure(tab_num, 7.4f, false) : 16.0f;
+    const float tab_cx = lx + lw - 24.0f;
+    painter.text(tab_cx - tn_w * 0.5f - 11.0f, win_y + 16.2f, "<<", 7.4f, kMhArrowGreen, 0.96f, true);
+    painter.text(tab_cx - tn_w * 0.5f, win_y + 16.2f, tab_num, 7.4f, kMhWhite, 0.96f, false);
+    painter.text(tab_cx + tn_w * 0.5f + 3.0f, win_y + 16.2f, ">>", 7.4f, kMhArrowGreen, 0.96f, true);
+
+    // Sage-green MHFU section divider
+    painter.rect(l_in_x, win_y + 22.0f, l_in_w, 1.3f, kMhRuleGreen, 0.92f);
+
+    // Compact tab indicator pills
+    const float sub_y = win_y + 27.0f;
+    const float sub_w = (l_in_w - 4.0f) * 0.5f;
+    auto draw_mode_tab = [&](float tx, const std::string &title, bool active) {
+        painter.rect(tx, sub_y, sub_w, 13.5f, kMhCellBg, active ? 0.90f : 0.55f);
+        if (active) {
+            painter.rect(tx, sub_y, sub_w, 1.0f, kMhWhite, 0.92f);
+            painter.rect(tx, sub_y + 12.5f, sub_w, 1.0f, kMhWhite, 0.92f);
+            painter.rect(tx, sub_y, 1.0f, 13.5f, kMhWhite, 0.92f);
+            painter.rect(tx + sub_w - 1.0f, sub_y, 1.0f, 13.5f, kMhWhite, 0.92f);
+        } else {
+            painter.rect(tx, sub_y + 12.5f, sub_w, 0.7f, kMhBrassDark, 0.65f);
+        }
+        const float tw = painter.font_ok() ? painter.measure(title, 7.0f, active) : 34.0f;
+        painter.text(tx + (sub_w - tw) * 0.5f, sub_y + 9.4f, title, 7.0f,
+                     active ? kMhHeaderYellow : kMhDimText, 0.98f, active);
+    };
+    draw_mode_tab(l_in_x, "Items", on_items);
+    draw_mode_tab(l_in_x + sub_w + 4.0f, "Armor", !on_items);
+
+    const LoadoutSprite *list_icon = on_items
+        ? (icons_.pouch.valid() ? &icons_.pouch : nullptr)
+        : (icons_.chest_armor.valid() ? &icons_.chest_armor : nullptr);
+
+    for (std::size_t i = 0; i < kItemLoadoutCount; ++i) {
+        const float ry = win_y + 47.0f + static_cast<float>(i) * 24.5f;
+        const bool sel = i == selected_;
+        if (sel) {
+            draw_mh_select_bar(painter, l_in_x - 2.0f, ry, l_in_w + 4.0f, 20.0f);
+            painter.text(l_in_x + 1.0f, ry + 13.2f, ">>", 7.2f, kMhArrowGreen, 0.98f, true);
+        } else {
+            painter.rect(l_in_x, ry, l_in_w, 20.0f, kMhCellBg, 0.50f);
+        }
+
+        float text_x = l_in_x + 14.0f;
+        if (list_icon) {
+            painter.image(l_in_x + 12.5f, ry + 4.0f, 12.0f, list_icon->pixels->data(), list_icon->size, sel ? 1.0f : 0.85f);
+            text_x = l_in_x + 27.0f;
+        }
+        const std::string name = (on_items ? "Item Set " : "Armor Set ") + std::to_string(i + 1);
+        painter.text(text_x, ry + 13.2f, name, 8.0f, sel ? kMhWhite : kMhWhite, sel ? 1.0f : 0.88f, sel);
+
+        const bool saved = on_items ? presets_[i].saved : armor_presets_[i].saved;
+        const std::string detail = !saved ? "---"
+                                          : (on_items ? std::to_string(count_non_empty_items(presets_[i])) + "/24"
+                                                      : std::to_string(count_non_empty_armor(armor_presets_[i])) + "/6");
+        const float dw = painter.font_ok() ? painter.measure(detail, 7.4f, false) : 20.0f;
+        painter.text(l_in_x + l_in_w - 4.0f - dw, ry + 13.0f, detail, 7.4f,
+                     sel ? kMhHeaderYellow : (saved ? kMhWhite : kMhDimText), 0.95f, false);
+    }
+
+    // Bottom info / toast box inside Left Window
+    painter.rect(l_in_x, win_y + win_h - 52.0f, l_in_w, 1.1f, kMhRuleGreen, 0.78f);
+    if (!toast_.empty() && now_us < toast_until_us_) {
+        painter.rect(l_in_x, win_y + win_h - 46.0f, l_in_w, 18.0f, toast_ok_ ? kMhRibbonBg : kMhErrBg, 0.92f);
+        painter.text(l_in_x + 4.0f, win_y + win_h - 34.0f, fit_text(painter, toast_, 7.0f, l_in_w - 8.0f), 7.0f,
+                     toast_ok_ ? kMhOkText : kMhErrText, 0.98f, true);
+    } else {
+        painter.text(l_in_x + 2.0f, win_y + win_h - 38.0f, "Tap SELECT outside", 6.8f, kMhDimText, 0.92f, false);
+        painter.text(l_in_x + 2.0f, win_y + win_h - 28.0f, "to Sort box normally.", 6.8f, kMhDimText, 0.92f, false);
+        painter.text(l_in_x + 2.0f, win_y + win_h - 14.0f, "Box Controls Locked", 6.8f, kMhHeaderYellow, 0.85f, false);
+    }
+
+    // --- Right Window: Native MHFU Pouch Grid or Equipment Inspector ---
+    const float r_in_x = rx + 8.0f;
+    const float r_in_w = rw - 16.0f;
 
     if (on_items) {
         const bool saved = presets_[selected_].saved;
@@ -773,42 +912,53 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
         for (const auto &s : view_slots) {
             if (s.id != 0u && s.count > 0u) ++used;
         }
-        const std::string hdr = saved ? ("Item Set " + std::to_string(selected_ + 1) + " — Pouch Preview")
-                                      : "Current Pouch (Press △ to Save)";
-        painter.text(rx, py + 40.5f, hdr, 8.2f, saved ? kMhGoldBright : kMhParchment, 0.96f, true);
+        const std::string hdr = saved ? ("[Item Set " + std::to_string(selected_ + 1) + "]")
+                                      : "[Current Pouch — Press △ to Save]";
+        painter.text(r_in_x, win_y + 16.5f, hdr, 8.6f, kMhHeaderYellow, 0.98f, false);
         const std::string cnt = std::to_string(used) + " / 24";
-        const float cw = painter.font_ok() ? painter.measure(cnt, 7.5f, false) : 24.0f;
-        painter.text(rx + rw - cw, py + 40.5f, cnt, 7.5f, kMhMuted, 0.92f, false);
+        const float cw = painter.font_ok() ? painter.measure(cnt, 7.6f, false) : 24.0f;
+        painter.text(r_in_x + r_in_w - cw, win_y + 16.5f, cnt, 7.6f, kMhWhite, 0.95f, false);
+        painter.rect(r_in_x, win_y + 22.0f, r_in_w, 1.3f, kMhRuleGreen, 0.92f);
 
-        // 3 x 8 (24-slot) visual pouch grid
+        // 3 x 8 (24-slot) black-framed MHFU item pouch grid with real native MHFU item icons
         constexpr std::size_t kCols = 3u;
         constexpr std::size_t kRows = 8u;
-        const float gap_x = 4.0f;
+        const float gap_x = 3.5f;
         const float gap_y = 2.5f;
-        const float cell_w = (rw - gap_x * static_cast<float>(kCols - 1u)) / static_cast<float>(kCols);
-        const float cell_h = 16.0f;
-        const float grid_y = py + 46.5f;
+        const float cell_w = (r_in_w - gap_x * static_cast<float>(kCols - 1u)) / static_cast<float>(kCols);
+        const float cell_h = 22.0f;
+        const float grid_y = win_y + 28.0f;
 
         for (std::size_t idx = 0; idx < kItemPouchSlots; ++idx) {
             const std::size_t col = idx / kRows;
             const std::size_t row = idx % kRows;
-            const float cx = rx + static_cast<float>(col) * (cell_w + gap_x);
+            const float cx = r_in_x + static_cast<float>(col) * (cell_w + gap_x);
             const float cy = grid_y + static_cast<float>(row) * (cell_h + gap_y);
             const ItemSlot s = view_slots[idx];
             const bool occupied = s.id != 0u && s.count > 0u;
 
-            painter.rrect(cx, cy, cell_w, cell_h, 2.5f, kMhRow, occupied ? 0.88f : 0.38f);
-            painter.rrect(cx, cy, cell_w, cell_h, 2.5f, kMhGoldDim, occupied ? 0.55f : 0.22f, 0.65f);
+            painter.rect(cx, cy, cell_w, cell_h, kMhCellBg, occupied ? 0.88f : 0.52f);
+            painter.rect(cx, cy, cell_w, 0.7f, kMhBrassDark, occupied ? 0.75f : 0.35f);
+            painter.rect(cx, cy + cell_h - 0.7f, cell_w, 0.7f, kMhBrassDark, occupied ? 0.75f : 0.35f);
+            painter.rect(cx, cy, 0.7f, cell_h, kMhBrassDark, occupied ? 0.75f : 0.35f);
+            painter.rect(cx + cell_w - 0.7f, cy, 0.7f, cell_h, kMhBrassDark, occupied ? 0.75f : 0.35f);
             if (!occupied) continue;
 
-            painter.rrect(cx + 2.5f, cy + 3.0f, 3.2f, cell_h - 6.0f, 1.5f, item_accent_color(s.id), 0.96f);
+            float name_x = cx + 4.0f;
+            if (const LoadoutSprite *ico = pick_item_icon(icons_, s.id)) {
+                painter.image(cx + 2.5f, cy + 4.0f, 14.0f, ico->pixels->data(), ico->size, 0.98f);
+                name_x = cx + 18.0f;
+            } else {
+                painter.rect(cx + 2.5f, cy + 4.0f, 2.5f, cell_h - 8.0f, item_accent_color(s.id), 0.96f);
+                name_x = cx + 7.5f;
+            }
 
             const std::string qty = "x" + std::to_string(s.count);
-            const float qw = painter.font_ok() ? painter.measure(qty, 6.4f, true) : 14.0f;
-            const float max_name_w = cell_w - 8.0f - qw - 6.5f;
-            const std::string name = fit_text(painter, resolve_item_name(memory, text_res, text_archive_, s.id), 6.4f, max_name_w);
-            painter.text(cx + 8.0f, cy + 10.7f, name, 6.4f, kMhParchment, 0.96f, false);
-            painter.text(cx + cell_w - 3.5f - qw, cy + 10.7f, qty, 6.4f, kMhGoldBright, 0.96f, true);
+            const float qw = painter.font_ok() ? painter.measure(qty, 6.4f, false) : 13.0f;
+            const float max_name_w = (cx + cell_w - 3.5f - qw - 2.5f) - name_x;
+            const std::string name = fit_text(painter, resolve_item_name(memory, text_res, text_archive_, s.id), 6.5f, max_name_w);
+            painter.text(name_x, cy + 13.5f, name, 6.5f, kMhWhite, 0.98f, false);
+            painter.text(cx + cell_w - 3.0f - qw, cy + 13.5f, qty, 6.4f, kMhHeaderYellow, 0.98f, false);
         }
     } else {
         const bool saved = armor_presets_[selected_].saved;
@@ -821,45 +971,65 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
                 view_armor.box_indices[s] = memory.load16(gs + kGameSysEquipIdxBase + static_cast<std::uint32_t>(s) * 2u);
             }
         }
-        const std::string hdr = saved ? ("Armor Set " + std::to_string(selected_ + 1) + " — Equipment Inspector")
-                                      : "Current Equipment (Press △ to Save)";
-        painter.text(rx, py + 40.5f, hdr, 8.2f, saved ? kMhGoldBright : kMhParchment, 0.96f, true);
+        const std::string hdr = saved ? ("[Armor Set " + std::to_string(selected_ + 1) + "]")
+                                      : "[Current Equipment — Press △ to Save]";
+        painter.text(r_in_x, win_y + 16.5f, hdr, 8.6f, kMhHeaderYellow, 0.98f, false);
+        painter.rect(r_in_x, win_y + 22.0f, r_in_w, 1.3f, kMhRuleGreen, 0.92f);
 
-        // Display in modern MH vertical order: Weapon, Head, Chest, Arms, Waist, Legs.
         struct SlotView {
             std::size_t raw_slot;
             const char *tag;
-            mhf::overlay::Color badge;
         };
         constexpr std::array<SlotView, kEquipSlots> kOrder{{
-            {0u, "WPN",   {0.89f, 0.56f, 0.24f}},
-            {2u, "HEAD",  {0.44f, 0.72f, 0.92f}},
-            {3u, "CHEST", {0.42f, 0.78f, 0.55f}},
-            {4u, "ARMS",  {0.78f, 0.62f, 0.88f}},
-            {5u, "WAIST", {0.86f, 0.72f, 0.36f}},
-            {1u, "LEGS",  {0.72f, 0.64f, 0.52f}},
+            {0u, "Weapon"},
+            {2u, "Head"},
+            {3u, "Chest"},
+            {4u, "Arms"},
+            {5u, "Waist"},
+            {1u, "Legs"},
         }};
 
-        const float list_y = py + 48.0f;
-        const float row_h = 21.5f;
-        const float row_stride = 24.0f;
+        const float list_y = win_y + 29.0f;
+        const float row_h = 28.0f;
+        const float row_stride = 32.0f;
         for (std::size_t r = 0; r < kEquipSlots; ++r) {
             const auto &sv = kOrder[r];
             const float cy = list_y + static_cast<float>(r) * row_stride;
             const EquipPiece &piece = view_armor.pieces[sv.raw_slot];
             const bool occ = piece_non_empty(piece);
 
-            painter.rrect(rx, cy, rw, row_h, 3.2f, kMhRow, occ ? 0.88f : 0.42f);
-            painter.rrect(rx, cy, rw, row_h, 3.2f, kMhGoldDim, occ ? 0.58f : 0.25f, 0.7f);
+            painter.rect(r_in_x, cy, r_in_w, row_h, kMhCellBg, occ ? 0.88f : 0.52f);
+            painter.rect(r_in_x, cy, r_in_w, 0.75f, kMhBrassDark, occ ? 0.80f : 0.35f);
+            painter.rect(r_in_x, cy + row_h - 0.75f, r_in_w, 0.75f, kMhBrassDark, occ ? 0.80f : 0.35f);
+            painter.rect(r_in_x, cy, 0.75f, row_h, kMhBrassDark, occ ? 0.80f : 0.35f);
+            painter.rect(r_in_x + r_in_w - 0.75f, cy, 0.75f, row_h, kMhBrassDark, occ ? 0.80f : 0.35f);
 
-            // Slot tag pill
-            painter.rrect(rx + 4.0f, cy + 4.0f, 34.0f, row_h - 8.0f, 2.5f, sv.badge, occ ? 0.88f : 0.35f);
-            const float tw = painter.font_ok() ? painter.measure(sv.tag, 6.4f, true) : 20.0f;
-            painter.text(rx + 4.0f + (34.0f - tw) * 0.5f, cy + 13.0f, sv.tag, 6.4f,
-                         occ ? mhf::overlay::kInk : kMhMuted, 0.96f, true);
+            // Live ownership status
+            bool equipped_now = false;
+            if (occ && gs != 0u) {
+                const EquipPiece cur = read_piece(memory, gs + kGameSysEquippedBase +
+                                                              static_cast<std::uint32_t>(sv.raw_slot) * kEquipPieceSize);
+                equipped_now = (cur == piece);
+            }
+            const bool in_box = occ && (equipped_now || piece_in_equip_box(memory, gs, piece, view_armor.box_indices[sv.raw_slot]));
+
+            // Square equipment icon box (blue highlight + yellow 'E' badge when equipped, matching Equipment Box screenshot!)
+            const float box_s = 22.0f;
+            const float bx = r_in_x + 3.0f;
+            const float by = cy + 3.0f;
+            painter.rect(bx, by, box_s, box_s, equipped_now ? kMhEquippedBlue : kMhFrameInk, 0.94f);
+            if (const LoadoutSprite *ico = pick_equip_icon(icons_, sv.raw_slot, piece)) {
+                painter.image(bx + 2.0f, by + 2.0f, 18.0f, ico->pixels->data(), ico->size, occ ? 1.0f : 0.35f);
+            } else {
+                painter.text(bx + 3.0f, by + 14.0f, sv.tag, 5.5f, occ ? kMhWhite : kMhDimText, 0.92f, true);
+            }
+            if (equipped_now) {
+                painter.rect(bx + box_s - 7.5f, by + box_s - 8.5f, 7.5f, 8.5f, kMhFrameInk, 0.88f);
+                painter.text(bx + box_s - 6.0f, by + box_s - 1.5f, "E", 6.8f, kMhHeaderYellow, 1.0f, true);
+            }
 
             if (!occ) {
-                painter.text(rx + 44.0f, cy + 13.5f, "Empty", 7.6f, kMhMuted, 0.75f, false);
+                painter.text(r_in_x + 31.0f, cy + 16.5f, std::string(sv.tag) + " : ---", 7.6f, kMhDimText, 0.80f, false);
                 continue;
             }
 
@@ -867,40 +1037,33 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             if (sv.raw_slot != 0u && piece[0] > 0u) desc += " Lv." + std::to_string(static_cast<unsigned>(piece[0]) + 1u);
             const std::size_t decos = count_decorations(piece);
             if (decos > 0u) desc += " [" + std::to_string(decos) + " deco]";
-            const float st_w = 42.0f;
-            const std::string fitted = fit_text(painter, std::move(desc), 7.4f, rw - 44.0f - st_w - 10.0f);
-            painter.text(rx + 44.0f, cy + 13.4f, fitted, 7.4f, kMhParchment, 0.96f, false);
 
-            // Live ownership status badge against current equipped / Equipment Box
-            bool equipped_now = false;
-            if (gs != 0u) {
-                const EquipPiece cur = read_piece(memory, gs + kGameSysEquippedBase +
-                                                              static_cast<std::uint32_t>(sv.raw_slot) * kEquipPieceSize);
-                equipped_now = (cur == piece);
-            }
-            const bool in_box = equipped_now || piece_in_equip_box(memory, gs, piece, view_armor.box_indices[sv.raw_slot]);
             const std::string status = equipped_now ? "Equipped" : (in_box ? "In Box" : "Missing");
-            const mhf::overlay::Color st_bg = equipped_now ? kMhHeader : (in_box ? kMhOkBg : kMhErrBg);
-            const mhf::overlay::Color st_fg = equipped_now ? kMhGoldBright : (in_box ? kMhOkText : kMhErrText);
-            painter.rrect(rx + rw - st_w - 5.0f, cy + 4.5f, st_w, row_h - 9.0f, 2.5f, st_bg, 0.92f);
-            const float st_tw = painter.font_ok() ? painter.measure(status, 6.4f, true) : 26.0f;
-            painter.text(rx + rw - st_w - 5.0f + (st_w - st_tw) * 0.5f, cy + 13.0f, status, 6.4f, st_fg, 0.96f, true);
+            const float st_w = painter.font_ok() ? painter.measure(status, 6.8f, false) + 8.0f : 38.0f;
+            const std::string fitted = fit_text(painter, std::move(desc), 7.8f, r_in_w - 31.0f - st_w - 8.0f);
+            painter.text(r_in_x + 31.0f, cy + 12.2f, fitted, 7.8f, kMhWhite, 0.98f, false);
+            painter.text(r_in_x + 31.0f, cy + 22.8f, sv.tag, 6.4f, kMhDimText, 0.90f, false);
+
+            const mhf::overlay::Color st_fg = equipped_now ? kMhHeaderYellow : (in_box ? kMhOkText : kMhErrText);
+            const float st_tw = painter.font_ok() ? painter.measure(status, 6.8f, false) : 26.0f;
+            painter.text(r_in_x + r_in_w - 6.0f - st_tw, cy + 16.8f, status, 6.8f, st_fg, 0.98f, false);
         }
     }
 
-    // Footer Controls Bar with PSP-style button pills
-    const float fy = py + ph - 17.5f;
-    painter.rect(px + 8.0f, fy - 2.5f, pw - 16.0f, 0.75f, kMhGoldDim, 0.65f);
-    float fx = px + 10.0f;
-    auto add_hint = [&](const std::string &btn, float bw, const std::string &act) {
-        draw_button_pill(painter, fx, fy, bw, 11.5f, btn);
-        fx += bw + 3.5f;
-        fx += painter.text(fx, fy + 8.5f, act, 7.5f, kMhParchment, 0.92f, false) + 10.0f;
+    // Native MHFU Dark Forest-Green Footer Controls Ribbon
+    const float fy = 252.5f;
+    const float fh = 15.0f;
+    draw_mh_ribbon(painter, lx, fy, (rx + rw) - lx, fh);
+    float fx = lx + 8.0f;
+    auto add_hint = [&](const std::string &btn, float bw, mhf::overlay::Color fg, bool round_badge, const std::string &act) {
+        draw_ps_button(painter, fx, fy + 2.3f, bw, 10.4f, btn, fg, round_badge);
+        fx += bw + 4.0f;
+        fx += painter.text(fx, fy + 10.2f, act, 7.5f, kMhWhite, 0.96f, false) + 12.0f;
     };
-    add_hint("O", 13.0f, on_items ? "Load Item Set" : "Equip Armor Set");
-    add_hint("△", 13.0f, "Save Current");
-    add_hint("L/R", 20.0f, "Switch Tab");
-    add_hint("X", 13.0f, "Close");
+    add_hint("O", 11.0f, kBtnCircle, true, on_items ? "Load Item Set" : "Equip Armor Set");
+    add_hint("△", 11.0f, kBtnTriangle, true, "Save Current");
+    add_hint("L1/R1", 23.0f, kMhWhite, false, "Switch Tab");
+    add_hint("X", 11.0f, kBtnCross, true, "Close");
     return true;
 }
 
