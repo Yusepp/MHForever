@@ -220,6 +220,7 @@ std::int64_t do_read(Runtime &rt, int fd, std::uint32_t address, std::uint32_t s
     if (f->file == nullptr) {
         const std::uint64_t left = f->position < f->image_size ? f->image_size - f->position : 0;
         const auto n = static_cast<std::uint32_t>(std::min<std::uint64_t>(left, size));
+        if (n == 0) return 0;
         if (std::uint8_t *dst = rt.memory().raw_pointer(address, n)) {
             state(rt).disc->read_into(f->image_offset + f->position, dst, n);
             f->position += n;

@@ -230,6 +230,10 @@ void Ge::execute(std::uint32_t word, std::uint32_t) {
         return;
     case kLoadClut: load_clut(data); return;
     case kTransferStart: block_transfer(data); return;
+    case 0xCBu: // TFLUSH: guest flushed texture cache after updating texture RAM/VRAM
+        regs_[cmd] = data;
+        ++state_generation_;
+        return;
     default:
         if (cmd >= kMorphWeight0 && cmd < kMorphWeight0 + 8) morph_[cmd - kMorphWeight0] = float24(data);
         if ((cmd >= kViewportXScale && cmd <= kViewportZCenter) || cmd == kOffsetX || cmd == kOffsetY) ++camera_generation_;
@@ -1167,8 +1171,34 @@ Ge::TextureInfo Ge::texture_info() const {
 
 void Ge::decode_texture(std::uint32_t *out) const {
     const TextureInfo t = texture_info();
-    const std::uint8_t *src = host(t.address, t.bytes);
-    if (src == nullptr || t.format == 6u || t.format == 7u || t.format > 10u) {
+    if (t.width == 0u || t.height == 0u) return;
+
+    // Compute the exact maximum byte span touched by the fast pointer path so small DXT,
+    // narrow swizzled, and 1x1 CLUT4 textures can never over-read past guest RAM/EDRAM.
+    std::uint32_t required_bytes = 0u;
+    bool fast_supported = (t.format <= 5u || (t.format >= 8u && t.format <= 10u));
+    if (fast_supported) {
+        if (t.format >= 8u) {
+            const std::uint32_t block_bytes = t.format == 8u ? 8u : 16u;
+            const std::uint32_t blocks_per_row = std::max(1u, t.stride / 4u);
+            const std::uint32_t max_block = ((t.height - 1u) / 4u) * blocks_per_row + (t.width - 1u) / 4u;
+            required_bytes = (max_block + 1u) * block_bytes;
+        } else {
+            static constexpr std::uint32_t bits_for[6] = {16, 16, 16, 32, 4, 8};
+            const std::uint32_t bits = bits_for[t.format];
+            const std::uint32_t row_bytes = t.stride * bits / 8u;
+            const std::uint32_t width_bytes = (t.width * bits + 7u) / 8u;
+            if (!t.swizzled) {
+                required_bytes = (t.height - 1u) * row_bytes + width_bytes;
+            } else {
+                const std::uint32_t blocks_per_row = std::max(1u, row_bytes / 16u);
+                const std::uint32_t max_tile = ((t.height - 1u) >> 3u) * blocks_per_row + ((width_bytes - 1u) >> 4u);
+                required_bytes = (max_tile + 1u) * 128u;
+            }
+        }
+    }
+    const std::uint8_t *src = fast_supported ? host(t.address, required_bytes) : nullptr;
+    if (src == nullptr) {
         for (std::uint32_t y = 0; y < t.height; ++y) {
             for (std::uint32_t x = 0; x < t.width; ++x) {
                 out[y * t.width + x] = fetch_texel(0, static_cast<int>(x), static_cast<int>(y));

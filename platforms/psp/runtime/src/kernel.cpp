@@ -284,7 +284,8 @@ void Kernel::wake(Thread &t, std::uint32_t result) {
 void Kernel::dump_threads(std::FILE *out) const {
     static const char *const states[] = {"ready", "running", "waiting", "suspended", "dormant", "dead"};
     static const char *const waits[] = {"-", "delay", "sleep", "sema", "eventflag", "lwmutex", "threadend", "vblank",
-                                        "generic"};
+                                        "gesync", "generic"};
+    static_assert(std::size(waits) == static_cast<std::size_t>(WaitType::Generic) + 1u);
     for (const auto &[uid, t] : threads_) {
         std::fprintf(out, "[threads] %5d %-24s prio %3d %-9s wait %-9s obj %6d ra %08X sp %08X entry %08X\n", uid,
                      t->name.c_str(), t->priority, states[static_cast<int>(t->state)],
