@@ -4,16 +4,13 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-// Full-resolution unified Linear-HDR lighting composite (runs once after 3D and before 2D HUD):
+// Full-resolution unified Linear-HDR -> rich SDR lighting composite (runs after 3D, before 2D HUD):
 // - Smooth per-pixel G-buffer vertex normals (with seamless bilateral depth-normal fallback)
-// - Shared-memory 8x8 tiled world-space dynamic point lights (up to 64 lights: fireballs, bombs,
-//   torches, campfires, lightning, elemental hit flashes, monster auras) with PBR diffuse + specular + SSS
-// - Multi-bounce GTAO + contact shadows + world-up hemisphere bounce in linear HDR space
-// - Per-pixel sun key contrast + GGX-like specular sheen + thin-surface backlit SSS + Fresnel rim light
-// - Quarter-res SSGI colored bounce + 4x2 dynamic emissive flash
-// - Rayleigh/Mie atmospheric fog & volumetric sun shafts + HDR Karis bloom with heat shimmer
-// - Adaptive eye exposure + ACES-inspired filmic tonemapping + subtle biome color grading
-// - Aspect-corrected luminance-preserving cinematic vignette + triangular IGN debanding
+// - Lock-free 2D screen-tile culling for up to 64 world-space dynamic point lights (MHFU-scale calibrated)
+// - Multi-bounce GTAO + contact shadows + world-up hemisphere bounce in linear space
+// - Dual-lobe metallic/armor specular + Fresnel sky/environment reflections (armor, water, wet caves)
+// - Thin-surface backlit SSS on skinned monsters/wings + electric/fire/elemental combat hit illumination
+// - SDR-calibrated hue-preserving highlight shoulder (rich contrast & vibrant colors, zero milky wash-out!)
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -64,7 +61,6 @@ layout(push_constant) uniform LightingPush {
 shared uint s_tile_count;
 shared uint s_tile_lights[32];
 
-// Multi-bounce GTAO approximation (Jimenez et al.): preserves surface chroma inside crevices.
 vec3 multi_bounce_ao(float ao, vec3 albedo) {
     vec3 a =  2.0404 * albedo - 0.3324;
     vec3 b = -4.7951 * albedo + 0.6417;
@@ -76,13 +72,13 @@ float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Fast polynomial sRGB -> Linear HDR (2 FMAs instead of 6 pow() transcendentals, max err < 0.002).
+// Fast polynomial sRGB -> Linear HDR (2 FMAs, max err < 0.002).
 vec3 srgb_to_linear_hdr(vec3 c) {
     vec3 a = max(c, vec3(0.0));
     return a * (a * (a * 0.305306011 + 0.682171111) + 0.012522878);
 }
 
-// Fast Linear -> sRGB using hardware sqrt instead of pow(1/2.2).
+// Fast Linear -> sRGB using hardware sqrt.
 vec3 linear_to_srgb(vec3 c) {
     vec3 a = max(c, vec3(0.0));
     vec3 s1 = sqrt(a);
@@ -98,15 +94,18 @@ float linear_eye_z(LightingParams p, float d) {
     return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
 }
 
-vec3 filmic_tonemap(vec3 x) {
+// SDR-calibrated hue-preserving highlight shoulder:
+// Leaves [0 .. 0.78] linear 100% rich and uncompressed (zero milky/pale ACES wash-out!),
+// and smoothly rolls off HDR fire/lightning/sunlight above 0.78 while preserving vivid chroma.
+vec3 sdr_rich_tonemap(vec3 x) {
     vec3 a = max(x, vec3(0.0));
-    float l = dot(a, vec3(0.2126, 0.7152, 0.0722));
-    float hi_blend = smoothstep(0.95, 3.2, l) * 0.28;
-    a = mix(a, vec3(l), hi_blend);
-    vec3 aces = (a * (2.51 * a + 0.03)) / (a * (2.43 * a + 0.59) + 0.14);
-    float mid_w = smoothstep(0.0, 0.65, l);
-    vec3 scaled = mix(a * 1.04, aces * 1.06, 0.55 + 0.35 * mid_w);
-    return clamp(scaled, vec3(0.0), vec3(1.0));
+    float peak = max(a.r, max(a.g, a.b));
+    if (peak <= 0.78) return a;
+    float compressed = 0.78 + 0.22 * tanh((peak - 0.78) / 0.55);
+    vec3 scaled = a * (compressed / peak);
+    // Gentle white-core rolloff only on extreme HDR (> 2.2) so fireballs/lightning feel intensely bright.
+    float hot = smoothstep(1.8, 4.5, peak) * 0.22;
+    return mix(scaled, vec3(compressed), hot);
 }
 
 vec3 decode_gbuf_normal(vec2 rg) {
@@ -129,8 +128,7 @@ void main() {
     bool is_sky = (!in_bounds || d_here >= 0.99992 || d_here <= 0.00001);
     float z_eye = is_sky ? 0.0 : linear_eye_z(p, d_here);
 
-    // 0. Lock-free 2D screen-tile culling for up to 64 world-space dynamic point lights
-    // (zero depth atomics, zero LDS bank-conflict stalls, 1 parallel test per thread!).
+    // 0. Lock-free 2D screen-tile culling for up to 64 world-space dynamic point lights.
     uint lid = gl_LocalInvocationIndex;
     if (p.light_count > 0u) {
         if (lid == 0u) s_tile_count = 0u;
@@ -169,6 +167,8 @@ void main() {
     vec3 col_lin = srgb_to_linear_hdr(scene.rgb);
     vec3 albedo_est = clamp(col_lin, vec3(0.02), vec3(1.0));
     vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
+    uint bid = p.ext_slots.z;
+    bool is_cave = (p.sun_dir_view.w > 0.5);
 
     // 1. Depth-aware bilateral upsample of denoised half-res GTAO & Contact Shadows + smooth G-buffer normal.
     if (!is_sky && p.tex_slots.z != 0u) {
@@ -223,54 +223,86 @@ void main() {
         vec3 L = normalize(p.sun_dir_view.xyz);
         vec3 U = normalize(p.world_up_view.xyz);
 
-        // Multi-bounce AO + Screen-Space Contact Shadows tinted by biome sky/shadow color (linear).
+        // Multi-bounce AO + Screen-Space Contact Shadows (deeper, moodier crevices in caves!).
         vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
-        vec3 mb_ao = multi_bounce_ao(ao, albedo_est);
-        vec3 tinted_ao = mix(shadow_tint_lin, vec3(1.0), mb_ao);
-        vec3 tinted_cs = mix(shadow_tint_lin * 0.65, vec3(1.0), contact);
+        float ao_shaped = is_cave ? pow(ao, 1.25) : ao;
+        vec3 mb_ao = multi_bounce_ao(ao_shaped, albedo_est);
+        vec3 tinted_ao = mix(shadow_tint_lin * (is_cave ? 0.62 : 0.88), vec3(1.0), mb_ao);
+        vec3 tinted_cs = mix(shadow_tint_lin * 0.58, vec3(1.0), contact);
         col_lin *= tinted_ao * tinted_cs;
 
-        // 2. World-up Hemisphere Ambient Bounce.
+        // 2. World-up Hemisphere Ambient Bounce (sky bounce upward, snow/sand/magma under-glow downward).
         if (p.ground_bounce.a > 0.001) {
             float up_dot = clamp(dot(N, U), -1.0, 1.0);
             float sky_w = max(up_dot, 0.0);
             float gnd_w = max(-up_dot, 0.0);
             vec3 ground_lin = srgb_to_linear_hdr(p.ground_bounce.rgb);
-            vec3 hemi = shadow_tint_lin * (sky_w * 0.45) + ground_lin * gnd_w;
-            col_lin += col_lin * hemi * (p.ground_bounce.a * (0.4 + 0.6 * ao));
+            vec3 hemi = shadow_tint_lin * (sky_w * (is_cave ? 0.25 : 0.40)) + ground_lin * (gnd_w * 0.85);
+            col_lin += col_lin * hemi * (p.ground_bounce.a * (0.35 + 0.65 * ao));
         }
 
-        // 3. Per-pixel sun key contrast + GGX-like specular sheen + thin-surface backlit SSS + Fresnel rim light.
+        // 3. Per-pixel sun/overhead key + Dual-lobe Armor/Metal Specular + Water/Wet Fresnel Reflections + SSS.
         vec3 scatter_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
         float sun_vis = ao * contact;
-        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_skinned ? 1.15 : 1.0);
-        col_lin *= clamp(key_boost, 0.84, 1.22);
+        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_skinned ? 1.20 : 1.0);
+        col_lin *= clamp(key_boost, 0.82, 1.24);
 
         float ndotv = clamp(dot(N, V), 0.0, 1.0);
-        float fresnel = pow(1.0 - ndotv, 3.2);
-        float gloss = max(p.spec_contact.y, 6.0) * (is_skinned ? 1.15 : 0.90);
-        if (p.spec_contact.x > 0.001 && p.sun_dir_view.w < 0.5) {
+        float fresnel = pow(1.0 - ndotv, 3.5);
+        float gloss = max(p.spec_contact.y, 12.0) * (is_skinned ? 1.35 : 0.90);
+
+        if (p.spec_contact.x > 0.001) {
             vec3 H = normalize(L + V);
             float ndoth = clamp(dot(N, H), 0.0, 1.0);
-            float luma_lin = dot(col_lin, vec3(0.2126, 0.7152, 0.0722));
-            float spec = pow(ndoth, gloss) * (0.20 + 0.80 * fresnel) * ndotl;
-            col_lin += scatter_lin * (spec * p.spec_contact.x * sun_vis * (0.30 + 0.70 * clamp(luma_lin, 0.0, 1.5)));
+            float luma_lin = dot(albedo_est, vec3(0.2126, 0.7152, 0.0722));
+            float cmax = max(albedo_est.r, max(albedo_est.g, albedo_est.b));
+            float cmin = min(albedo_est.r, min(albedo_est.g, albedo_est.b));
+            float sat = (cmax - cmin) / max(cmax, 1e-4);
 
-            // Thin-surface backlit Subsurface Scattering (SSS) on monster wings/skin & translucent edges!
-            if (is_skinned) {
+            // Detect metallic armor/weapons (skinned + moderate/low saturation or bright) & wet/water planes!
+            float metal_hint = is_skinned ? clamp((1.0 - sat * 0.75) * smoothstep(0.05, 0.45, luma_lin), 0.0, 1.0) : 0.0;
+            bool wet_biome = (bid == 3u || bid == 5u || bid == 9u || bid == 10u || bid == 11u); // IceCave/DarkCave/GreatForest/Jungle/Swamp
+            float up_flat = smoothstep(0.88, 0.985, dot(N, U));
+            float water_hint = (!is_skinned && up_flat > 0.1)
+                                   ? up_flat * ((wet_biome ? 0.85 : 0.35) * smoothstep(0.02, 0.35, albedo_est.b + 0.15))
+                                   : 0.0;
+
+            // Dual-lobe specular: crisp metallic/water glint + smooth broad sheen (works in caves too!).
+            float spec_sharp = pow(ndoth, gloss * (2.2 + metal_hint * 1.5)) * (0.35 + 0.65 * fresnel);
+            float spec_broad = pow(ndoth, gloss * 0.65) * (0.18 + 0.82 * fresnel) * 0.45;
+            float spec_str = p.spec_contact.x * (is_cave ? 0.75 : 1.15) * (1.0 + metal_hint * 1.35 + water_hint * 1.60);
+            // Metallic specular tints slightly toward armor color; dielectric/water stays crisp light color.
+            vec3 spec_tint = mix(scatter_lin, mix(scatter_lin, albedo_est * 1.4, 0.55), metal_hint);
+            col_lin += spec_tint * ((spec_sharp + spec_broad) * ndotl * spec_str * sun_vis);
+
+            // Subtle Fresnel environment reflection on armor/metal & water/wet cave floors!
+            float env_refl_w = (metal_hint * 0.24 + water_hint * 0.38) * fresnel * (0.35 + 0.65 * ao);
+            if (env_refl_w > 0.002) {
+                vec3 R = reflect(-V, N);
+                float r_up = clamp(dot(R, U) * 0.5 + 0.5, 0.0, 1.0);
+                vec3 sky_refl = is_cave ? (shadow_tint_lin * 0.65) : mix(shadow_tint_lin * 0.9, scatter_lin * 1.1, r_up);
+                vec3 gnd_refl = srgb_to_linear_hdr(p.ground_bounce.rgb) * 0.55;
+                vec3 env_col = mix(gnd_refl, sky_refl, smoothstep(0.35, 0.68, r_up));
+                // Modulate armor reflection by metal tint so gold/steel/blue armor reflects its own hue!
+                vec3 refl_tint = mix(vec3(1.0), albedo_est * 1.45, metal_hint * 0.65);
+                col_lin += env_col * refl_tint * env_refl_w;
+            }
+
+            // Thin-surface backlit Subsurface Scattering (SSS) on monster wings/skin outdoors.
+            if (is_skinned && !is_cave) {
                 float back_dot = clamp(dot(V, -normalize(L + N * 0.35)), 0.0, 1.0);
                 float sss = pow(back_dot, 3.0) * (0.30 + 0.70 * fresnel) * sun_vis;
-                col_lin += albedo_est * scatter_lin * (sss * 0.28);
+                col_lin += albedo_est * scatter_lin * (sss * 0.26);
             }
         }
         if (p.bloom_rim.z > 0.001) {
             float sun_align = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
-            float rim_mul = is_skinned ? 1.25 : 0.85;
+            float rim_mul = is_skinned ? 1.25 : 0.75;
             col_lin += scatter_lin * (fresnel * sun_align * p.bloom_rim.z * rim_mul * sun_vis);
         }
 
-        // 3b. World-space Tiled Dynamic Point Lights (fireballs, bombs, torches, campfires, hit flashes, boss auras!).
+        // 3b. World-space Tiled Dynamic Point Lights (MHFU centimeter-scale calibrated!).
         if (p.light_count > 0u) {
             uint n_lights = min(s_tile_count, 32u);
             vec3 dyn_accum = vec3(0.0);
@@ -282,12 +314,14 @@ void main() {
                 if (dist2 >= rad * rad || dist2 < 1e-4) continue;
                 float dist = sqrt(dist2);
                 vec3 ldir = to_l / dist;
-                float t = clamp(1.0 - dist2 / (rad * rad), 0.0, 1.0);
-                float att = (t * t) / (1.0 + dist2 * 0.00014);
-                float wrap_ndotl = clamp((dot(N, ldir) + 0.25) / 1.25, 0.0, 1.0);
+                float dn = dist / rad;
+                float t = clamp(1.0 - dn * dn, 0.0, 1.0);
+                // Dimensionless attenuation calibrated for MHFU world scale (180u = hunter height).
+                float att = (t * t) / (1.0 + dn * dn * 2.2);
+                float wrap_ndotl = clamp((dot(N, ldir) + 0.30) / 1.30, 0.0, 1.0);
                 vec3 H_pt = normalize(ldir + V);
-                float spec_pt = pow(clamp(dot(N, H_pt), 0.0, 1.0), gloss * 0.8) * (0.25 + 0.75 * fresnel) * 0.22;
-                float sss_pt = is_skinned ? (pow(clamp(dot(V, -ldir), 0.0, 1.0), 2.5) * 0.16) : 0.0;
+                float spec_pt = pow(clamp(dot(N, H_pt), 0.0, 1.0), gloss * 0.9) * (0.30 + 0.70 * fresnel) * (is_skinned ? 0.55 : 0.28);
+                float sss_pt = is_skinned ? (pow(clamp(dot(V, -ldir), 0.0, 1.0), 2.5) * 0.22) : 0.0;
                 vec3 light_rad = pl.color_intensity.rgb * (pl.color_intensity.w * att * (0.45 + 0.55 * ao));
                 dyn_accum += light_rad * (albedo_est * (wrap_ndotl + sss_pt) + vec3(spec_pt));
             }
@@ -332,42 +366,44 @@ void main() {
                                       clamp(uv + heat_off, vec2(0.001), vec2(0.999))).rgb;
             bloom = mix(bloom, bloom_haze, 0.55);
         }
-        col_lin += srgb_to_linear_hdr(bloom) * (p.bloom_rim.y * 1.15);
+        col_lin += srgb_to_linear_hdr(bloom) * (p.bloom_rim.y * 1.10);
     }
 
-    // 7. Adaptive Eye Exposure (smooth outdoor <-> cave luminance adaptation).
+    // 7. Gentle SDR-safe Adaptive Eye Exposure.
     if (p.phase1_slots.y != 0u) {
         float exp_gain = texelFetch(u_textures[p.phase1_slots.y], ivec2(0, 0), 0).r;
-        if (exp_gain > 0.5 && exp_gain < 2.0) {
+        if (exp_gain > 0.7 && exp_gain < 1.5) {
             col_lin *= exp_gain;
         }
     }
 
-    // 8. Filmic Tonemapping (Linear HDR -> display-referred [0,1] linear) -> sRGB.
-    vec3 col = linear_to_srgb(filmic_tonemap(col_lin));
+    // 8. Rich SDR-calibrated hue-preserving highlight shoulder -> sRGB (zero pale ACES wash-out!).
+    vec3 col = linear_to_srgb(sdr_rich_tonemap(col_lin));
 
-    // 9. Subtle biome color harmony & vibrance.
-    if (p.spec_contact.w > 0.001) {
+    // 9. Rich contrast & biome color vibrance (preserves deep shadows and vivid Monster Hunter colors on SDR).
+    {
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
         float cmax = max(col.r, max(col.g, col.b));
         float cmin = min(col.r, min(col.g, col.b));
         float sat = cmax - cmin;
-        float vib = p.spec_contact.w * (1.0 - clamp(sat, 0.0, 1.0));
+        float vib = (p.spec_contact.w + 0.06) * (1.0 - clamp(sat, 0.0, 1.0));
         col = mix(vec3(luma), col, 1.0 + vib);
+        // Subtle S-curve micro-contrast so darks stay deep and colors pop cleanly on SDR panels.
+        vec3 scurve = col * col * (3.0 - 2.0 * col);
+        col = mix(col, scurve, is_cave ? 0.14 : 0.08);
     }
 
     // 10. Aspect-corrected, luminance-preserving cinematic vignette.
     if ((p.ext_slots.w & 2u) != 0u) {
-        uint bid = p.ext_slots.z;
         float vig_str = 0.0;
         vec3 vig_tint = vec3(1.0);
-        if (bid == 3u) { vig_str = 0.10; vig_tint = vec3(0.86, 0.94, 1.04); }
-        else if (bid == 4u) { vig_str = 0.09; vig_tint = vec3(1.04, 0.95, 0.86); }
-        else if (bid == 5u) { vig_str = 0.12; vig_tint = vec3(0.92, 0.94, 1.00); }
-        else if (bid == 11u) { vig_str = 0.09; vig_tint = vec3(0.90, 0.96, 1.02); }
-        else if (bid == 12u) { vig_str = 0.09; vig_tint = vec3(1.06, 0.90, 0.82); }
-        else if (bid == 14u) { vig_str = 0.09; vig_tint = vec3(0.94, 0.94, 0.98); }
-        else { vig_str = 0.04; }
+        if (bid == 3u) { vig_str = 0.12; vig_tint = vec3(0.84, 0.94, 1.06); }      // IceCave
+        else if (bid == 4u) { vig_str = 0.09; vig_tint = vec3(1.05, 0.94, 0.84); } // CozyIndoor
+        else if (bid == 5u) { vig_str = 0.16; vig_tint = vec3(0.88, 0.91, 1.00); } // DarkCave
+        else if (bid == 11u) { vig_str = 0.10; vig_tint = vec3(0.88, 0.96, 1.02); } // Swamp
+        else if (bid == 12u) { vig_str = 0.10; vig_tint = vec3(1.08, 0.88, 0.78); } // Volcano
+        else if (bid == 14u) { vig_str = 0.10; vig_tint = vec3(0.92, 0.93, 0.98); } // FortressSiege
+        else { vig_str = 0.03; }
         if (vig_str > 0.0) {
             float aspect = p.vz_and_size.z / max(p.vz_and_size.w, 1.0);
             vec2 vc = (uv * 2.0 - 1.0) * vec2(aspect / 1.765, 1.0);

@@ -1739,22 +1739,22 @@ void VkBackend::draw_batch() {
         const float cmax = std::max({cr, cg, cb});
         const float cmin = std::min({cr, cg, cb});
         const float sat = cmax > 1e-4f ? (cmax - cmin) / cmax : 0.0f;
-        if (cmax > 0.30f && (sat > 0.14f || cmax > 0.65f)) {
-            const float intensity = std::clamp(0.45f + cmax * 0.55f + sat * 0.45f, 0.45f, 1.45f);
-            const float radius = 135.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 0.6f, 110.0f);
+        if (cmax > 0.28f && (sat > 0.12f || cmax > 0.60f)) {
+            const float intensity = std::clamp(1.15f + cmax * 1.10f + sat * 0.95f, 1.15f, 2.95f);
+            const float radius = 360.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 1.4f, 240.0f);
             bool merged = false;
             for (auto &ex : cur_vfx_lights_) {
                 const float dx = ex.world_pos[0] - cx;
                 const float dy = ex.world_pos[1] - cy;
                 const float dz = ex.world_pos[2] - cz;
-                if (dx * dx + dy * dy + dz * dz < 45.0f * 45.0f) {
+                if (dx * dx + dy * dy + dz * dz < 85.0f * 85.0f) {
                     ex.world_pos[0] = 0.5f * (ex.world_pos[0] + cx);
                     ex.world_pos[1] = 0.5f * (ex.world_pos[1] + cy);
                     ex.world_pos[2] = 0.5f * (ex.world_pos[2] + cz);
                     ex.color[0] = std::max(ex.color[0], cr);
                     ex.color[1] = std::max(ex.color[1], cg);
                     ex.color[2] = std::max(ex.color[2], cb);
-                    ex.intensity = std::min(1.85f, std::max(ex.intensity, intensity) + 0.12f);
+                    ex.intensity = std::min(3.40f, std::max(ex.intensity, intensity) + 0.20f);
                     ex.radius = std::max(ex.radius, radius);
                     merged = true;
                     break;

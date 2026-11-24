@@ -4,9 +4,8 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-// Adaptive Eye Exposure (1x1 R16F persistent luminance adaptation, <0.01ms):
-// Computes geometric log-average luminance over a stratified 16x16 grid of the 3D HDR scene
-// and smoothly adapts exposure across outdoor <-> cave transitions without sudden pops.
+// Subtle SDR-safe Adaptive Eye Exposure (1x1 R16F persistent luminance adaptation, <0.01ms):
+// Keeps caves deep and atmospheric (no milky lift!) while gently easing harsh bright-snow glare.
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
@@ -26,10 +25,10 @@ struct LightingParams {
     vec4 world_up_view;
     vec4 ground_bounce;
     vec4 spec_contact;
-    uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
-    uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
-    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
-    uvec4 phase1_slots; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags (bit0=hdr, bit1=exp_reset), w = 0
+    uvec4 tex_slots;
+    uvec4 aux_slots;
+    uvec4 ext_slots;
+    uvec4 phase1_slots;
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -43,9 +42,9 @@ layout(push_constant) uniform LightingPush {
 shared float s_log_luma[256];
 shared float s_weight[256];
 
-vec3 srgb_to_linear_hdr(vec3 c) {
+vec3 srgb_to_linear_fast(vec3 c) {
     vec3 a = max(c, vec3(0.0));
-    return pow(a, vec3(2.2));
+    return a * (a * (a * 0.305306011 + 0.682171111) + 0.012522878);
 }
 
 void main() {
@@ -59,13 +58,12 @@ void main() {
 
     vec3 c = texelFetch(u_textures[p.tex_slots.x], ip, 0).rgb;
     float d = texelFetch(u_textures[p.tex_slots.y], ip, 0).r;
-    vec3 lin = srgb_to_linear_hdr(c);
+    vec3 lin = srgb_to_linear_fast(c);
     float luma = dot(lin, vec3(0.2126, 0.7152, 0.0722));
 
-    // Center-weighted metering, down-weighting pure skybox pixels so horizon glare doesn't crush foreground.
     vec2 dc = uv - vec2(0.5);
     float w = exp(-dot(dc, dc) * 2.2) * ((d >= 0.99992) ? 0.35 : 1.0);
-    s_log_luma[lid] = log2(max(luma, 0.008)) * w;
+    s_log_luma[lid] = log2(max(luma, 0.01)) * w;
     s_weight[lid] = w;
     barrier();
 
@@ -79,14 +77,16 @@ void main() {
 
     if (lid == 0u) {
         float avg_luma = exp2(s_log_luma[0] / max(s_weight[0], 1e-4));
-        // Gentle key target (0.24 linear ~= 0.52 sRGB) with tight bounds [0.84, 1.24] so MHFU's
-        // authentic bright snow and moody caves stay faithful while transitions breathe naturally.
-        float target_exp = clamp(0.24 / max(avg_luma, 0.04), 0.84, 1.24);
+        // Keep exposure very close to 1.0 on SDR displays: never wash out dark caves (+6% max),
+        // and only gently tame extreme snow/fire glare (-6% max).
+        float is_cave = p.sun_dir_view.w;
+        float target_key = (is_cave > 0.5) ? 0.14 : 0.22;
+        float target_exp = clamp(target_key / max(avg_luma, 0.05), 0.94, 1.06);
         float prev_exp = imageLoad(u_exp_out, ivec2(0, 0)).r;
-        if ((p.phase1_slots.z & 2u) != 0u || !(prev_exp > 0.2 && prev_exp < 4.0)) {
+        if ((p.phase1_slots.z & 2u) != 0u || !(prev_exp > 0.5 && prev_exp < 2.0)) {
             prev_exp = target_exp;
         }
-        float adapted = mix(prev_exp, target_exp, 0.045);
+        float adapted = mix(prev_exp, target_exp, 0.04);
         imageStore(u_exp_out, ivec2(0, 0), vec4(adapted, avg_luma, 0.0, 1.0));
     }
 }

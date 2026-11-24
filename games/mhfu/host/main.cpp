@@ -683,11 +683,11 @@ void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
             std::memcpy(&wz, &rz, 4);
             if (std::isfinite(wx) && std::isfinite(wy) && std::isfinite(wz)) {
                 SemanticHitFlash hf{};
-                hf.world_pos = {wx, wy + 75.0f, wz};
+                hf.world_pos = {wx, wy + 85.0f, wz};
                 hf.color = equipped_weapon_element_rgb(mem);
-                const float strength = std::clamp(static_cast<float>(dmg) / 65.0f, 0.35f, 1.5f);
-                hf.radius = 110.0f + strength * 60.0f;
-                hf.peak_intensity = 0.75f + strength * 0.85f;
+                const float strength = std::clamp(static_cast<float>(dmg) / 55.0f, 0.45f, 1.8f);
+                hf.radius = 340.0f + strength * 140.0f;
+                hf.peak_intensity = 1.85f + strength * 1.45f;
                 hf.birth_us = now;
                 std::lock_guard<std::mutex> lock(g_hit_flash_mutex);
                 if (g_hit_flashes.size() >= 12u) g_hit_flashes.erase(g_hit_flashes.begin());
@@ -1800,21 +1800,21 @@ int main(int argc, char **argv) {
                             switch (m.species_id) {
                             case 46u: // Lunastra
                             case 50u: // Teostra
-                                rgb[0] = 1.00f; rgb[1] = 0.38f; rgb[2] = 0.08f; rad = 240.0f; inten = 0.72f * pulse; break;
+                                rgb[0] = 1.00f; rgb[1] = 0.38f; rgb[2] = 0.08f; rad = 540.0f; inten = 1.55f * pulse; break;
                             case 35u: // Kirin
                             case 15u: // Khezu
                             case 29u: // Red Khezu
-                                rgb[0] = 0.45f; rgb[1] = 0.78f; rgb[2] = 1.00f; rad = 200.0f; inten = 0.50f * pulse; break;
+                                rgb[0] = 0.35f; rgb[1] = 0.75f; rgb[2] = 1.00f; rad = 500.0f; inten = 1.45f * pulse; break;
                             case 16u: // Fatalis
                             case 26u: // Crimson Fatalis
                             case 53u: // Akantor
-                                rgb[0] = 1.00f; rgb[1] = 0.28f; rgb[2] = 0.08f; rad = 280.0f; inten = 0.65f * pulse; break;
+                                rgb[0] = 1.00f; rgb[1] = 0.28f; rgb[2] = 0.08f; rad = 620.0f; inten = 1.50f * pulse; break;
                             case 47u: // White Fatalis
-                                rgb[0] = 0.95f; rgb[1] = 0.22f; rgb[2] = 0.30f; rad = 280.0f; inten = 0.65f * pulse; break;
+                                rgb[0] = 0.95f; rgb[1] = 0.20f; rgb[2] = 0.32f; rad = 620.0f; inten = 1.50f * pulse; break;
                             case 69u: // Ukanlos
-                                rgb[0] = 0.55f; rgb[1] = 0.85f; rgb[2] = 1.00f; rad = 260.0f; inten = 0.50f * pulse; break;
+                                rgb[0] = 0.50f; rgb[1] = 0.85f; rgb[2] = 1.00f; rad = 580.0f; inten = 1.25f * pulse; break;
                             case 45u: // Chameleos
-                                rgb[0] = 0.68f; rgb[1] = 0.28f; rgb[2] = 0.92f; rad = 210.0f; inten = 0.42f * pulse; break;
+                                rgb[0] = 0.72f; rgb[1] = 0.24f; rgb[2] = 0.96f; rad = 480.0f; inten = 1.15f * pulse; break;
                             default:
                                 break;
                             }
