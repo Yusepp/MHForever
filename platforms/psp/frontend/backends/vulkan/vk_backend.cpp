@@ -251,6 +251,18 @@ private:
             dp.zmax_pad[1] = 0.0014f;
         }
     }
+    [[nodiscard]] bool bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w,
+                                          std::uint32_t rt_h, bool is_soft_particle, VkDeviceAddress &out_params_addr,
+                                          VkPipeline *last_pipe = nullptr);
+    void reset_interp_state() noexcept {
+        interp_active_ = false;
+        interp_can_blend_ = false;
+        have_newer_snap_ = false;
+        cur_snap_ = InterpSnapshot{};
+        blend_older_ = InterpSnapshot{};
+        blend_newer_ = InterpSnapshot{};
+        cur_raw_batch_start_ = 0;
+    }
     void read_back();
     void capture_clean_3d_snapshot(RenderTarget &rt);
     void copy_shown_to_vram(RenderTarget *shown);
@@ -1074,6 +1086,141 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
     }
 }
 
+bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w, std::uint32_t rt_h,
+                                   bool is_soft_particle, VkDeviceAddress &out_params_addr, VkPipeline *last_pipe) {
+    FrameSlice &f = frames_[frame_slot_];
+    auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
+    if (!pslice.ptr) return false;
+    out_params_addr = pslice.address;
+
+    const auto R = [&](std::uint32_t reg) { return key_reg(setup.key, reg); };
+    const bool clear = (R(kClearMode) & 1u) != 0;
+    const bool textured = !clear && (R(kTextureMapEnable) & 1u) != 0;
+    const bool fog = !clear && !setup.through && (R(kFogEnable) & 1u) != 0;
+    const bool alpha_test = !clear && (R(kAlphaTestEnable) & 1u) != 0;
+    const std::uint32_t minz = R(kMinZ) & 0xFFFFu, maxz = R(kMaxZ) & 0xFFFFu;
+    const bool zrange = !clear && !setup.through && maxz != 0 && (minz != 0 || maxz != 0xFFFFu);
+
+    const bool linear = ((R(kTexFilter) & 0x100u) != 0) ||
+                        (live_->smooth_textures.load(std::memory_order_relaxed) && !setup.through) ||
+                        setup.linear_override;
+    const bool clamp_s = setup.is_killcam || ((R(kTexWrap) & 1u) != 0);
+    const bool clamp_t = setup.is_killcam || ((R(kTexWrap) & 0x100u) != 0);
+    const int aniso = std::clamp(live_->texture_pack_anisotropy.load(std::memory_order_relaxed), 1, 16);
+
+    vk::DrawParams dp{};
+    std::copy_n(setup.uv_xform, 4, dp.uv_xform);
+    unpack_rgb(R(kTexEnvColor), dp.env_and_flags);
+    unpack_rgb(R(kFogColor), dp.fog_and_zmin);
+    dp.fog_and_zmin[3] = static_cast<float>(minz);
+    dp.target_size[0] = static_cast<float>(rt_w);
+    dp.target_size[1] = static_cast<float>(rt_h);
+    dp.zmax_pad[0] = static_cast<float>(maxz);
+    dp.tex_idx = textured ? setup.tex_slot : 0u;
+    dp.sampler_idx = vk::BindlessDescriptors::sampler_index(linear, setup.texture_mips, clamp_s, clamp_t, aniso);
+
+    const std::uint32_t func = R(kTexFunc);
+    dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
+                       (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
+    apply_draw_fx_bits(dp, is_soft_particle, setup.is_killcam, R(kBlendMode));
+    dp.alpha_bits = alpha_test ? (R(kAlphaTest) & 0xFFFFFFu) : 1u;
+    std::memcpy(pslice.ptr, &dp, sizeof(dp));
+
+    vk::GePipelineKey pkey{};
+    pkey.spec_clear = clear ? 1u : 0u;
+    pkey.spec_textured = textured ? 1u : 0u;
+    pkey.spec_alpha_test = alpha_test ? 1u : 0u;
+
+    VkBool32 blend_en = VK_FALSE;
+    VkColorBlendEquationEXT blend_eq{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+                                     VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD};
+    float blend_const[4]{1.0f, 1.0f, 1.0f, 1.0f};
+    VkColorComponentFlags write_mask = 0xFu;
+
+    if (clear) {
+        const std::uint32_t cm = R(kClearMode);
+        const bool rgb = (cm & 0x100u) != 0, alpha = (cm & 0x200u) != 0;
+        write_mask = (rgb ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT) : 0u) |
+                     (alpha ? VK_COLOR_COMPONENT_A_BIT : 0u);
+    } else {
+        if ((R(kAlphaBlendEnable) & 1u) != 0) {
+            blend_en = VK_TRUE;
+            const std::uint32_t mode = R(kBlendMode);
+            bool const_a = false, const_b = false;
+            const std::uint32_t fix_a = R(kBlendFixedA), fix_b = R(kBlendFixedB);
+            VkBlendFactor src = psp_blend_factor(mode & 0xFu, true, fix_a, const_a);
+            VkBlendFactor dst = psp_blend_factor((mode >> 4u) & 0xFu, false, fix_b, const_b);
+            std::uint32_t constant = const_a ? fix_a : fix_b;
+            if (const_a && const_b && (fix_a & 0xFFFFFFu) != (fix_b & 0xFFFFFFu)) {
+                dst = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+                constant = fix_a;
+            }
+            if (const_a || const_b) unpack_rgb(constant, blend_const);
+            static constexpr VkBlendOp kOps[6] = {VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT,
+                                                  VK_BLEND_OP_MIN, VK_BLEND_OP_MAX, VK_BLEND_OP_MAX};
+            blend_eq.srcColorBlendFactor = src;
+            blend_eq.dstColorBlendFactor = dst;
+            blend_eq.colorBlendOp = kOps[std::min<std::uint32_t>((mode >> 8u) & 0xFu, 5u)];
+        }
+        const std::uint32_t mask = R(kMaskRgb);
+        const bool keep_alpha = (R(kStencilTestEnable) & 1u) != 0 || (R(kMaskAlpha) & 0xFFu) == 0xFFu;
+        write_mask = ((mask & 0xFFu) != 0xFFu ? VK_COLOR_COMPONENT_R_BIT : 0u) |
+                     (((mask >> 8u) & 0xFFu) != 0xFFu ? VK_COLOR_COMPONENT_G_BIT : 0u) |
+                     (((mask >> 16u) & 0xFFu) != 0xFFu ? VK_COLOR_COMPONENT_B_BIT : 0u) |
+                     (!keep_alpha ? VK_COLOR_COMPONENT_A_BIT : 0u);
+    }
+
+    pkey.blend_enable = blend_en ? 1u : 0u;
+    pkey.color_op = static_cast<std::uint8_t>(blend_eq.colorBlendOp);
+    pkey.src_factor = static_cast<std::uint8_t>(blend_eq.srcColorBlendFactor);
+    pkey.dst_factor = static_cast<std::uint8_t>(blend_eq.dstColorBlendFactor);
+    pkey.color_mask = static_cast<std::uint8_t>(write_mask);
+
+    VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
+    if (!pipe) return false;
+    if (!last_pipe || pipe != *last_pipe) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        if (last_pipe) *last_pipe = pipe;
+    }
+
+    const std::uint32_t sx1 = R(kScissor1) & 0x3FFu, sy1 = (R(kScissor1) >> 10u) & 0x3FFu;
+    const std::uint32_t sx2 = std::min(R(kScissor2) & 0x3FFu, rt_w - 1u);
+    const std::uint32_t sy2 = std::min((R(kScissor2) >> 10u) & 0x3FFu, rt_h - 1u);
+    VkRect2D scissor{{0, 0}, {0, 0}};
+    if (sx1 <= sx2 && sy1 <= sy2) {
+        scissor.offset = {static_cast<std::int32_t>(sx1) * scale_, static_cast<std::int32_t>(sy1) * scale_};
+        scissor.extent = {(sx2 - sx1 + 1u) * static_cast<std::uint32_t>(scale_),
+                          (sy2 - sy1 + 1u) * static_cast<std::uint32_t>(scale_)};
+    }
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    if (clear) {
+        const bool depth_clear = (R(kClearMode) & 0x400u) != 0;
+        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
+        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
+        vkCmdSetDepthWriteEnable(cmd, depth_clear ? VK_TRUE : VK_FALSE);
+    } else if ((R(kZTestEnable) & 1u) != 0) {
+        static constexpr VkCompareOp kOps[8] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL,
+                                                VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL,
+                                                VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL};
+        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
+        vkCmdSetDepthCompareOp(cmd, kOps[R(kZTest) & 7u]);
+        vkCmdSetDepthWriteEnable(cmd, (R(kZWriteDisable) & 1u) == 0 ? VK_TRUE : VK_FALSE);
+    } else {
+        vkCmdSetDepthTestEnable(cmd, VK_FALSE);
+        vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
+        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
+    }
+
+    vkCmdSetBlendConstants(cmd, blend_const);
+    if (ctx_.caps.extended_dynamic_state3) {
+        vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blend_en);
+        vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &blend_eq);
+        vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &write_mask);
+    }
+    return true;
+}
+
 void VkBackend::draw_batch() {
     if (batch_.empty()) return;
     const auto t0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -1178,159 +1325,27 @@ void VkBackend::draw_batch() {
     FrameSlice &f = frames_[frame_slot_];
     const std::size_t vbytes = batch_.size() * sizeof(GpuVertex);
     auto vslice = f.vertices.allocate(vbytes, 16);
-    auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
-    if (!vslice.ptr || !pslice.ptr) {
+    if (!vslice.ptr) {
         batch_.clear();
         return;
     }
     std::memcpy(vslice.ptr, batch_.data(), vbytes);
 
-    const bool textured = !clear && (R(kTextureMapEnable) & 1u) != 0;
-    const bool fog = !clear && !setup_.through && (R(kFogEnable) & 1u) != 0;
-    const bool alpha_test = !clear && (R(kAlphaTestEnable) & 1u) != 0;
-    const std::uint32_t minz = R(kMinZ) & 0xFFFFu, maxz = R(kMaxZ) & 0xFFFFu;
-    const bool zrange = !clear && !setup_.through && maxz != 0 && (minz != 0 || maxz != 0xFFFFu);
-
-    const bool linear = ((R(kTexFilter) & 0x100u) != 0) ||
-                        (live_->smooth_textures.load(std::memory_order_relaxed) && !setup_.through) ||
-                        setup_.linear_override;
-    const bool clamp_s = setup_.is_killcam || ((R(kTexWrap) & 1u) != 0);
-    const bool clamp_t = setup_.is_killcam || ((R(kTexWrap) & 0x100u) != 0);
-    const int aniso = std::clamp(live_->texture_pack_anisotropy.load(std::memory_order_relaxed), 1, 16);
-
-    vk::DrawParams dp{};
-    std::copy_n(setup_.uv_xform, 4, dp.uv_xform);
-    unpack_rgb(R(kTexEnvColor), dp.env_and_flags);
-    unpack_rgb(R(kFogColor), dp.fog_and_zmin);
-    dp.fog_and_zmin[3] = static_cast<float>(minz);
-    dp.target_size[0] = static_cast<float>(rt.width);
-    dp.target_size[1] = static_cast<float>(rt.height);
-    dp.zmax_pad[0] = static_cast<float>(maxz);
-    dp.tex_idx = textured ? setup_.tex_slot : 0u;
-    dp.sampler_idx = vk::BindlessDescriptors::sampler_index(linear, setup_.texture_mips, clamp_s, clamp_t, aniso);
-
-    const std::uint32_t func = R(kTexFunc);
-    dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
-                       (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
-    apply_draw_fx_bits(dp, is_soft_particle, setup_.is_killcam, R(kBlendMode));
-    if (alpha_test) {
-        dp.alpha_bits = R(kAlphaTest) & 0xFFFFFFu;
-    } else {
-        dp.alpha_bits = 1u; // ALWAYS
-    }
-    std::memcpy(pslice.ptr, &dp, sizeof(dp));
-
-    // Blend & color write mask state.
-    vk::GePipelineKey pkey{};
-    pkey.spec_clear = clear ? 1u : 0u;
-    pkey.spec_textured = textured ? 1u : 0u;
-    pkey.spec_alpha_test = alpha_test ? 1u : 0u;
-
-    VkBool32 blend_en = VK_FALSE;
-    VkColorBlendEquationEXT blend_eq{};
-    blend_eq.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend_eq.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-    blend_eq.colorBlendOp = VK_BLEND_OP_ADD;
-    blend_eq.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend_eq.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-    blend_eq.alphaBlendOp = VK_BLEND_OP_ADD;
-    float blend_const[4]{1.0f, 1.0f, 1.0f, 1.0f};
-    VkColorComponentFlags write_mask = 0xFu;
-
-    if (clear) {
-        const std::uint32_t cm = R(kClearMode);
-        const bool rgb = (cm & 0x100u) != 0, alpha = (cm & 0x200u) != 0;
-        write_mask = (rgb ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT) : 0u) |
-                     (alpha ? VK_COLOR_COMPONENT_A_BIT : 0u);
-    } else {
-        if ((R(kAlphaBlendEnable) & 1u) != 0) {
-            blend_en = VK_TRUE;
-            const std::uint32_t mode = R(kBlendMode);
-            bool const_a = false, const_b = false;
-            const std::uint32_t fix_a = R(kBlendFixedA), fix_b = R(kBlendFixedB);
-            VkBlendFactor src = psp_blend_factor(mode & 0xFu, true, fix_a, const_a);
-            VkBlendFactor dst = psp_blend_factor((mode >> 4u) & 0xFu, false, fix_b, const_b);
-            std::uint32_t constant = const_a ? fix_a : fix_b;
-            if (const_a && const_b && (fix_a & 0xFFFFFFu) != (fix_b & 0xFFFFFFu)) {
-                dst = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
-                constant = fix_a;
-            }
-            if (const_a || const_b) unpack_rgb(constant, blend_const);
-            static constexpr VkBlendOp kOps[6] = {VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT,
-                                                  VK_BLEND_OP_MIN, VK_BLEND_OP_MAX, VK_BLEND_OP_MAX};
-            blend_eq.srcColorBlendFactor = src;
-            blend_eq.dstColorBlendFactor = dst;
-            blend_eq.colorBlendOp = kOps[std::min<std::uint32_t>((mode >> 8u) & 0xFu, 5u)];
-        }
-        const std::uint32_t mask = R(kMaskRgb);
-        const bool keep_alpha = (R(kStencilTestEnable) & 1u) != 0 || (R(kMaskAlpha) & 0xFFu) == 0xFFu;
-        write_mask = ((mask & 0xFFu) != 0xFFu ? VK_COLOR_COMPONENT_R_BIT : 0u) |
-                     (((mask >> 8u) & 0xFFu) != 0xFFu ? VK_COLOR_COMPONENT_G_BIT : 0u) |
-                     (((mask >> 16u) & 0xFFu) != 0xFFu ? VK_COLOR_COMPONENT_B_BIT : 0u) |
-                     (!keep_alpha ? VK_COLOR_COMPONENT_A_BIT : 0u);
-    }
-
-    pkey.blend_enable = blend_en ? 1u : 0u;
-    pkey.color_op = static_cast<std::uint8_t>(blend_eq.colorBlendOp);
-    pkey.src_factor = static_cast<std::uint8_t>(blend_eq.srcColorBlendFactor);
-    pkey.dst_factor = static_cast<std::uint8_t>(blend_eq.dstColorBlendFactor);
-    pkey.color_mask = static_cast<std::uint8_t>(write_mask);
-
-    VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
-    if (!pipe) {
+    VkCommandBuffer cmd = f.cmd;
+    VkDeviceAddress params_addr = 0;
+    if (!bind_ge_draw_state(cmd, setup_, rt.width, rt.height, is_soft_particle, params_addr)) {
         batch_.clear();
         return;
     }
-
-    VkCommandBuffer cmd = f.cmd;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     VkDescriptorSet set0 = descriptors_.set();
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
-
     VkViewport vp{0.0f, 0.0f, static_cast<float>(rt.color.width), static_cast<float>(rt.color.height), 0.0f, 1.0f};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-
-    const std::uint32_t sx1 = R(kScissor1) & 0x3FFu, sy1 = (R(kScissor1) >> 10u) & 0x3FFu;
-    const std::uint32_t sx2 = std::min(R(kScissor2) & 0x3FFu, rt.width - 1u);
-    const std::uint32_t sy2 = std::min((R(kScissor2) >> 10u) & 0x3FFu, rt.height - 1u);
-    VkRect2D scissor{{0, 0}, {0, 0}};
-    if (sx1 <= sx2 && sy1 <= sy2) {
-        scissor.offset = {static_cast<std::int32_t>(sx1) * scale_, static_cast<std::int32_t>(sy1) * scale_};
-        scissor.extent = {(sx2 - sx1 + 1u) * static_cast<std::uint32_t>(scale_),
-                          (sy2 - sy1 + 1u) * static_cast<std::uint32_t>(scale_)};
-    }
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    // Depth dynamic state (Vulkan 1.3 core).
-    if (clear) {
-        const bool depth_clear = (R(kClearMode) & 0x400u) != 0;
-        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
-        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
-        vkCmdSetDepthWriteEnable(cmd, depth_clear ? VK_TRUE : VK_FALSE);
-    } else if ((R(kZTestEnable) & 1u) != 0) {
-        static constexpr VkCompareOp kOps[8] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL,
-                                                VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL,
-                                                VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL};
-        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
-        vkCmdSetDepthCompareOp(cmd, kOps[R(kZTest) & 7u]);
-        vkCmdSetDepthWriteEnable(cmd, (R(kZWriteDisable) & 1u) == 0 ? VK_TRUE : VK_FALSE);
-    } else {
-        vkCmdSetDepthTestEnable(cmd, VK_FALSE);
-        vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
-        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
-    }
-
-    vkCmdSetBlendConstants(cmd, blend_const);
-    if (ctx_.caps.extended_dynamic_state3) {
-        vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blend_en);
-        vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &blend_eq);
-        vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &write_mask);
-    }
 
     const VkDeviceSize voff = vslice.offset;
     vkCmdBindVertexBuffers(cmd, 0, 1, &f.vertices.buffer, &voff);
 
-    vk::DrawPush push{pslice.address, 0u};
+    vk::DrawPush push{params_addr, 0u};
     vkCmdPushConstants(cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(push), &push);
     vkCmdDraw(cmd, static_cast<std::uint32_t>(batch_.size()), 1, 0, 0);
@@ -2372,13 +2387,7 @@ void VkBackend::apply_live_scale() {
     const int req = live_->scale.exchange(0, std::memory_order_relaxed);
     if (req >= 1 && req <= 10 && req != scale_) {
         scale_ = req;
-        interp_active_ = false;
-        interp_can_blend_ = false;
-        have_newer_snap_ = false;
-        cur_snap_ = InterpSnapshot{};
-        blend_older_ = InterpSnapshot{};
-        blend_newer_ = InterpSnapshot{};
-        cur_raw_batch_start_ = 0;
+        reset_interp_state();
         for (auto &[addr, rt] : targets_) {
             retire_image(rt.color);
             retire_image(rt.depth);
@@ -2401,12 +2410,7 @@ void VkBackend::apply_live_fps() {
         target_fps_ = req;
         subframes_ = std::clamp((target_fps_ + 15) / 30, 1, 6);
         if (subframes_ <= 1) {
-            interp_active_ = false;
-            have_newer_snap_ = false;
-            cur_snap_ = InterpSnapshot{};
-            blend_older_ = InterpSnapshot{};
-            blend_newer_ = InterpSnapshot{};
-            cur_raw_batch_start_ = 0;
+            reset_interp_state();
         }
     }
 }
@@ -2807,117 +2811,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
             }
         }
 
-        auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
-        if (!pslice.ptr) break;
-        const bool textured = !clear && (R(kTextureMapEnable) & 1u) != 0;
-        const bool fog = !clear && !rb.setup.through && (R(kFogEnable) & 1u) != 0;
-        const bool alpha_test = !clear && (R(kAlphaTestEnable) & 1u) != 0;
-        const std::uint32_t minz = R(kMinZ) & 0xFFFFu, maxz = R(kMaxZ) & 0xFFFFu;
-        const bool zrange = !clear && !rb.setup.through && maxz != 0 && (minz != 0 || maxz != 0xFFFFu);
-        const bool linear = ((R(kTexFilter) & 0x100u) != 0) ||
-                            (live_->smooth_textures.load(std::memory_order_relaxed) && !rb.setup.through) ||
-                            rb.setup.linear_override;
-        const int aniso = std::clamp(live_->texture_pack_anisotropy.load(std::memory_order_relaxed), 1, 16);
-
-        vk::DrawParams dp{};
-        std::copy_n(rb.setup.uv_xform, 4, dp.uv_xform);
-        unpack_rgb(R(kTexEnvColor), dp.env_and_flags);
-        unpack_rgb(R(kFogColor), dp.fog_and_zmin);
-        dp.fog_and_zmin[3] = static_cast<float>(minz);
-        dp.target_size[0] = static_cast<float>(blend_older_.width);
-        dp.target_size[1] = static_cast<float>(blend_older_.height);
-        dp.zmax_pad[0] = static_cast<float>(maxz);
-        dp.tex_idx = textured ? rb.setup.tex_slot : 0u;
-        const bool clamp_s = rb.setup.is_killcam || ((R(kTexWrap) & 1u) != 0);
-        const bool clamp_t = rb.setup.is_killcam || ((R(kTexWrap) & 0x100u) != 0);
-        dp.sampler_idx = vk::BindlessDescriptors::sampler_index(linear, rb.setup.texture_mips, clamp_s, clamp_t, aniso);
-        const std::uint32_t func = R(kTexFunc);
-        dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
-                           (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
-        apply_draw_fx_bits(dp, is_soft_particle, rb.setup.is_killcam, R(kBlendMode));
-        dp.alpha_bits = alpha_test ? (R(kAlphaTest) & 0xFFFFFFu) : 1u;
-        std::memcpy(pslice.ptr, &dp, sizeof(dp));
-
-        vk::GePipelineKey pkey{};
-        pkey.spec_clear = clear ? 1u : 0u;
-        pkey.spec_textured = textured ? 1u : 0u;
-        pkey.spec_alpha_test = alpha_test ? 1u : 0u;
-
-        VkBool32 blend_en = VK_FALSE;
-        VkColorBlendEquationEXT blend_eq{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
-                                         VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD};
-        float blend_const[4]{1.0f, 1.0f, 1.0f, 1.0f};
-        VkColorComponentFlags write_mask = 0xFu;
-        if (clear) {
-            const std::uint32_t cm = R(kClearMode);
-            write_mask = ((cm & 0x100u) ? 7u : 0u) | ((cm & 0x200u) ? 8u : 0u);
-        } else {
-            if ((R(kAlphaBlendEnable) & 1u) != 0) {
-                blend_en = VK_TRUE;
-                const std::uint32_t mode = R(kBlendMode);
-                bool ca = false, cb = false;
-                const std::uint32_t fa = R(kBlendFixedA), fb = R(kBlendFixedB);
-                VkBlendFactor src = psp_blend_factor(mode & 0xFu, true, fa, ca);
-                VkBlendFactor dst = psp_blend_factor((mode >> 4u) & 0xFu, false, fb, cb);
-                std::uint32_t cval = ca ? fa : fb;
-                if (ca && cb && (fa & 0xFFFFFFu) != (fb & 0xFFFFFFu)) { dst = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR; cval = fa; }
-                if (ca || cb) unpack_rgb(cval, blend_const);
-                static constexpr VkBlendOp kOps[6] = {VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT,
-                                                      VK_BLEND_OP_MIN, VK_BLEND_OP_MAX, VK_BLEND_OP_MAX};
-                blend_eq.srcColorBlendFactor = src;
-                blend_eq.dstColorBlendFactor = dst;
-                blend_eq.colorBlendOp = kOps[std::min<std::uint32_t>((mode >> 8u) & 0xFu, 5u)];
-            }
-            const std::uint32_t mask = R(kMaskRgb);
-            const bool keep_a = (R(kStencilTestEnable) & 1u) != 0 || (R(kMaskAlpha) & 0xFFu) == 0xFFu;
-            write_mask = ((mask & 0xFFu) != 0xFFu ? 1u : 0u) | (((mask >> 8u) & 0xFFu) != 0xFFu ? 2u : 0u) |
-                         (((mask >> 16u) & 0xFFu) != 0xFFu ? 4u : 0u) | (!keep_a ? 8u : 0u);
-        }
-        pkey.blend_enable = blend_en ? 1u : 0u;
-        pkey.color_op = static_cast<std::uint8_t>(blend_eq.colorBlendOp);
-        pkey.src_factor = static_cast<std::uint8_t>(blend_eq.srcColorBlendFactor);
-        pkey.dst_factor = static_cast<std::uint8_t>(blend_eq.dstColorBlendFactor);
-        pkey.color_mask = static_cast<std::uint8_t>(write_mask);
-        VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
-        if (!pipe) continue;
-
-        if (pipe != last_pipe) {
-            vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-            last_pipe = pipe;
-        }
-
-        const std::uint32_t sx1 = R(kScissor1) & 0x3FFu, sy1 = (R(kScissor1) >> 10u) & 0x3FFu;
-        const std::uint32_t sx2 = std::min(R(kScissor2) & 0x3FFu, blend_older_.width - 1u);
-        const std::uint32_t sy2 = std::min((R(kScissor2) >> 10u) & 0x3FFu, blend_older_.height - 1u);
-        VkRect2D sc{{0, 0}, {0, 0}};
-        if (sx1 <= sx2 && sy1 <= sy2) {
-            sc.offset = {static_cast<std::int32_t>(sx1) * scale_, static_cast<std::int32_t>(sy1) * scale_};
-            sc.extent = {(sx2 - sx1 + 1u) * static_cast<std::uint32_t>(scale_),
-                         (sy2 - sy1 + 1u) * static_cast<std::uint32_t>(scale_)};
-        }
-        vkCmdSetScissor(f.cmd, 0, 1, &sc);
-
-        if (clear) {
-            vkCmdSetDepthTestEnable(f.cmd, VK_TRUE);
-            vkCmdSetDepthCompareOp(f.cmd, VK_COMPARE_OP_ALWAYS);
-            vkCmdSetDepthWriteEnable(f.cmd, (R(kClearMode) & 0x400u) ? VK_TRUE : VK_FALSE);
-        } else if ((R(kZTestEnable) & 1u) != 0) {
-            static constexpr VkCompareOp kOps[8] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL,
-                                                    VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL,
-                                                    VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL};
-            vkCmdSetDepthTestEnable(f.cmd, VK_TRUE);
-            vkCmdSetDepthCompareOp(f.cmd, kOps[R(kZTest) & 7u]);
-            vkCmdSetDepthWriteEnable(f.cmd, (R(kZWriteDisable) & 1u) == 0 ? VK_TRUE : VK_FALSE);
-        } else {
-            vkCmdSetDepthTestEnable(f.cmd, VK_FALSE);
-            vkCmdSetDepthWriteEnable(f.cmd, VK_FALSE);
-            vkCmdSetDepthCompareOp(f.cmd, VK_COMPARE_OP_ALWAYS);
-        }
-        vkCmdSetBlendConstants(f.cmd, blend_const);
-        if (ctx_.caps.extended_dynamic_state3) {
-            vkCmdSetColorBlendEnableEXT(f.cmd, 0, 1, &blend_en);
-            vkCmdSetColorBlendEquationEXT(f.cmd, 0, 1, &blend_eq);
-            vkCmdSetColorWriteMaskEXT(f.cmd, 0, 1, &write_mask);
+        VkDeviceAddress params_addr = 0;
+        if (!bind_ge_draw_state(f.cmd, rb.setup, blend_older_.width, blend_older_.height, is_soft_particle, params_addr,
+                                &last_pipe)) {
+            continue;
         }
 
         std::uint32_t draw_vcount = rb.v_count;
@@ -2933,7 +2830,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
             const VkDeviceSize off = flat_base_off + static_cast<VkDeviceSize>(rb.v_offset) * sizeof(GpuVertex);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &off);
         }
-        vk::DrawPush push{pslice.address, 0u};
+        vk::DrawPush push{params_addr, 0u};
         vkCmdPushConstants(f.cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
         vkCmdDraw(f.cmd, draw_vcount, 1, 0, 0);

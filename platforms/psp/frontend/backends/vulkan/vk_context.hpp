@@ -6,6 +6,8 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -64,6 +66,15 @@ struct Context {
     void wait_timeline(VkSemaphore sem, std::uint64_t value) const;
     [[nodiscard]] std::uint64_t query_timeline(VkSemaphore sem) const;
     void save_pipeline_cache() const;
+
+    template <std::size_t N>
+    [[nodiscard]] VkShaderModule create_shader_module(const std::array<std::uint32_t, N> &words) const noexcept {
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0,
+                                    words.size() * sizeof(std::uint32_t), words.data()};
+        VkShaderModule mod = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
+        return mod;
+    }
 
     // Synchronization2 helper for clean, explicit image layout transitions.
     static void cmd_transition_image(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,

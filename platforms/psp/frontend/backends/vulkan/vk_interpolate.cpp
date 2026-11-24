@@ -9,11 +9,8 @@ bool GpuInterpolator::init(const Context &ctx) {
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 0, nullptr, 1, &pcr};
     if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &layout_) != VK_SUCCESS) return false;
 
-    VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0,
-                                  shaders::kPlaceV2CompSpv.size() * sizeof(std::uint32_t),
-                                  shaders::kPlaceV2CompSpv.data()};
-    VkShaderModule mod = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(ctx.device, &smci, nullptr, &mod) != VK_SUCCESS) return false;
+    VkShaderModule mod = ctx.create_shader_module(shaders::kPlaceV2CompSpv);
+    if (!mod) return false;
 
     VkComputePipelineCreateInfo cpci{};
     cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;

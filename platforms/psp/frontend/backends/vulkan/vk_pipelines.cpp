@@ -10,15 +10,6 @@ namespace mhf::psp::vk {
 
 namespace {
 
-template <std::size_t N>
-VkShaderModule create_module(const Context &ctx, const std::array<std::uint32_t, N> &words) {
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0,
-                                words.size() * sizeof(std::uint32_t), words.data()};
-    VkShaderModule mod = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(ctx.device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
-    return mod;
-}
-
 VkPipeline create_fullscreen_pipe(const Context &ctx, VkPipelineLayout layout, VkShaderModule vs, VkShaderModule fs,
                                   VkFormat color_fmt, bool premul_blend) {
     std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
@@ -100,10 +91,10 @@ bool Pipelines::init(const Context &ctx, VkDescriptorSetLayout bindless_layout, 
     ge_layout = make_layout(sizeof(DrawPush), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
     if (!present_layout || !blur_layout || !ge_layout) return false;
 
-    ge_vert = create_module(ctx, shaders::kGeDrawVertSpv);
-    ge_frag = create_module(ctx, shaders::kGeDrawFragSpv);
-    VkShaderModule blur_vs = create_module(ctx, shaders::kBlurVertSpv);
-    VkShaderModule blur_fs = create_module(ctx, shaders::kBlurFragSpv);
+    ge_vert = ctx.create_shader_module(shaders::kGeDrawVertSpv);
+    ge_frag = ctx.create_shader_module(shaders::kGeDrawFragSpv);
+    VkShaderModule blur_vs = ctx.create_shader_module(shaders::kBlurVertSpv);
+    VkShaderModule blur_fs = ctx.create_shader_module(shaders::kBlurFragSpv);
     if (!ge_vert || !ge_frag || !blur_vs || !blur_fs) {
         if (blur_vs) vkDestroyShaderModule(ctx.device, blur_vs, nullptr);
         if (blur_fs) vkDestroyShaderModule(ctx.device, blur_fs, nullptr);
@@ -121,9 +112,9 @@ bool Pipelines::rebuild_swapchain_pipelines(const Context &ctx, VkFormat swap_fm
     if (present_pipe) { vkDestroyPipeline(ctx.device, present_pipe, nullptr); present_pipe = VK_NULL_HANDLE; }
     if (overlay_pipe) { vkDestroyPipeline(ctx.device, overlay_pipe, nullptr); overlay_pipe = VK_NULL_HANDLE; }
 
-    VkShaderModule p_vs = create_module(ctx, shaders::kPresentVertSpv);
-    VkShaderModule p_fs = create_module(ctx, shaders::kPresentFragSpv);
-    VkShaderModule o_fs = create_module(ctx, shaders::kOverlayFragSpv);
+    VkShaderModule p_vs = ctx.create_shader_module(shaders::kPresentVertSpv);
+    VkShaderModule p_fs = ctx.create_shader_module(shaders::kPresentFragSpv);
+    VkShaderModule o_fs = ctx.create_shader_module(shaders::kOverlayFragSpv);
     if (!p_vs || !p_fs || !o_fs) {
         if (p_vs) vkDestroyShaderModule(ctx.device, p_vs, nullptr);
         if (p_fs) vkDestroyShaderModule(ctx.device, p_fs, nullptr);

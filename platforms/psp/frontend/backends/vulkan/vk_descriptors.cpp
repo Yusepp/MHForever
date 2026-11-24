@@ -150,7 +150,7 @@ bool BindlessDescriptors::init(const Context &ctx) {
                 VkCommandBufferSubmitInfo cbsi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, tmp_cmd, 0};
                 VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cbsi, 0, nullptr};
                 {
-                    std::lock_guard lock(const_cast<Context &>(ctx).graphics_queue_mutex);
+                    std::lock_guard lock(ctx.graphics_queue_mutex);
                     vkQueueSubmit2(ctx.graphics_queue, 1, &si, fence);
                 }
                 vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);

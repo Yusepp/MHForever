@@ -182,7 +182,7 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
     VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cbsi, 0, nullptr};
     vkResetFences(ctx.device, 1, &upload_fence_);
     {
-        std::lock_guard lock(const_cast<Context &>(ctx).graphics_queue_mutex);
+        std::lock_guard lock(ctx.graphics_queue_mutex);
         vkQueueSubmit2(ctx.graphics_queue, 1, &si, upload_fence_);
     }
     vkWaitForFences(ctx.device, 1, &upload_fence_, VK_TRUE, UINT64_MAX);

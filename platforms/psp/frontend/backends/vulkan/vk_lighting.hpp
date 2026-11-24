@@ -95,7 +95,7 @@ public:
 
     // Runs enabled lighting/atmosphere compute passes on `scene_color` using `kParamSlotsPerDispatch`
     // contiguous `LightingComputeParams` slots starting at `params_cpu_ptr` / `params_bda`.
-    void dispatch(VkCommandBuffer cmd, const Context &ctx, const BindlessDescriptors &desc,
+    void dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                   VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                   const LightingFrameInput &in,

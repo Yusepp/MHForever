@@ -89,15 +89,6 @@ enum PassSlot : std::size_t {
     kPassFxaa = 9,
 };
 
-template <std::size_t N>
-VkShaderModule make_mod(const Context &ctx, const std::array<std::uint32_t, N> &words) {
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0,
-                                words.size() * sizeof(std::uint32_t), words.data()};
-    VkShaderModule m = VK_NULL_HANDLE;
-    vkCreateShaderModule(ctx.device, &ci, nullptr, &m);
-    return m;
-}
-
 BiomeKind classify_zone_name(const std::string &name, bool &is_cave) {
     // Pokke Farm is open-air alpine outdoors (unlike Hall/House/Kitchen).
     if (name.find("pokke/farm") != std::string::npos || name.find("pokke/village") != std::string::npos) {
@@ -205,7 +196,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &pipe_layout_) != VK_SUCCESS) return false;
 
     auto make_pipe = [&](auto &spv) -> VkPipeline {
-        VkShaderModule mod = make_mod(ctx, spv);
+        VkShaderModule mod = ctx.create_shader_module(spv);
         if (!mod) return VK_NULL_HANDLE;
         VkComputePipelineCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -563,12 +554,12 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.ext_slots[2] = static_cast<std::uint32_t>(active_biome_);
 }
 
-void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, const BindlessDescriptors &desc,
+void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return;
-    if (!ensure_targets(ctx, const_cast<BindlessDescriptors &>(desc), scene_w, scene_h)) return;
+    if (!ensure_targets(ctx, desc, scene_w, scene_h)) return;
 
     // Cycle through a ring of storage descriptor sets so we NEVER mutate a descriptor set
     // referenced by an earlier dispatch in the same command buffer or an in-flight frame!
