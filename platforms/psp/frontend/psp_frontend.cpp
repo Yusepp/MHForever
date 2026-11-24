@@ -537,6 +537,11 @@ void Frontend::set_aa_mode(int mode) {
     impl_->vulkan_lighting_known = true;
 }
 
+void Frontend::set_semantic_frame(const SemanticSceneFrame &frame) {
+    std::lock_guard<std::mutex> lock(impl_->live.semantic_mutex);
+    impl_->live.semantic_frame = frame;
+}
+
 void Frontend::set_song_spot(overlay::SongSpot spot) { impl_->song_spot = spot; }
 
 void Frontend::offer_songs(bool on, overlay::SongSpot spot) {

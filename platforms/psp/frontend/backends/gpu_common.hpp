@@ -3,6 +3,7 @@
 // Backend-agnostic types and GE register/pixel helpers shared between the OpenGL and Vulkan hardware renderers.
 
 #include "backend.hpp"
+#include "../semantic_scene.hpp"
 
 #include "psprecomp/guest_memory.hpp"
 
@@ -114,6 +115,9 @@ struct LiveSettings {
     };
     std::atomic<int> aa_mode{kAaFxaa};
     std::atomic<bool> msaa_4x_supported{false};
+    // Optional game-supplied world-space dynamic lights (updated from the host poll, read by Vulkan).
+    mutable std::mutex semantic_mutex;
+    SemanticSceneFrame semantic_frame{};
 };
 
 namespace gpu_common {

@@ -621,7 +621,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda,
-                                bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot) {
+                                bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot,
+                                VkDeviceAddress lights_bda, std::uint32_t light_count) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
@@ -670,6 +671,9 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     base.phase1_slots[1] = exposure_tex_.slot;
     base.phase1_slots[2] = (use_hdr_src ? 1u : 0u) | ((exposure_reset_ || !exposure_initialized_) ? 2u : 0u);
     base.phase1_slots[3] = 0u;
+    base.lights_bda = lights_bda;
+    base.light_count = std::min<std::uint32_t>(light_count, static_cast<std::uint32_t>(LightingFrameInput::kMaxViewLights));
+    base.lights_pad = 0u;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;

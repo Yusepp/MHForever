@@ -174,6 +174,7 @@ struct DrawSetup {
     bool self_sampled = false;
     bool is_killcam = false;
     bool is_skinned = false;
+    bool is_additive_vfx = false;
 };
 
 struct FrameSlice {
@@ -265,7 +266,11 @@ private:
     void apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in,
                        const float *taa_prev_from_curr = nullptr, bool taa_valid_reproj = false,
                        bool taa_reset = false, const float *curr_jitter_uv = nullptr,
-                       bool use_hdr_gbuf = false);
+                       bool use_hdr_gbuf = false,
+                       const vk::ViewPointLight *view_lights = nullptr, std::uint32_t view_light_count = 0);
+    std::uint32_t build_view_lights(const interpolation::Matrix &view_mat,
+                                    const std::vector<SemanticPointLight> &vfx_lights,
+                                    std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> &out_lights) const;
     void snapshot_soft_depth(RenderTarget &rt);
     [[nodiscard]] bool want_vk_effect(std::uint32_t bit) const noexcept {
         return live_->enhanced_lighting.load(std::memory_order_relaxed) &&
@@ -502,6 +507,15 @@ private:
     bool lit_3d_this_frame_ = false;
     vk::LightingFrameInput cur_light_in_{};
     vk::LightingFrameInput last_light_in_{};
+    interpolation::Matrix cur_view_mat_{interpolation::identity()};
+    interpolation::Matrix last_view_mat_{interpolation::identity()};
+    bool has_cur_view_mat_ = false;
+    bool has_last_view_mat_ = false;
+    std::vector<SemanticPointLight> cur_vfx_lights_;
+    std::vector<SemanticPointLight> last_vfx_lights_;
+    float batch_world_sum_[3]{0.0f, 0.0f, 0.0f};
+    float batch_col_sum_[3]{0.0f, 0.0f, 0.0f};
+    std::uint32_t batch_world_cnt_ = 0;
     VkImageResource vram_rb_img_;
     VkBuffer vram_rb_buf_ = VK_NULL_HANDLE;
     VmaAllocation vram_rb_alloc_ = VK_NULL_HANDLE;
@@ -1119,6 +1133,15 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 
     const bool clear = (ge.reg(kClearMode) & 1u) != 0;
     const bool textured = !clear && (ge.reg(kTextureMapEnable) & 1u) != 0;
+    {
+        const bool ab = (ge.reg(kAlphaBlendEnable) & 1u) != 0;
+        const bool zw_off = (ge.reg(kZWriteDisable) & 1u) != 0;
+        const std::uint32_t bm = ge.reg(kBlendMode);
+        const std::uint32_t bop = (bm >> 8u) & 0xFu;
+        const std::uint32_t bdst = (bm >> 4u) & 0xFu;
+        const bool dst_one = (bdst == 10u && (ge.reg(kBlendFixedB) & 0xFFFFFFu) == 0xFFFFFFu);
+        setup_.is_additive_vfx = !clear && !setup_.through && ab && zw_off && bop == 0u && dst_one;
+    }
     if (!setup_.through) {
         if ((ge.reg(0x18u) & 1u) != 0) {
             auto f24 = [](std::uint32_t r) {
@@ -1573,7 +1596,12 @@ void VkBackend::draw_batch() {
             if (!lit_3d_this_frame_ && !main_rt_skipped) {
                 const bool had_hdr = main_hdr_started_;
                 end_render_pass();
-                apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_, had_hdr);
+                std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> vlights{};
+                const std::uint32_t vl_count = has_cur_view_mat_
+                                                   ? build_view_lights(cur_view_mat_, cur_vfx_lights_, vlights)
+                                                   : 0u;
+                apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_, had_hdr,
+                              vlights.data(), vl_count);
                 lit_3d_this_frame_ = true;
             }
             main_3d_finished_ = true;
@@ -1699,6 +1727,56 @@ void VkBackend::draw_batch() {
         cur_snap_.batches.push_back(rb);
     }
 
+    if (setup_.is_additive_vfx && batch_world_cnt_ > 0u && is_shown_target(setup_.target) &&
+        cur_vfx_lights_.size() < 32u) {
+        const float inv_n = 1.0f / static_cast<float>(batch_world_cnt_);
+        const float cx = batch_world_sum_[0] * inv_n;
+        const float cy = batch_world_sum_[1] * inv_n;
+        const float cz = batch_world_sum_[2] * inv_n;
+        const float cr = std::clamp(batch_col_sum_[0] * inv_n / 255.0f, 0.0f, 1.0f);
+        const float cg = std::clamp(batch_col_sum_[1] * inv_n / 255.0f, 0.0f, 1.0f);
+        const float cb = std::clamp(batch_col_sum_[2] * inv_n / 255.0f, 0.0f, 1.0f);
+        const float cmax = std::max({cr, cg, cb});
+        const float cmin = std::min({cr, cg, cb});
+        const float sat = cmax > 1e-4f ? (cmax - cmin) / cmax : 0.0f;
+        if (cmax > 0.30f && (sat > 0.14f || cmax > 0.65f)) {
+            const float intensity = std::clamp(0.45f + cmax * 0.55f + sat * 0.45f, 0.45f, 1.45f);
+            const float radius = 135.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 0.6f, 110.0f);
+            bool merged = false;
+            for (auto &ex : cur_vfx_lights_) {
+                const float dx = ex.world_pos[0] - cx;
+                const float dy = ex.world_pos[1] - cy;
+                const float dz = ex.world_pos[2] - cz;
+                if (dx * dx + dy * dy + dz * dz < 45.0f * 45.0f) {
+                    ex.world_pos[0] = 0.5f * (ex.world_pos[0] + cx);
+                    ex.world_pos[1] = 0.5f * (ex.world_pos[1] + cy);
+                    ex.world_pos[2] = 0.5f * (ex.world_pos[2] + cz);
+                    ex.color[0] = std::max(ex.color[0], cr);
+                    ex.color[1] = std::max(ex.color[1], cg);
+                    ex.color[2] = std::max(ex.color[2], cb);
+                    ex.intensity = std::min(1.85f, std::max(ex.intensity, intensity) + 0.12f);
+                    ex.radius = std::max(ex.radius, radius);
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                SemanticPointLight pl{};
+                pl.world_pos[0] = cx;
+                pl.world_pos[1] = cy;
+                pl.world_pos[2] = cz;
+                pl.radius = radius;
+                pl.color[0] = cr;
+                pl.color[1] = cg;
+                pl.color[2] = cb;
+                pl.intensity = intensity;
+                cur_vfx_lights_.push_back(pl);
+            }
+        }
+    }
+    batch_world_sum_[0] = batch_world_sum_[1] = batch_world_sum_[2] = 0.0f;
+    batch_col_sum_[0] = batch_col_sum_[1] = batch_col_sum_[2] = 0.0f;
+    batch_world_cnt_ = 0u;
     batch_.clear();
 }
 
@@ -1714,6 +1792,8 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
         std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
         cur_light_in_.vz_scale = draw.viewport[2];
         cur_light_in_.vz_center = draw.viewport[5];
+        cur_view_mat_ = sum.view;
+        has_cur_view_mat_ = true;
         // Capture orthonormalized 3x3 world -> view rotation from the first terrain/camera draw so sun direction,
         // contact shadows, and sky/ground hemisphere bounce stay 100% world-locked as the camera rotates.
         const auto eye = interpolation::multiply(sum.view, sum.world);
@@ -1818,6 +1898,15 @@ void VkBackend::triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Ver
             const float vny = vm[1] * v.normal[0] + vm[4] * v.normal[1] + vm[7] * v.normal[2];
             const float vnz = vm[2] * v.normal[0] + vm[5] * v.normal[1] + vm[8] * v.normal[2];
             g.normal_oct = pack_oct_normal(vnx, vny, vnz);
+        }
+        if (setup_.is_additive_vfx && v.has_world) {
+            batch_world_sum_[0] += v.world[0];
+            batch_world_sum_[1] += v.world[1];
+            batch_world_sum_[2] += v.world[2];
+            batch_col_sum_[0] += std::clamp(v.r, 0.0f, 255.0f);
+            batch_col_sum_[1] += std::clamp(v.g, 0.0f, 255.0f);
+            batch_col_sum_[2] += std::clamp(v.b, 0.0f, 255.0f);
+            ++batch_world_cnt_;
         }
         batch_.push_back(g);
     };
@@ -2833,9 +2922,44 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 }
 
+std::uint32_t VkBackend::build_view_lights(
+    const interpolation::Matrix &view_mat, const std::vector<SemanticPointLight> &vfx_lights,
+    std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> &out_lights) const {
+    std::uint32_t count = 0u;
+    auto push_world_light = [&](const SemanticPointLight &src) {
+        if (count >= vk::LightingFrameInput::kMaxViewLights || src.intensity <= 0.01f || src.radius <= 1.0f) return;
+        const float wx = src.world_pos[0], wy = src.world_pos[1], wz = src.world_pos[2];
+        const float vx = view_mat[0] * wx + view_mat[4] * wy + view_mat[8] * wz + view_mat[12];
+        const float vy = view_mat[1] * wx + view_mat[5] * wy + view_mat[9] * wz + view_mat[13];
+        const float vz = view_mat[2] * wx + view_mat[6] * wy + view_mat[10] * wz + view_mat[14];
+        // Cull lights well behind the camera or far beyond visible range.
+        if (vz > src.radius || vz < -2500.0f) return;
+        vk::ViewPointLight &dst = out_lights[count++];
+        // Negate Y to match lighting_composite.comp's +Y-down screen-aligned view space.
+        dst.pos_radius[0] = vx;
+        dst.pos_radius[1] = -vy;
+        dst.pos_radius[2] = vz;
+        dst.pos_radius[3] = src.radius;
+        dst.color_intensity[0] = std::pow(std::clamp(src.color[0], 0.0f, 1.0f), 2.2f);
+        dst.color_intensity[1] = std::pow(std::clamp(src.color[1], 0.0f, 1.0f), 2.2f);
+        dst.color_intensity[2] = std::pow(std::clamp(src.color[2], 0.0f, 1.0f), 2.2f);
+        dst.color_intensity[3] = src.intensity;
+    };
+    for (const auto &l : vfx_lights) push_world_light(l);
+    SemanticSceneFrame sem{};
+    {
+        std::lock_guard<std::mutex> lock(live_->semantic_mutex);
+        sem = live_->semantic_frame;
+    }
+    const std::uint32_t sn = std::min<std::uint32_t>(sem.light_count, static_cast<std::uint32_t>(SemanticSceneFrame::kMaxLights));
+    for (std::uint32_t i = 0u; i < sn; ++i) push_world_light(sem.lights[i]);
+    return count;
+}
+
 void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in,
                               const float *taa_prev_from_curr, bool taa_valid_reproj,
-                              bool taa_reset, const float *curr_jitter_uv, bool use_hdr_gbuf) {
+                              bool taa_reset, const float *curr_jitter_uv, bool use_hdr_gbuf,
+                              const vk::ViewPointLight *view_lights, std::uint32_t view_light_count) {
     if (!lighting_.ready()) return;
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE ||
         rt.color.bindless_slot == 0 || rt.depth.bindless_slot == 0) return;
@@ -2886,11 +3010,24 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
         transition_resource(rt.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
+        VkDeviceAddress lights_bda = 0;
+        std::uint32_t light_cnt = 0;
+        if (view_lights && view_light_count > 0u) {
+            const std::uint32_t clamped = std::min<std::uint32_t>(
+                view_light_count, static_cast<std::uint32_t>(vk::LightingFrameInput::kMaxViewLights));
+            auto lslice = f.params.allocate(clamped * sizeof(vk::ViewPointLight), 16);
+            if (lslice.ptr) {
+                std::memcpy(lslice.ptr, view_lights, clamped * sizeof(vk::ViewPointLight));
+                lights_bda = lslice.address;
+                light_cnt = clamped;
+            }
+        }
+
         vk::LightingFrameInput fin = in;
         fin.frame_index = frame_number_;
         if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
                                rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address, want_fxaa,
-                               hdr_slot, gbuf_slot)) {
+                               hdr_slot, gbuf_slot, lights_bda, light_cnt)) {
             rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
         }
     } else if (want_fxaa) {
@@ -3315,6 +3452,14 @@ void VkBackend::render_interpolated_subframe(float phase) {
     bool interp_lit = false;
     bool interp_depth_snapped = false;
 
+    std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> interp_vlights{};
+    std::uint32_t interp_vl_count = 0u;
+    if (has_last_view_mat_) {
+        const interpolation::Matrix interp_view =
+            has_cam_rt ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
+        interp_vl_count = build_view_lights(interp_view, last_vfx_lights_, interp_vlights);
+    }
+
     for (const auto &rb : blend_older_.batches) {
         if (rb.v_count == 0 || rb.setup.target != blend_older_.shown_addr) continue;
         const auto R = [&](std::uint32_t reg) { return key_reg(rb.setup.key, reg); };
@@ -3351,7 +3496,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 if (need_boundary) {
                     vkCmdEndRendering(f.cmd);
                     apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false,
-                                  taa_jitter_uv, pass_hdr_gbuf);
+                                  taa_jitter_uv, pass_hdr_gbuf, interp_vlights.data(), interp_vl_count);
                     interp_lit = true;
                     if (phase <= 0.0f) {
                         capture_clean_3d_snapshot(interp_rt_);
@@ -3425,7 +3570,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     vkCmdEndRendering(f.cmd);
     if (interp_saw_3d && !interp_lit) {
-        apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv, pass_hdr_gbuf);
+        apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv,
+                      pass_hdr_gbuf, interp_vlights.data(), interp_vl_count);
     }
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -3462,7 +3608,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         if (frame_had_3d_ && !lit_3d_this_frame_ && !main_rt_skipped) {
             const bool had_hdr = main_hdr_started_;
             end_render_pass();
-            apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_, had_hdr);
+            std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> vlights{};
+            const std::uint32_t vl_count = has_cur_view_mat_
+                                               ? build_view_lights(cur_view_mat_, cur_vfx_lights_, vlights)
+                                               : 0u;
+            apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_, had_hdr,
+                          vlights.data(), vl_count);
             lit_3d_this_frame_ = true;
         }
         if (frame_had_3d_ && !captured_clean_3d_) {
@@ -3614,7 +3765,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             if (have_gpu_frame && frame_had_3d_ && !lit_3d_this_frame_ && it != targets_.end()) {
                 const bool had_hdr = main_hdr_started_;
                 end_render_pass();
-                apply_post_3d(it->second, cur_light_in_, nullptr, false, true, main_taa_jitter_uv_, had_hdr);
+                std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> vlights{};
+                const std::uint32_t vl_count = has_cur_view_mat_
+                                                   ? build_view_lights(cur_view_mat_, cur_vfx_lights_, vlights)
+                                                   : 0u;
+                apply_post_3d(it->second, cur_light_in_, nullptr, false, true, main_taa_jitter_uv_, had_hdr,
+                              vlights.data(), vl_count);
                 transition_resource(it->second.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
                 lit_3d_this_frame_ = true;
@@ -3629,7 +3785,16 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     }
 
     last_menu_draw_ = now;
-    if (frame_had_3d_) last_light_in_ = cur_light_in_;
+    if (frame_had_3d_) {
+        last_light_in_ = cur_light_in_;
+        if (has_cur_view_mat_) {
+            last_view_mat_ = cur_view_mat_;
+            has_last_view_mat_ = true;
+        }
+        last_vfx_lights_ = cur_vfx_lights_;
+    }
+    cur_vfx_lights_.clear();
+    has_cur_view_mat_ = false;
     lighting_.end_frame_zone_vote();
     frame_had_3d_ = false;
     captured_clean_3d_ = false;

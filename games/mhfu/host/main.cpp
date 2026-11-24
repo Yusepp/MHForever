@@ -617,14 +617,84 @@ mhf::mhfu::MonsterTracker g_monster_tracker{
      region::mh_quest_manager}};
 mhf::mhfu::DamageNumbers g_damage_numbers;
 
+struct SemanticHitFlash {
+    std::array<float, 3> world_pos{};
+    std::array<float, 3> color{1.0f, 0.85f, 0.55f};
+    float radius{120.0f};
+    float peak_intensity{1.4f};
+    std::uint64_t birth_us{0};
+};
+std::mutex g_hit_flash_mutex;
+std::vector<SemanticHitFlash> g_hit_flashes;
+
+std::array<float, 3> equipped_weapon_element_rgb(const psprecomp::GuestMemory &memory) noexcept {
+    if constexpr (region::mh_game_sys.has_value() && region::mh_blademaster_weapons.has_value()) {
+        const std::uint32_t gs = memory.load32(*region::mh_game_sys);
+        if (gs != 0u && memory.contains(gs + 0x4C0u, 4u)) {
+            const std::uint8_t wtype = memory.load8(gs + 0x4C1u);
+            const std::uint16_t wid = memory.load16(gs + 0x4C2u);
+            if (wtype == 5u && wid < 1150u) {
+                const std::uint32_t entry = *region::mh_blademaster_weapons + static_cast<std::uint32_t>(wid) * 24u;
+                if (memory.contains(entry, 24u)) {
+                    const std::uint8_t elem_id = memory.load8(entry + 0x0Bu);
+                    const std::uint8_t elem_val = memory.load8(entry + 0x0Cu);
+                    if (elem_val > 0u) {
+                        switch (elem_id) {
+                        case 1u: return {1.00f, 0.45f, 0.12f}; // Fire
+                        case 2u: return {0.22f, 0.72f, 1.00f}; // Water
+                        case 3u: return {0.58f, 0.85f, 1.00f}; // Thunder
+                        case 4u: return {0.92f, 0.16f, 0.38f}; // Dragon
+                        case 5u: return {0.62f, 0.90f, 1.00f}; // Ice
+                        case 6u: return {0.72f, 0.24f, 0.96f}; // Poison
+                        case 7u: return {1.00f, 0.88f, 0.20f}; // Paralysis
+                        case 8u: return {0.45f, 0.82f, 0.92f}; // Sleep
+                        default: break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return {1.00f, 0.84f, 0.56f}; // Physical spark
+}
+
 void on_combine_rate_done(Runtime &rt, Context &ctx) {
     ctx.gpr[kRegV0] = mhf::mhfu::apply_combo_books_rate(rt.memory(), {region::mh_game_sys}, ctx.gpr[kRegV0],
                                                         g_combo_books_from_box.load(std::memory_order_relaxed));
 }
 
 void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
-    g_damage_numbers.on_enemy_damage_hook(rt.memory(), ctx.gpr[kRegS5], ctx.gpr[kRegSp], rt.now_us(),
+    const std::uint64_t now = rt.now_us();
+    g_damage_numbers.on_enemy_damage_hook(rt.memory(), ctx.gpr[kRegS5], ctx.gpr[kRegSp], now,
                                           g_damage_numbers_enabled.load(std::memory_order_relaxed));
+    // Always record a brief semantic hit-flash light for the Vulkan dynamic lighting pass.
+    const std::uint32_t enemy_ptr = ctx.gpr[kRegS5];
+    const std::uint32_t sp = ctx.gpr[kRegSp];
+    const auto &mem = rt.memory();
+    if (enemy_ptr >= 0x08000000u && mem.contains(enemy_ptr + 0x200u, 12u) && mem.contains(sp + 62u, 2u)) {
+        const std::int16_t dmg = static_cast<std::int16_t>(mem.load16(sp + 62u));
+        if (dmg > 0 && dmg < 10000) {
+            float wx = 0.0f, wy = 0.0f, wz = 0.0f;
+            const std::uint32_t rx = mem.load32(enemy_ptr + 0x200u);
+            const std::uint32_t ry = mem.load32(enemy_ptr + 0x204u);
+            const std::uint32_t rz = mem.load32(enemy_ptr + 0x208u);
+            std::memcpy(&wx, &rx, 4);
+            std::memcpy(&wy, &ry, 4);
+            std::memcpy(&wz, &rz, 4);
+            if (std::isfinite(wx) && std::isfinite(wy) && std::isfinite(wz)) {
+                SemanticHitFlash hf{};
+                hf.world_pos = {wx, wy + 75.0f, wz};
+                hf.color = equipped_weapon_element_rgb(mem);
+                const float strength = std::clamp(static_cast<float>(dmg) / 65.0f, 0.35f, 1.5f);
+                hf.radius = 110.0f + strength * 60.0f;
+                hf.peak_intensity = 0.75f + strength * 0.85f;
+                hf.birth_us = now;
+                std::lock_guard<std::mutex> lock(g_hit_flash_mutex);
+                if (g_hit_flashes.size() >= 12u) g_hit_flashes.erase(g_hit_flashes.begin());
+                g_hit_flashes.push_back(hf);
+            }
+        }
+    }
 }
 
 void on_item_box_update(Runtime &rt, Context &ctx) {
@@ -1690,6 +1760,79 @@ int main(int argc, char **argv) {
                     return chosen;
                 };
                 const std::uint64_t now = rt->now_us();
+                // Publish semantic world-space dynamic lights (elemental hit flashes + boss auras) to Vulkan.
+                {
+                    mhf::psp::SemanticSceneFrame sem{};
+                    const float t_sec = static_cast<float>(now % 60'000'000u) * 1e-6f;
+                    {
+                        std::lock_guard<std::mutex> lock(g_hit_flash_mutex);
+                        constexpr std::uint64_t kFlashLifeUs = 240'000u;
+                        std::size_t dst = 0;
+                        for (std::size_t i = 0; i < g_hit_flashes.size(); ++i) {
+                            const auto &hf = g_hit_flashes[i];
+                            if (now < hf.birth_us || now - hf.birth_us >= kFlashLifeUs) continue;
+                            g_hit_flashes[dst++] = hf;
+                            if (sem.light_count < mhf::psp::SemanticSceneFrame::kMaxLights) {
+                                const float age = static_cast<float>(now - hf.birth_us) / static_cast<float>(kFlashLifeUs);
+                                const float fade = (1.0f - age) * (1.0f - age);
+                                auto &pl = sem.lights[sem.light_count++];
+                                pl.world_pos[0] = hf.world_pos[0];
+                                pl.world_pos[1] = hf.world_pos[1];
+                                pl.world_pos[2] = hf.world_pos[2];
+                                pl.radius = hf.radius;
+                                pl.color[0] = hf.color[0];
+                                pl.color[1] = hf.color[1];
+                                pl.color[2] = hf.color[2];
+                                pl.intensity = hf.peak_intensity * fade;
+                            }
+                        }
+                        g_hit_flashes.resize(dst);
+                    }
+                    if (g_monster_tracker.in_active_quest()) {
+                        const std::uint16_t parea = g_monster_tracker.player_area();
+                        for (const auto &m : g_monster_tracker.large_monsters()) {
+                            if (m.area != parea || m.hp <= 0) continue;
+                            if (sem.light_count >= mhf::psp::SemanticSceneFrame::kMaxLights) break;
+                            // Species-aware subtle atmospheric monster aura lights (MHFU species IDs).
+                            float rgb[3]{0.0f, 0.0f, 0.0f};
+                            float rad = 0.0f, inten = 0.0f;
+                            const float pulse = 0.85f + 0.15f * std::sin(t_sec * 5.2f);
+                            switch (m.species_id) {
+                            case 46u: // Lunastra
+                            case 50u: // Teostra
+                                rgb[0] = 1.00f; rgb[1] = 0.38f; rgb[2] = 0.08f; rad = 240.0f; inten = 0.72f * pulse; break;
+                            case 35u: // Kirin
+                            case 15u: // Khezu
+                            case 29u: // Red Khezu
+                                rgb[0] = 0.45f; rgb[1] = 0.78f; rgb[2] = 1.00f; rad = 200.0f; inten = 0.50f * pulse; break;
+                            case 16u: // Fatalis
+                            case 26u: // Crimson Fatalis
+                            case 53u: // Akantor
+                                rgb[0] = 1.00f; rgb[1] = 0.28f; rgb[2] = 0.08f; rad = 280.0f; inten = 0.65f * pulse; break;
+                            case 47u: // White Fatalis
+                                rgb[0] = 0.95f; rgb[1] = 0.22f; rgb[2] = 0.30f; rad = 280.0f; inten = 0.65f * pulse; break;
+                            case 69u: // Ukanlos
+                                rgb[0] = 0.55f; rgb[1] = 0.85f; rgb[2] = 1.00f; rad = 260.0f; inten = 0.50f * pulse; break;
+                            case 45u: // Chameleos
+                                rgb[0] = 0.68f; rgb[1] = 0.28f; rgb[2] = 0.92f; rad = 210.0f; inten = 0.42f * pulse; break;
+                            default:
+                                break;
+                            }
+                            if (inten > 0.0f) {
+                                auto &pl = sem.lights[sem.light_count++];
+                                pl.world_pos[0] = m.pos[0];
+                                pl.world_pos[1] = m.pos[1] + 95.0f;
+                                pl.world_pos[2] = m.pos[2];
+                                pl.radius = rad;
+                                pl.color[0] = rgb[0];
+                                pl.color[1] = rgb[1];
+                                pl.color[2] = rgb[2];
+                                pl.intensity = inten;
+                            }
+                        }
+                    }
+                    frontend.set_semantic_frame(sem);
+                }
                 const bool show_skip = g_skip_quest_clear_timer.load(std::memory_order_relaxed) && g_quest_timer_skip.can_skip();
                 if (g_monster_tracker.in_active_quest() || show_skip) {
                     const bool show_dmg = g_damage_numbers_enabled.load(std::memory_order_relaxed) && g_damage_numbers.active_count() > 0u;

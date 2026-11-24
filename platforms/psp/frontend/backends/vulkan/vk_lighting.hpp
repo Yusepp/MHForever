@@ -42,6 +42,12 @@ enum class BiomeKind : std::uint8_t {
     Arena,
 };
 
+struct alignas(16) ViewPointLight {
+    float pos_radius[4]{};      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    float color_intensity[4]{}; // rgb = linear HDR color, w = intensity
+};
+static_assert(sizeof(ViewPointLight) == 32);
+
 struct alignas(16) LightingComputeParams {
     float proj_info[4]{};         // x = 1/proj00, y = 1/proj11, z = proj10, w = proj14
     float vz_and_size[4]{};       // x = vz_scale, y = vz_center, z = full_w, w = full_h
@@ -58,8 +64,11 @@ struct alignas(16) LightingComputeParams {
     std::uint32_t aux_slots[4]{}; // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
     std::uint32_t ext_slots[4]{}; // x = ssgi_slot, y = gtao_raw/flash_slot, z = biome_id, w = flags (bit0=cave, bit1=vig, bit2=fxaa)
     std::uint32_t phase1_slots[4]{}; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags (bit0=hdr, bit1=exp_reset), w = 0
+    VkDeviceAddress lights_bda{0};
+    std::uint32_t light_count{0};
+    std::uint32_t lights_pad{0};
 };
-static_assert(sizeof(LightingComputeParams) == 240);
+static_assert(sizeof(LightingComputeParams) == 256);
 
 struct alignas(16) TaaComputeParams {
     float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
@@ -74,6 +83,7 @@ struct alignas(16) TaaComputeParams {
 static_assert(sizeof(TaaComputeParams) == 128);
 
 struct LightingFrameInput {
+    static constexpr std::size_t kMaxViewLights = 64;
     float proj[16]{};         // active 3D perspective projection matrix (column-major)
     float view_rot[9]{1.0f, 0.0f, 0.0f,
                       0.0f, 1.0f, 0.0f,
@@ -116,7 +126,8 @@ public:
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                   const LightingFrameInput &in,
                   void *params_cpu_ptr, VkDeviceAddress params_bda, bool run_fxaa = true,
-                  std::uint32_t hdr_input_slot = 0, std::uint32_t gbuf_normal_slot = 0);
+                  std::uint32_t hdr_input_slot = 0, std::uint32_t gbuf_normal_slot = 0,
+                  VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0);
 
     // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
     // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.

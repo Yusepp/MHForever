@@ -6,8 +6,10 @@
 
 // Full-resolution unified Linear-HDR lighting composite (runs once after 3D and before 2D HUD):
 // - Smooth per-pixel G-buffer vertex normals (with seamless bilateral depth-normal fallback)
+// - Shared-memory 8x8 tiled world-space dynamic point lights (up to 64 lights: fireballs, bombs,
+//   torches, campfires, lightning, elemental hit flashes, monster auras) with PBR diffuse + specular + SSS
 // - Multi-bounce GTAO + contact shadows + world-up hemisphere bounce in linear HDR space
-// - Per-pixel sun key contrast + GGX-inspired specular sheen + Fresnel rim light
+// - Per-pixel sun key contrast + GGX-like specular sheen + thin-surface backlit SSS + Fresnel rim light
 // - Quarter-res SSGI colored bounce + 4x2 dynamic emissive flash
 // - Rayleigh/Mie atmospheric fog & volumetric sun shafts + HDR Karis bloom with heat shimmer
 // - Adaptive eye exposure + ACES-inspired filmic tonemapping + subtle biome color grading
@@ -19,9 +21,16 @@ layout(set = 0, binding = 0) uniform texture2D u_textures[];
 layout(set = 0, binding = 1) uniform sampler u_samplers[];
 layout(set = 1, binding = 0, rgba8) uniform image2D u_lit_out;
 
-// When FXAA is off and reading from RGBA8 scene_color directly, kSpecInPlace = 1 reads/writes u_lit_out in place.
-// When reading from dedicated RGBA16F hdr_color_, kSpecInPlace = 0 reads u_textures[p.tex_slots.x] and writes u_lit_out.
 layout(constant_id = 0) const uint kSpecInPlace = 0u;
+
+struct ViewPointLight {
+    vec4 pos_radius;      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    vec4 color_intensity; // rgb = linear HDR color, w = intensity
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightListBuf {
+    ViewPointLight items[];
+};
 
 struct LightingParams {
     vec4 proj_info;
@@ -39,6 +48,9 @@ struct LightingParams {
     uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
     uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
     uvec4 phase1_slots; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags, w = 0
+    LightListBuf lights;
+    uint light_count;
+    uint lights_pad;
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -48,6 +60,11 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Li
 layout(push_constant) uniform LightingPush {
     LightingParamsBuf buf;
 } pc;
+
+shared uint s_min_z_u;
+shared uint s_max_z_u;
+shared uint s_tile_count;
+shared uint s_tile_lights[32];
 
 // Multi-bounce GTAO approximation (Jimenez et al.): preserves surface chroma inside crevices.
 vec3 multi_bounce_ao(float ao, vec3 albedo) {
@@ -69,18 +86,20 @@ vec3 linear_to_srgb(vec3 c) {
     return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
 }
 
-// Neutral-hue filmic tonemapper (AgX/ACES-inspired): keeps midtones faithful to MHFU art
-// while smoothly compressing HDR fire, lightning, bloom, and sunlight without hue-clipping!
+float linear_eye_z(LightingParams p, float d) {
+    float zn = (d * 65535.0 - p.vz_and_size.y) / max(abs(p.vz_and_size.x), 1e-3);
+    float denom = zn + p.proj_info.z;
+    if (abs(denom) < 1e-5) denom = (denom >= 0.0 ? 1e-5 : -1e-5);
+    return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
+}
+
 vec3 filmic_tonemap(vec3 x) {
-    // Subtle cross-channel desaturation on extreme HDR (> 1.0) so fire/explosions glow golden-white instead of neon.
     vec3 a = max(x, vec3(0.0));
     float l = dot(a, vec3(0.2126, 0.7152, 0.0722));
     float hi_blend = smoothstep(0.95, 3.2, l) * 0.28;
     a = mix(a, vec3(l), hi_blend);
-    // Narkowicz ACES fitted curve, gently blended with linear below 0.35 to preserve MHFU shadow readability.
     vec3 aces = (a * (2.51 * a + 0.03)) / (a * (2.43 * a + 0.59) + 0.14);
     float mid_w = smoothstep(0.0, 0.65, l);
-    // Scale ACES so 0.18 middle-grey maps cleanly without crushing dark caves.
     vec3 scaled = mix(a * 1.04, aces * 1.06, 0.55 + 0.35 * mid_w);
     return clamp(scaled, vec3(0.0), vec3(1.0));
 }
@@ -97,21 +116,67 @@ vec3 decode_gbuf_normal(vec2 rg) {
 void main() {
     LightingParams p = pc.buf.p;
     ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
-    if (ip.x >= int(p.vz_and_size.z) || ip.y >= int(p.vz_and_size.w)) return;
+    ivec2 sz = ivec2(p.vz_and_size.zw);
+    bool in_bounds = (ip.x < sz.x && ip.y < sz.y);
+
+    uint dslot = p.tex_slots.y;
+    float d_here = in_bounds ? texelFetch(u_textures[dslot], ip, 0).r : 1.0;
+    bool is_sky = (!in_bounds || d_here >= 0.99992 || d_here <= 0.00001);
+    float z_eye = is_sky ? 0.0 : linear_eye_z(p, d_here);
+
+    // 0. Shared-memory 8x8 tile culling for up to 64 world-space dynamic point lights (1 light test per thread!).
+    uint lid = gl_LocalInvocationIndex;
+    if (p.light_count > 0u) {
+        if (lid == 0u) {
+            s_min_z_u = 0x7F7FFFFFu; // +FLT_MAX
+            s_max_z_u = 0u;
+            s_tile_count = 0u;
+        }
+        barrier();
+        if (!is_sky) {
+            uint zu = floatBitsToUint(z_eye);
+            atomicMin(s_min_z_u, zu);
+            atomicMax(s_max_z_u, zu);
+        }
+        barrier();
+        if (s_max_z_u > 0u && lid < p.light_count) {
+            float zmin = uintBitsToFloat(s_min_z_u);
+            float zmax = uintBitsToFloat(s_max_z_u);
+            vec2 tile_min_uv = vec2(gl_WorkGroupID.xy * 8u) / p.vz_and_size.zw;
+            vec2 tile_max_uv = min(vec2((gl_WorkGroupID.xy + 1u) * 8u), p.vz_and_size.zw) / p.vz_and_size.zw;
+            vec2 ndc_min = tile_min_uv * 2.0 - 1.0;
+            vec2 ndc_max = tile_max_uv * 2.0 - 1.0;
+            float x0 = min(ndc_min.x * p.proj_info.x * zmin, ndc_min.x * p.proj_info.x * zmax);
+            float x1 = max(ndc_max.x * p.proj_info.x * zmin, ndc_max.x * p.proj_info.x * zmax);
+            float y0 = min(ndc_min.y * p.proj_info.y * zmin, ndc_min.y * p.proj_info.y * zmax);
+            float y1 = max(ndc_max.y * p.proj_info.y * zmin, ndc_max.y * p.proj_info.y * zmax);
+            vec3 bmin = vec3(min(x0, x1), min(y0, y1), -zmax);
+            vec3 bmax = vec3(max(x0, x1), max(y0, y1), -zmin);
+
+            ViewPointLight pl = p.lights.items[lid];
+            vec3 closest = clamp(pl.pos_radius.xyz, bmin, bmax);
+            vec3 diff = pl.pos_radius.xyz - closest;
+            float r = pl.pos_radius.w;
+            if (dot(diff, diff) <= r * r) {
+                uint slot = atomicAdd(s_tile_count, 1u);
+                if (slot < 32u) s_tile_lights[slot] = lid;
+            }
+        }
+        barrier();
+    }
+
+    if (!in_bounds) return;
 
     vec4 scene = (kSpecInPlace != 0u) ? imageLoad(u_lit_out, ip) : texelFetch(u_textures[p.tex_slots.x], ip, 0);
     vec3 col_lin = srgb_to_linear_hdr(scene.rgb);
+    vec3 albedo_est = clamp(col_lin, vec3(0.02), vec3(1.0));
     vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
-
-    uint dslot = p.tex_slots.y;
-    float d_here = texelFetch(u_textures[dslot], ip, 0).r;
-    bool is_sky = (d_here >= 0.99992 || d_here <= 0.00001);
 
     // 1. Depth-aware bilateral upsample of denoised half-res GTAO & Contact Shadows + smooth G-buffer normal.
     if (!is_sky && p.tex_slots.z != 0u) {
         ivec2 gsize = textureSize(u_textures[p.tex_slots.z], 0);
         ivec2 gmax = gsize - ivec2(1);
-        ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
+        ivec2 full_max = sz - ivec2(1);
         vec2 gpos = vec2(ip) * 0.5 - 0.25;
         ivec2 base = ivec2(floor(gpos));
         vec2 f = clamp(gpos - vec2(base), 0.0, 1.0);
@@ -143,12 +208,10 @@ void main() {
         vec3 N = normalize(vec3(nxy, nz));
         bool is_skinned = false;
 
-        // Upgrade to true smooth per-pixel skinned vertex normal when G-buffer is present!
         if (p.phase1_slots.x != 0u) {
             vec4 gb = texelFetch(u_textures[p.phase1_slots.x], ip, 0);
             if (gb.b > 0.5) {
                 vec3 gn = decode_gbuf_normal(gb.rg);
-                // Flip Y to match lighting_composite's +Y-down screen/view convention.
                 gn.y = -gn.y;
                 N = gn;
                 is_skinned = (gb.a > 0.5);
@@ -156,19 +219,20 @@ void main() {
         }
 
         vec2 ndc = uv * 2.0 - 1.0;
-        vec3 V = normalize(vec3(-ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, 1.0));
+        vec3 P = vec3(ndc.x * p.proj_info.x * z_eye, ndc.y * p.proj_info.y * z_eye, -z_eye);
+        vec3 V = normalize(-P);
         if (dot(N, V) < 0.0) N = -N;
         vec3 L = normalize(p.sun_dir_view.xyz);
         vec3 U = normalize(p.world_up_view.xyz);
 
         // Multi-bounce AO + Screen-Space Contact Shadows tinted by biome sky/shadow color (linear).
         vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
-        vec3 mb_ao = multi_bounce_ao(ao, clamp(col_lin, vec3(0.0), vec3(1.0)));
+        vec3 mb_ao = multi_bounce_ao(ao, albedo_est);
         vec3 tinted_ao = mix(shadow_tint_lin, vec3(1.0), mb_ao);
         vec3 tinted_cs = mix(shadow_tint_lin * 0.65, vec3(1.0), contact);
         col_lin *= tinted_ao * tinted_cs;
 
-        // 2. World-up Hemisphere Ambient Bounce (sky bounce upward, snow/sand/magma under-glow downward).
+        // 2. World-up Hemisphere Ambient Bounce.
         if (p.ground_bounce.a > 0.001) {
             float up_dot = clamp(dot(N, U), -1.0, 1.0);
             float sky_w = max(up_dot, 0.0);
@@ -178,7 +242,7 @@ void main() {
             col_lin += col_lin * hemi * (p.ground_bounce.a * (0.4 + 0.6 * ao));
         }
 
-        // 3. Per-pixel sun key contrast + smooth GGX-like specular sheen + Fresnel rim light.
+        // 3. Per-pixel sun key contrast + GGX-like specular sheen + thin-surface backlit SSS + Fresnel rim light.
         vec3 scatter_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
         float sun_vis = ao * contact;
@@ -187,13 +251,20 @@ void main() {
 
         float ndotv = clamp(dot(N, V), 0.0, 1.0);
         float fresnel = pow(1.0 - ndotv, 3.2);
+        float gloss = max(p.spec_contact.y, 6.0) * (is_skinned ? 1.15 : 0.90);
         if (p.spec_contact.x > 0.001 && p.sun_dir_view.w < 0.5) {
             vec3 H = normalize(L + V);
             float ndoth = clamp(dot(N, H), 0.0, 1.0);
             float luma_lin = dot(col_lin, vec3(0.2126, 0.7152, 0.0722));
-            float gloss = max(p.spec_contact.y, 6.0) * (is_skinned ? 1.15 : 0.90);
             float spec = pow(ndoth, gloss) * (0.20 + 0.80 * fresnel) * ndotl;
             col_lin += scatter_lin * (spec * p.spec_contact.x * sun_vis * (0.30 + 0.70 * clamp(luma_lin, 0.0, 1.5)));
+
+            // Thin-surface backlit Subsurface Scattering (SSS) on monster wings/skin & translucent edges!
+            if (is_skinned) {
+                float back_dot = clamp(dot(V, -normalize(L + N * 0.35)), 0.0, 1.0);
+                float sss = pow(back_dot, 3.0) * (0.30 + 0.70 * fresnel) * sun_vis;
+                col_lin += albedo_est * scatter_lin * (sss * 0.28);
+            }
         }
         if (p.bloom_rim.z > 0.001) {
             float sun_align = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
@@ -201,18 +272,42 @@ void main() {
             col_lin += scatter_lin * (fresnel * sun_align * p.bloom_rim.z * rim_mul * sun_vis);
         }
 
+        // 3b. World-space Tiled Dynamic Point Lights (fireballs, bombs, torches, campfires, hit flashes, boss auras!).
+        if (p.light_count > 0u) {
+            uint n_lights = min(s_tile_count, 32u);
+            vec3 dyn_accum = vec3(0.0);
+            for (uint i = 0u; i < n_lights; ++i) {
+                ViewPointLight pl = p.lights.items[s_tile_lights[i]];
+                vec3 to_l = pl.pos_radius.xyz - P;
+                float dist2 = dot(to_l, to_l);
+                float rad = pl.pos_radius.w;
+                if (dist2 >= rad * rad || dist2 < 1e-4) continue;
+                float dist = sqrt(dist2);
+                vec3 ldir = to_l / dist;
+                float t = clamp(1.0 - dist2 / (rad * rad), 0.0, 1.0);
+                float att = (t * t) / (1.0 + dist2 * 0.00014);
+                float wrap_ndotl = clamp((dot(N, ldir) + 0.25) / 1.25, 0.0, 1.0);
+                vec3 H_pt = normalize(ldir + V);
+                float spec_pt = pow(clamp(dot(N, H_pt), 0.0, 1.0), gloss * 0.8) * (0.25 + 0.75 * fresnel) * 0.22;
+                float sss_pt = is_skinned ? (pow(clamp(dot(V, -ldir), 0.0, 1.0), 2.5) * 0.16) : 0.0;
+                vec3 light_rad = pl.color_intensity.rgb * (pl.color_intensity.w * att * (0.45 + 0.55 * ao));
+                dyn_accum += light_rad * (albedo_est * (wrap_ndotl + sss_pt) + vec3(spec_pt));
+            }
+            col_lin += dyn_accum;
+        }
+
         // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash.
         if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
             vec3 ssgi = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.x],
                                                              u_samplers[p.aux_slots.y]),
                                                    uv).rgb);
-            col_lin += ssgi * (0.30 + 0.70 * clamp(col_lin, vec3(0.0), vec3(1.0))) * (p.world_up_view.w * (0.45 + 0.55 * ao));
+            col_lin += ssgi * (0.30 + 0.70 * albedo_est) * (p.world_up_view.w * (0.45 + 0.55 * ao));
         }
         if (p.ext_slots.y != 0u) {
             vec3 flash = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.y],
                                                               u_samplers[p.aux_slots.y]),
                                                     uv).rgb);
-            col_lin += flash * (0.25 + 0.75 * clamp(col_lin, vec3(0.0), vec3(1.0))) * (0.32 * (0.45 + 0.55 * ao));
+            col_lin += flash * (0.25 + 0.75 * albedo_est) * (0.32 * (0.45 + 0.55 * ao));
         }
     }
 
@@ -253,7 +348,7 @@ void main() {
     // 8. Filmic Tonemapping (Linear HDR -> display-referred [0,1] linear) -> sRGB.
     vec3 col = linear_to_srgb(filmic_tonemap(col_lin));
 
-    // 9. Subtle biome color harmony & vibrance (preserves MHFU's iconic palette per biome).
+    // 9. Subtle biome color harmony & vibrance.
     if (p.spec_contact.w > 0.001) {
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
         float cmax = max(col.r, max(col.g, col.b));
@@ -263,24 +358,23 @@ void main() {
         col = mix(vec3(luma), col, 1.0 + vib);
     }
 
-    // 10. Aspect-corrected, luminance-preserving cinematic vignette in moody biomes.
+    // 10. Aspect-corrected, luminance-preserving cinematic vignette.
     if ((p.ext_slots.w & 2u) != 0u) {
         uint bid = p.ext_slots.z;
         float vig_str = 0.0;
         vec3 vig_tint = vec3(1.0);
-        if (bid == 3u) { vig_str = 0.10; vig_tint = vec3(0.86, 0.94, 1.04); }      // IceCave: cool icy edge
-        else if (bid == 4u) { vig_str = 0.09; vig_tint = vec3(1.04, 0.95, 0.86); } // CozyIndoor: warm hearth
-        else if (bid == 5u) { vig_str = 0.12; vig_tint = vec3(0.92, 0.94, 1.00); } // DarkCave
-        else if (bid == 11u) { vig_str = 0.09; vig_tint = vec3(0.90, 0.96, 1.02); } // Swamp
-        else if (bid == 12u) { vig_str = 0.09; vig_tint = vec3(1.06, 0.90, 0.82); } // Volcano: warm embers
-        else if (bid == 14u) { vig_str = 0.09; vig_tint = vec3(0.94, 0.94, 0.98); } // FortressSiege
-        else { vig_str = 0.04; } // Ultra-subtle natural lens framing outdoors
+        if (bid == 3u) { vig_str = 0.10; vig_tint = vec3(0.86, 0.94, 1.04); }
+        else if (bid == 4u) { vig_str = 0.09; vig_tint = vec3(1.04, 0.95, 0.86); }
+        else if (bid == 5u) { vig_str = 0.12; vig_tint = vec3(0.92, 0.94, 1.00); }
+        else if (bid == 11u) { vig_str = 0.09; vig_tint = vec3(0.90, 0.96, 1.02); }
+        else if (bid == 12u) { vig_str = 0.09; vig_tint = vec3(1.06, 0.90, 0.82); }
+        else if (bid == 14u) { vig_str = 0.09; vig_tint = vec3(0.94, 0.94, 0.98); }
+        else { vig_str = 0.04; }
         if (vig_str > 0.0) {
             float aspect = p.vz_and_size.z / max(p.vz_and_size.w, 1.0);
             vec2 vc = (uv * 2.0 - 1.0) * vec2(aspect / 1.765, 1.0);
             float r2 = dot(vc, vc);
             float vig_mask = smoothstep(0.55, 1.75, r2) * vig_str;
-            // Preserve bright highlights (fire/UI edges) while gently framing corners.
             float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
             float hi_protect = 1.0 - smoothstep(0.75, 1.0, luma) * 0.5;
             col *= mix(vec3(1.0), vig_tint * (1.0 - vig_mask * hi_protect), clamp(vig_mask * 2.0, 0.0, 1.0));
