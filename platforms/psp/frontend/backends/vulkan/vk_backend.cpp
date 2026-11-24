@@ -1144,7 +1144,7 @@ void VkBackend::draw_batch() {
             x2 = std::max(x2, v.x);
             y2 = std::max(y2, v.y);
         }
-        const bool whole_screen = setup_.is_killcam || (x2 - x1 >= 448.0f && y2 - y1 >= 32.0f) || (y2 - y1 >= 256.0f);
+        const bool whole_screen = setup_.is_killcam || (x2 - x1 >= 448.0f && y2 - y1 >= 16.0f) || (y2 - y1 >= 256.0f);
         if (!whole_screen) {
             constexpr float kHudClock[4] = {8.0f, 8.0f, 60.0f, 56.0f};
             const bool is_clock = std::fabs(x1 - kHudClock[0]) < 1.5f && std::fabs(y1 - kHudClock[1]) < 1.5f &&
@@ -1524,8 +1524,17 @@ void VkBackend::block_transfer(std::uint32_t src, std::uint32_t /*src_stride*/, 
 
     if (!dst_in_vram) {
         // VRAM -> RAM readback (used by quest-end killcam capture when the game copies out of VRAM).
-        if (sit->second.bytes_per_pixel() == bytes_per_pixel) {
+        // Games often transfer a 16-bit framebuffer using 32-bit GE block_transfer (bpp=4, half width/stride),
+        // so normalize coordinates into the render target's native pixel units.
+        const std::uint32_t rt_bpp = sit->second.bytes_per_pixel();
+        if (rt_bpp == bytes_per_pixel) {
             copy_target_to_ram(sit->second, src, sx, sy, dst, dst_stride, dx, dy, width, height);
+        } else if (rt_bpp != 0u) {
+            const std::uint32_t px_sx = (sx * bytes_per_pixel) / rt_bpp;
+            const std::uint32_t px_w = (width * bytes_per_pixel) / rt_bpp;
+            const std::uint32_t px_dx = (dx * bytes_per_pixel) / rt_bpp;
+            const std::uint32_t px_dst_stride = (dst_stride * bytes_per_pixel) / rt_bpp;
+            copy_target_to_ram(sit->second, src, px_sx, sy, dst, px_dst_stride, px_dx, dy, px_w, height);
         }
         return;
     }
@@ -1744,8 +1753,11 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
 
     const bool have_clean = killcam_clean_valid_ && killcam_clean_.image != VK_NULL_HANDLE &&
                             (captured_clean_3d_ || killcam_clean_target_ == from.address);
-    const bool use_clean = is_shown_target(from.address) && have_clean &&
-                           fx + width <= 480u && fy + height <= 272u;
+    const bool use_clean = is_shown_target(from.address) && have_clean && fx < 480u && fy < 272u;
+    if (use_clean) {
+        width = std::min(width, 480u - fx);
+        height = std::min(height, 272u - fy);
+    }
     VkImageResource &src_img = use_clean ? killcam_clean_ : from.color;
 
     VkImageResource tmp_img;
@@ -1801,6 +1813,18 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
             ks.frame = frame_number_;
             pinned_killcam = true;
         }
+    }
+    static const bool kc_log = [] {
+        const char *v = std::getenv("MHF_VK_KILLCAM_LOG");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (kc_log) {
+        std::fprintf(stderr,
+                     "[vk][killcam] copy_target_to_ram src=0x%08X dst=0x%08X fx=%u fy=%u w=%u h=%u dst_stride=%u bpp=%u "
+                     "use_clean=%d pinned=%d pin=%ux%u\n",
+                     src, dst, fx, fy, width, height, dst_stride, bpp, use_clean ? 1 : 0, pinned_killcam ? 1 : 0,
+                     pin_w, pin_h);
+        std::fflush(stderr);
     }
 
     transition_resource(src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2001,7 +2025,20 @@ std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32
         killcam_ram_addr_ = addr;
         killcam_ram_bpp_ = bpp;
         killcam_ram_stride_ = tex_stride >= 480u ? tex_stride : 512u;
+        killcam_ram_verified_frame_ = frame_number_;
         return killcam_pinned_.image.bindless_slot;
+    }
+    static const bool kc_log = [] {
+        const char *v = std::getenv("MHF_VK_KILLCAM_LOG");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (kc_log) {
+        std::fprintf(stderr,
+                     "[vk][killcam] miss addr=0x%08X stride=%u %ux%u fmt=%u swz=%d (ram_addr=0x%08X ram_bpp=%u "
+                     "ram_stride=%u pin_valid=%d best_err=%u)\n",
+                     addr, tex_stride, tex_w, tex_h, tex_fmt, swizzled ? 1 : 0, killcam_ram_addr_, killcam_ram_bpp_,
+                     killcam_ram_stride_, killcam_pinned_.valid ? 1 : 0, best_err / 48u);
+        std::fflush(stderr);
     }
     return 0u;
 }
