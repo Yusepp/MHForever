@@ -681,6 +681,8 @@ void VkBackend::retire_image(VkImageResource &res) {
     const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
     const std::uint64_t retire_at = ctx_.graphics_timeline_value + margin;
     if (res.bindless_slot != 0) {
+        if (res.bindless_slot == last_shown_slot_) last_shown_slot_ = 0;
+        if (res.bindless_slot == blur_src_slot_) blur_src_slot_ = 0;
         descriptors_.free_texture(res.bindless_slot, retire_at);
         res.bindless_slot = 0;
     }
@@ -2681,19 +2683,19 @@ void VkBackend::render_interpolated_subframe(float phase) {
     if (interp_rt_.color.image == VK_NULL_HANDLE || interp_rt_.color.width != pw || interp_rt_.color.height != ph) {
         retire_image(interp_rt_.color);
         retire_image(interp_rt_.depth);
-        interp_rt_.address = blend_older_.shown_addr;
         interp_rt_.width = blend_older_.width;
         interp_rt_.height = blend_older_.height;
         interp_rt_.stride = blend_older_.width;
         interp_rt_.color.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
                                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_STORAGE_BIT,
+                                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                 VK_IMAGE_ASPECT_COLOR_BIT);
         interp_rt_.depth.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_D32_SFLOAT,
                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                 VK_IMAGE_ASPECT_DEPTH_BIT);
     }
+    interp_rt_.address = blend_older_.shown_addr;
 
     // Velocity-matched cubic Hermite phase smoothing (zero extra frame latency):
     // Applied uniformly to the entire scene (characters + terrain) so skinned models never desync from the ground.
@@ -3146,6 +3148,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             // run it now before falling back to main_rt on a camera cut (prevents 1-frame unlit flash).
             if (have_gpu_frame && frame_had_3d_ && !lit_3d_this_frame_ && it != targets_.end()) {
                 apply_enhanced_lighting(it->second, cur_light_in_);
+                transition_resource(it->second.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
                 lit_3d_this_frame_ = true;
             }
             show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
