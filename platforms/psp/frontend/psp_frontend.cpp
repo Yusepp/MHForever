@@ -266,24 +266,19 @@ struct Frontend::Impl {
     // Publishes the combined songs/HUD-bar + game_image overlay; caller holds overlay.mutex.
     void publish_quest_and_game_locked() {
         const bool have_game = game_image != nullptr && !song_placing;
-        if (songs_active && have_game) {
+        if (songs_active) {
             overlay.pixels = songs_pixels;
-            composite_over(overlay.pixels, songs_w, songs_h, *game_image, game_image_w, game_image_h);
+            if (have_game) {
+                composite_over(overlay.pixels, songs_w, songs_h, *game_image, game_image_w, game_image_h);
+                game_image_shown = game_image;
+            } else {
+                game_image_shown.reset();
+            }
             overlay.width = songs_w;
             overlay.height = songs_h;
             overlay.aspect = songs_aspect;
             overlay.visible = true;
             overlay_owner = OverlayOwner::songs;
-            game_image_shown = game_image;
-            ++overlay.generation;
-        } else if (songs_active) {
-            overlay.pixels = songs_pixels;
-            overlay.width = songs_w;
-            overlay.height = songs_h;
-            overlay.aspect = songs_aspect;
-            overlay.visible = true;
-            overlay_owner = OverlayOwner::songs;
-            game_image_shown.reset();
             ++overlay.generation;
         } else if (have_game) {
             overlay.pixels = *game_image;
@@ -434,7 +429,11 @@ struct Frontend::Impl {
             }
         }
     }
-    Runtime *runtime{}; // 0 not started, 1 active, 2 unavailable (software presentation)
+    void ensure_dialog_thread(const Runtime &rt) {
+        if (font_directory.empty()) font_directory = rt.options().font_directory;
+        if (!dialog_thread.joinable()) dialog_thread = std::thread([this] { dialog_worker(); });
+    }
+    Runtime *runtime{};
 };
 
 Frontend::Frontend() : impl_(std::make_unique<Impl>()) {}
@@ -722,7 +721,6 @@ void watch_friends(Frontend::Impl &impl, Runtime &rt) {
     const bool changed = look_at_friends(impl);
     const std::string room = rt.adhoc_room(), server = rt.adhoc_server();
     std::vector<std::string> here;
-    std::vector<std::string> names;
     if (!room.empty()) {
         for (const auto &f : impl.friends) {
             if (!f.invite && f.state == "playing" && f.room == room && f.server == server) here.push_back(f.key);
@@ -760,10 +758,7 @@ void watch_friends(Frontend::Impl &impl, Runtime &rt) {
     }
     impl.notice_shown = true;
     impl.notice_until = now + std::chrono::seconds(5);
-    if (!impl.dialog_thread.joinable()) {
-        impl.font_directory = rt.options().font_directory;
-        impl.dialog_thread = std::thread([&impl] { impl.dialog_worker(); });
-    }
+    impl.ensure_dialog_thread(rt);
     std::lock_guard lock(impl.dialog_mutex);
     impl.notice_pending = std::move(notice);
     impl.dialog_cv.notify_one();
@@ -840,10 +835,7 @@ void show_songs(Frontend::Impl &impl, Runtime &rt) {
         impl.songs_pending = want;
     }
     impl.songs_shown = std::move(want);
-    if (!impl.dialog_thread.joinable()) {
-        impl.font_directory = rt.options().font_directory;
-        impl.dialog_thread = std::thread([&impl] { impl.dialog_worker(); });
-    }
+    impl.ensure_dialog_thread(rt);
     impl.dialog_cv.notify_one();
 }
 
@@ -884,10 +876,7 @@ void update_dialogs(Frontend::Impl &impl, Runtime &rt) {
     if (view.version == impl.dialog_version) return;
     impl.dialog_version = view.version;
     impl.dialog_visible = view.kind != DialogView::Kind::None;
-    if (!impl.dialog_thread.joinable()) {
-        impl.font_directory = rt.options().font_directory;
-        impl.dialog_thread = std::thread([&impl] { impl.dialog_worker(); });
-    }
+    impl.ensure_dialog_thread(rt);
     {
         std::lock_guard lock(impl.dialog_mutex);
         impl.dialog_pending = view; // only the newest view matters
@@ -902,8 +891,8 @@ enum MenuId {
     kVkEnhancedLighting, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
 };
 constexpr int kGameOptionBase = 3000; // the QoL tab's options of the game: kGameOptionBase + an index into Impl::game_options
-constexpr int kGameActionBase = 4000; // the QoL tab's interactive actions: kGameActionBase + an index into Impl::game_actions
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
+constexpr int kGameActionBase = 5000; // the QoL tab's interactive actions: kGameActionBase + an index into Impl::game_actions
 
 // The ad hoc servers the Online section offers: the launcher's list (launcher/ui/src/servers.ts, keep the two alike).
 struct AdhocServerChoice {
@@ -1901,7 +1890,7 @@ void menu_pad_keys(MenuPad &state, const host::GamepadState &g, std::uint64_t no
 // and `close_menu` takes it down. The menu is drawn as an overlay over the running game.
 void open_menu(Frontend::Impl &impl, Runtime &rt) {
     if (impl.font_directory.empty()) impl.font_directory = rt.options().font_directory;
-    if (!impl.dialog_thread.joinable() && impl.gpu_state == 1) impl.dialog_thread = std::thread([&impl] { impl.dialog_worker(); });
+    if (impl.gpu_state == 1) impl.ensure_dialog_thread(rt);
     impl.menu_confirming_quit = false;
     impl.online = !rt.options().adhoc_server.empty();
     impl.server = rt.adhoc_server();
