@@ -23,6 +23,7 @@ struct QuestTimerSkipSymbols {
 inline constexpr std::uint32_t kQuestTimerSkipButton = mhf::psp::buttons::kSelect;
 inline constexpr std::uint64_t kQuestTimerSkipHoldUs = 800'000u;
 inline constexpr std::uint32_t kQuestTimerSkipMinFrames = 60u;    // > 2s remaining before offering skip
+inline constexpr std::uint32_t kQuestTimerSkipStartFrames = 180u; // >= 6s required to enter skip mode (skips 3s fanfare)
 inline constexpr std::uint32_t kQuestTimerSkipTargetFrames = 30u; // 1s left for clean transition
 
 class QuestTimerSkip {
@@ -49,6 +50,7 @@ private:
     float hold_progress_{0.0f};
     bool holding_{false};
     bool triggered_{false};
+    bool return_countdown_started_{false};
     bool can_skip_{false};
 };
 

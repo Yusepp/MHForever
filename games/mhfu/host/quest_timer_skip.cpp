@@ -249,6 +249,7 @@ void QuestTimerSkip::clear() noexcept {
     hold_progress_ = 0.0f;
     holding_ = false;
     triggered_ = false;
+    return_countdown_started_ = false;
     can_skip_ = false;
 }
 
@@ -380,6 +381,16 @@ bool QuestTimerSkip::poll(psprecomp::GuestMemory &memory, std::uint32_t buttons,
         hold_progress_ = 0.0f;
         holding_ = false;
         triggered_ = false;
+        return_countdown_started_ = false;
+    }
+    // MHFU first runs a brief 90-frame (3s) fanfare countdown before starting the real 20s/60s return timer.
+    // Wait until countdown reaches >= 6s (180 frames) so the widget never flashes "3" during the fanfare.
+    if (!return_countdown_started_) {
+        if (countdown < kQuestTimerSkipStartFrames) {
+            can_skip_ = false;
+            return false;
+        }
+        return_countdown_started_ = true;
     }
     remaining_frames_ = countdown;
     can_skip_ = !triggered_;

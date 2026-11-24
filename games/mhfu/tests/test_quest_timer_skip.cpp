@@ -25,8 +25,8 @@ void test_skips_after_hold() {
     mhf::mhfu::QuestTimerSkip skip({kQuestManagerPtrAddr, kGameSysPtrAddr});
     MHF_CHECK(!skip.poll(mem, 0u, 1'000'000u, true));
     MHF_CHECK(skip.can_skip());
-    MHF_CHECK(skip.label(1) == "Hold: Return Now");
-    MHF_CHECK(skip.label(3) == "Mantener: Volver");
+    MHF_CHECK(skip.label(1) == "End Quest Immediately");
+    MHF_CHECK(skip.label(3) == "Finalizar misión ahora");
 
     MHF_CHECK(!skip.poll(mem, mhf::mhfu::kQuestTimerSkipButton, 1'100'000u, true));
     MHF_CHECK(skip.label(1) == "Returning...");
@@ -53,10 +53,31 @@ void test_ignores_active_quest_and_disabled() {
     MHF_CHECK(mem.load32(kQuestManagerAddr + 0x710u) == 1800u);
 }
 
+void test_ignores_initial_3s_fanfare() {
+    psprecomp::GuestMemory mem;
+    // Initial 3-second (90-frame) Quest Clear fanfare before the real 60s/20s return countdown begins.
+    setup_post_quest(mem, 1, 3, 90u);
+    mhf::mhfu::QuestTimerSkip skip({kQuestManagerPtrAddr, kGameSysPtrAddr});
+    MHF_CHECK(!skip.poll(mem, 0u, 1'000'000u, true));
+    MHF_CHECK(!skip.can_skip());
+
+    // Once the real 60s (1800-frame) return countdown begins, the widget activates and stays visible down to 3s.
+    setup_post_quest(mem, 1, 3, 1800u);
+    MHF_CHECK(!skip.poll(mem, 0u, 2'000'000u, true));
+    MHF_CHECK(skip.can_skip());
+    MHF_CHECK(skip.remaining_seconds() == 60u);
+
+    setup_post_quest(mem, 1, 3, 90u);
+    MHF_CHECK(!skip.poll(mem, 0u, 59'000'000u, true));
+    MHF_CHECK(skip.can_skip());
+    MHF_CHECK(skip.remaining_seconds() == 3u);
+}
+
 } // namespace
 
 int main() {
     test_skips_after_hold();
     test_ignores_active_quest_and_disabled();
+    test_ignores_initial_3s_fanfare();
     return 0;
 }
