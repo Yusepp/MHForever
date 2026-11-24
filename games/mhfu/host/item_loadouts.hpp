@@ -20,6 +20,7 @@ struct ItemLoadoutsSymbols {
     std::optional<std::uint32_t> resource_manager;    // ResourceManager* pointer in guest RAM (for live localized names)
     std::optional<std::uint32_t> blademaster_weapons; // Blademaster weapon table (gunner table follows at +1150*24)
     std::optional<std::uint32_t> weapon_model_classes;// u8[553] model->class table (5 armor table ptrs at -20)
+    std::optional<std::uint32_t> item_table;          // 24-byte ItemInfo[id]: rarity(+2), icon_id(+5), icon_color(+6)
 
     [[nodiscard]] constexpr bool complete() const noexcept {
         return game_sys.has_value();

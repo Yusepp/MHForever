@@ -28,7 +28,7 @@ void test_save_and_restock_roundtrip() {
     set_slot(mem, kBoxBase, 0, 10u, 50u);
     set_slot(mem, kBoxBase, 1, 11u, 20u);
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt, std::nullopt});
     MHF_CHECK(loadouts.can_use_loadouts(mem));
     MHF_CHECK(loadouts.save_preset(mem, 0).ok);
 
@@ -51,7 +51,7 @@ void test_blocked_during_quest() {
     mem.store32(kGameSysPtrAddr, kGameSysAddr);
     mem.store8(kGameSysAddr + 0x2Eu, 2u); // Active quest
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt, std::nullopt});
     MHF_CHECK(!loadouts.can_use_loadouts(mem));
     MHF_CHECK(!loadouts.save_preset(mem, 0).ok);
 }
@@ -78,7 +78,7 @@ void test_armor_set_save_and_equip_after_box_sort() {
     put_piece(kEqBox + 5u * 12u, 2u, 19u);
     mem.store16(kEqIdx + 2u * 2u, 5u);
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt, std::nullopt});
     MHF_CHECK(loadouts.save_armor_preset(mem, 0).ok);
 
     // Equip different gear AND move saved pieces to new box slots (simulating box sort!).
@@ -102,7 +102,7 @@ void test_select_tap_sorts_and_hold_opens() {
     mem.store32(kGameSysPtrAddr, kGameSysAddr);
     mem.store8(kGameSysAddr + 0x2Eu, 0u); // Village
 
-    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt});
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt, std::nullopt});
     loadouts.mark_box_open(100'000u);
     loadouts.poll_box_ui(mem, 0u, 100'000u, true);
     MHF_CHECK(!loadouts.panel_open());

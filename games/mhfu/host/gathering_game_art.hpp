@@ -40,6 +40,8 @@ struct LoadoutIcons {
     // Per-class 16x16 native weapon icons indexed by MHFU weapon class (0..10):
     // 0:GS, 1:HBG, 2:Hammer, 3:Lance, 4:SnS, 5:LBG, 6:DB, 7:LS, 8:HH, 9:GL, 10:Bow.
     std::array<LoadoutSprite, 11u> weapon_classes{};
+    // All 55 native 24x24 item icons indexed directly by ItemInfo::icon_id (0..54 -> atlas slot icon_id + 1).
+    std::array<LoadoutSprite, 55u> item_sprites{};
     LoadoutSprite head;
     LoadoutSprite chest_armor;
     LoadoutSprite arms;

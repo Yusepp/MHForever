@@ -196,7 +196,7 @@ std::optional<LoadoutIcons> decode_game_loadout_icons(Bytes items, const psp::te
         auto img = item_image ? crop(*item_image, x, y, size) : crop(*actions, x, y, size);
         return {img.size, std::move(img.pixels)};
     };
-    return LoadoutIcons{
+    LoadoutIcons icons{
         .pouch = pick(96, 96),
         .chest = pick(168, 0),
         .potion = pick(24, 72),
@@ -222,12 +222,18 @@ std::optional<LoadoutIcons> decode_game_loadout_icons(Bytes items, const psp::te
             pick(224, 208, 16u), // 9: Gunlance
             pick(192, 160, 16u), // 10: Bow
         }},
+        .item_sprites = {},
         .head = pick(0, 144),
         .chest_armor = pick(24, 144),
         .arms = pick(72, 144),
         .waist = pick(48, 144),
         .legs = pick(96, 144),
     };
+    for (unsigned icon_id = 0; icon_id < icons.item_sprites.size(); ++icon_id) {
+        const unsigned slot = icon_id + 1u;
+        icons.item_sprites[icon_id] = pick((slot % 8u) * 24u, (slot / 8u) * 24u, 24u);
+    }
+    return icons;
 }
 
 std::optional<LoadoutIcons> load_game_loadout_icons(const std::filesystem::path &iso_path,

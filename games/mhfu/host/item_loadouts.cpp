@@ -290,7 +290,49 @@ EquipMeta resolve_equip_meta(const psprecomp::GuestMemory &memory, const ItemLoa
     return meta;
 }
 
-const LoadoutSprite *pick_item_icon(const LoadoutIcons &icons, std::uint16_t id) noexcept {
+// MHFU authentic ItemInfo::icon_color palette (0..10).
+mhf::overlay::Color item_palette_color(std::uint8_t color_id) noexcept {
+    switch (color_id) {
+        case 0u: return {0.95f, 0.95f, 0.93f}; // White
+        case 1u: return {0.95f, 0.35f, 0.35f}; // Red
+        case 2u: return {0.36f, 0.88f, 0.44f}; // Green
+        case 3u: return {0.38f, 0.64f, 0.98f}; // Blue
+        case 4u: return {0.96f, 0.88f, 0.32f}; // Yellow
+        case 5u: return {0.78f, 0.44f, 0.96f}; // Purple
+        case 6u: return {0.42f, 0.84f, 0.96f}; // Sky Blue / Cyan
+        case 7u: return {0.96f, 0.58f, 0.24f}; // Orange
+        case 8u: return {0.96f, 0.46f, 0.78f}; // Pink / Magenta
+        case 9u: return {0.68f, 0.68f, 0.68f}; // Gray
+        case 10u: return {0.82f, 0.60f, 0.36f}; // Brown / Tan
+        default: return {0.95f, 0.95f, 0.93f};
+    }
+}
+
+struct ItemMeta {
+    std::optional<std::uint8_t> icon_id;
+    std::optional<std::uint8_t> icon_color;
+    std::uint8_t rarity{0u};
+};
+
+ItemMeta resolve_item_meta(const psprecomp::GuestMemory &memory, const ItemLoadoutsSymbols &symbols,
+                           std::uint16_t id) noexcept {
+    ItemMeta meta{};
+    if (id == 0u || id >= 1500u || !symbols.item_table) return meta;
+    constexpr std::uint32_t kItemStride = 24u;
+    const std::uint32_t entry = *symbols.item_table + static_cast<std::uint32_t>(id) * kItemStride;
+    if (!memory.contains(entry, 8u)) return meta;
+    meta.rarity = std::min<std::uint8_t>(memory.load8(entry + 2u), 9u);
+    const std::uint8_t ico = memory.load8(entry + 5u);
+    if (ico < 55u) meta.icon_id = ico;
+    meta.icon_color = memory.load8(entry + 6u);
+    return meta;
+}
+
+const LoadoutSprite *pick_item_icon(const LoadoutIcons &icons, std::uint16_t id,
+                                    std::optional<std::uint8_t> exact_icon_id) noexcept {
+    if (exact_icon_id && *exact_icon_id < icons.item_sprites.size() && icons.item_sprites[*exact_icon_id].valid()) {
+        return &icons.item_sprites[*exact_icon_id];
+    }
     auto use = [](const LoadoutSprite &s) -> const LoadoutSprite * { return s.valid() ? &s : nullptr; };
     if (id >= 1u && id <= 5u) return use(icons.book);
     if (id >= 7u && id <= 28u) return use(icons.potion);
@@ -884,18 +926,18 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
         const float hold = select_hold_progress(now_us);
         const float rx = 0.0f;
         const float ry = 171.5f;
-        const float rw = 162.0f;
+        const float rw = 205.0f;
         const float rh = 15.5f;
 
-        constexpr int kBands = 16;
+        constexpr int kBands = 20;
         const float bw = rw / static_cast<float>(kBands);
         for (int i = 0; i < kBands; ++i) {
             const float t = static_cast<float>(i) / static_cast<float>(kBands - 1);
-            const float alpha = 0.72f * (1.0f - 0.85f * t * t);
-            painter.rect(rx + static_cast<float>(i) * bw, ry, bw + 0.35f, rh, kMhRibbonBg, alpha);
+            const float fade = t <= 0.62f ? 1.0f : std::max(0.0f, 1.0f - (t - 0.62f) / 0.38f);
+            painter.rect(rx + static_cast<float>(i) * bw, ry, bw + 0.35f, rh, kMhRibbonBg, 0.72f * fade);
         }
         if (hold > 0.001f) {
-            const float fw = std::clamp(hold, 0.0f, 1.0f) * (rw - 12.0f);
+            const float fw = std::clamp(hold, 0.0f, 1.0f) * (rw - 24.0f);
             painter.rect(rx, ry, fw, rh, kMhSelectGreen, 0.78f);
         }
 
@@ -1048,12 +1090,18 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             painter.rect(cx + cell_w - 0.7f, cy, 0.7f, cell_h, kMhBrassDark, occupied ? 0.75f : 0.35f);
             if (!occupied) continue;
 
+            const ItemMeta imeta = resolve_item_meta(memory, symbols_, s.id);
+            const mhf::overlay::Color rare_col = rarity_color(imeta.rarity);
+            const mhf::overlay::Color icon_col = imeta.icon_color
+                ? ((*imeta.icon_color == 0u && imeta.rarity >= 3u) ? rare_col : item_palette_color(*imeta.icon_color))
+                : item_icon_tint(s.id);
+
             float name_x = cx + 4.0f;
-            if (const LoadoutSprite *ico = pick_item_icon(icons_, s.id)) {
-                draw_tinted_icon(painter, cx + 2.5f, cy + 4.0f, 14.0f, *ico, item_icon_tint(s.id), 0.98f);
+            if (const LoadoutSprite *ico = pick_item_icon(icons_, s.id, imeta.icon_id)) {
+                draw_tinted_icon(painter, cx + 2.5f, cy + 4.0f, 14.0f, *ico, icon_col, 0.98f);
                 name_x = cx + 18.0f;
             } else {
-                painter.rect(cx + 2.5f, cy + 4.0f, 2.5f, cell_h - 8.0f, item_icon_tint(s.id), 0.96f);
+                painter.rect(cx + 2.5f, cy + 4.0f, 2.5f, cell_h - 8.0f, icon_col, 0.96f);
                 name_x = cx + 7.5f;
             }
 
@@ -1061,7 +1109,7 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             const float qw = painter.font_ok() ? painter.measure(qty, 6.4f, false) : 13.0f;
             const float max_name_w = (cx + cell_w - 3.5f - qw - 2.5f) - name_x;
             const std::string name = fit_text(painter, resolve_item_name(memory, text_res, text_archive_, s.id), 6.5f, max_name_w);
-            painter.text(name_x, cy + 13.5f, name, 6.5f, kMhWhite, 0.98f, false);
+            painter.text(name_x, cy + 13.5f, name, 6.5f, rare_col, 0.98f, false);
             painter.text(cx + cell_w - 3.0f - qw, cy + 13.5f, qty, 6.4f, kMhHeaderYellow, 0.98f, false);
         }
     } else {
@@ -1148,7 +1196,7 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             const std::string status = equipped_now ? "Equipped" : (in_box ? "In Box" : "Missing");
             const float st_w = painter.font_ok() ? painter.measure(status, 6.8f, false) + 8.0f : 38.0f;
             const std::string fitted = fit_text(painter, std::move(desc), 7.8f, r_in_w - 31.0f - st_w - 8.0f);
-            painter.text(r_in_x + 31.0f, cy + 12.2f, fitted, 7.8f, kMhWhite, 0.98f, false);
+            painter.text(r_in_x + 31.0f, cy + 12.2f, fitted, 7.8f, rare_col, 0.98f, false);
             const std::string sub = std::string(sv.tag) + "  RARE-" + std::to_string(static_cast<unsigned>(meta.rarity) + 1u);
             painter.text(r_in_x + 31.0f, cy + 22.8f, sub, 6.4f, rare_col, 0.92f, false);
 
