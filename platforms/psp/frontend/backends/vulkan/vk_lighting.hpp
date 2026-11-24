@@ -85,7 +85,7 @@ public:
                vol_pipe_ != VK_NULL_HANDLE && bloom_pipe_ != VK_NULL_HANDLE &&
                ssgi_pipe_ != VK_NULL_HANDLE && glow_blur_pipe_ != VK_NULL_HANDLE &&
                flash_pipe_ != VK_NULL_HANDLE && comp_pipe_ != VK_NULL_HANDLE &&
-               fxaa_pipe_ != VK_NULL_HANDLE;
+               comp_inplace_pipe_ != VK_NULL_HANDLE && fxaa_pipe_ != VK_NULL_HANDLE;
     }
 
     // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
@@ -144,6 +144,7 @@ private:
     VkPipeline glow_blur_pipe_ = VK_NULL_HANDLE;
     VkPipeline flash_pipe_ = VK_NULL_HANDLE;
     VkPipeline comp_pipe_ = VK_NULL_HANDLE;
+    VkPipeline comp_inplace_pipe_ = VK_NULL_HANDLE;
     VkPipeline fxaa_pipe_ = VK_NULL_HANDLE;
 
     Target2D gtao_tex_;       // half-res RGBA8 (ao, nx, ny, contact_shadow)

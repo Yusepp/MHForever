@@ -147,18 +147,19 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 2, pipe_sets.data(), 1, &pcr};
     if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &pipe_layout_) != VK_SUCCESS) return false;
 
-    auto make_pipe = [&](auto &spv) -> VkPipeline {
+    auto make_pipe_spec = [&](const auto &spv, const VkSpecializationInfo *spec) -> VkPipeline {
         VkShaderModule mod = ctx.create_shader_module(spv);
         if (!mod) return VK_NULL_HANDLE;
         VkComputePipelineCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", spec};
         ci.layout = pipe_layout_;
         VkPipeline pipe = VK_NULL_HANDLE;
         vkCreateComputePipelines(ctx.device, ctx.pipeline_cache, 1, &ci, nullptr, &pipe);
         vkDestroyShaderModule(ctx.device, mod, nullptr);
         return pipe;
     };
+    auto make_pipe = [&](const auto &spv) -> VkPipeline { return make_pipe_spec(spv, nullptr); };
 
     gtao_pipe_ = make_pipe(shaders::kGtaoCompSpv);
     gtao_denoise_pipe_ = make_pipe(shaders::kGtaoDenoiseCompSpv);
@@ -168,6 +169,10 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     glow_blur_pipe_ = make_pipe(shaders::kGlowBlurCompSpv);
     flash_pipe_ = make_pipe(shaders::kEmissiveFlashCompSpv);
     comp_pipe_ = make_pipe(shaders::kLightingCompositeCompSpv);
+    const std::uint32_t inplace_val = 1u;
+    const VkSpecializationMapEntry inplace_entry{0, 0, sizeof(std::uint32_t)};
+    const VkSpecializationInfo inplace_spec{1, &inplace_entry, sizeof(inplace_val), &inplace_val};
+    comp_inplace_pipe_ = make_pipe_spec(shaders::kLightingCompositeCompSpv, &inplace_spec);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
 
     // Build fast zone & biome lookup tables from LiveSettings (supports MHFU zones + graceful MHF1 fallback).
@@ -237,7 +242,9 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(glow_blur_pipe_);
     kill_pipe(flash_pipe_);
     kill_pipe(comp_pipe_);
+    kill_pipe(comp_inplace_pipe_);
     kill_pipe(fxaa_pipe_);
+    scene_set_views_.fill(VK_NULL_HANDLE);
     if (pipe_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(ctx.device, pipe_layout_, nullptr);
         pipe_layout_ = VK_NULL_HANDLE;
@@ -654,7 +661,7 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         queue_to_general(ssgi_blur_tex_.image);
         queue_to_general(flash_tex_.image);
     }
-    queue_to_general(lit_tmp_tex_.image);
+    if (want_fxaa) queue_to_general(lit_tmp_tex_.image);
     flush_barriers();
 
     // Bind global bindless Set 0 once; individual passes only rebind Set 1.
@@ -687,7 +694,7 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         run_pass(flash_pipe_, flash_set_, 4u, 2u, kPassFlash);
     }
 
-    // Barrier batch: transition produced targets -> SHADER_READ_ONLY (scene_color stays SHADER_READ_ONLY).
+    // Barrier batch: transition produced targets -> SHADER_READ_ONLY.
     if (need_gtao_pass) queue_to_read(gtao_blur_tex_.image);
     if (want_vol)       queue_to_read(vol_tex_.image);
     if (want_bloom)     queue_to_read(bloom_blur_tex_.image);
@@ -695,17 +702,26 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         queue_to_read(ssgi_blur_tex_.image);
         queue_to_read(flash_tex_.image);
     }
-    flush_barriers();
 
-    // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
-    run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, kPassComposite);
+    if (want_fxaa) {
+        flush_barriers();
+        // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
+        run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, kPassComposite);
 
-    // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11, or fast pass-through copy when disabled) -> scene_color.
-    queue_to_read(lit_tmp_tex_.image);
-    push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    flush_barriers();
-    run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, kPassFxaa);
+        // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11) -> scene_color.
+        queue_to_read(lit_tmp_tex_.image);
+        push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        flush_barriers();
+        run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, kPassFxaa);
+    } else {
+        // FXAA off: composite in place directly on scene_color, skipping lit_tmp_tex_ and fxaa_prehud.comp!
+        push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        flush_barriers();
+        run_pass(comp_inplace_pipe_, scene_set, scene_w, scene_h, kPassComposite);
+    }
 }
 
 } // namespace mhf::psp::vk
