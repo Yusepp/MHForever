@@ -392,15 +392,14 @@ private:
         bool has_killcam_hires = false;
     };
     VkImageResource killcam_clean_;
+    std::uint32_t killcam_clean_target_ = UINT32_MAX;
+    bool killcam_clean_valid_ = false;
+    KillcamSlot killcam_pinned_{};
     std::array<KillcamSlot, kKillcamSlots> killcam_slots_{};
     std::size_t killcam_next_slot_ = 0;
     std::uint32_t killcam_ram_addr_ = 0;
     std::uint32_t killcam_ram_bpp_ = 4;
-    std::size_t killcam_ram_slot_ = 0;
-    std::uint64_t killcam_matched_hash_ = 0;
-    std::uint32_t killcam_matched_slot_ = 0;
-    std::uint32_t killcam_matched_ox_ = 0;
-    std::uint32_t killcam_matched_oy_ = 0;
+    std::uint32_t killcam_ram_stride_ = 512;
     bool frame_had_3d_ = false;
     bool captured_clean_3d_ = false;
     bool lit_3d_this_frame_ = false;
@@ -565,6 +564,7 @@ void VkBackend::shutdown() {
     blur_a_.destroy_immediate(ctx_, &descriptors_);
     blur_b_.destroy_immediate(ctx_, &descriptors_);
     killcam_clean_.destroy_immediate(ctx_, &descriptors_);
+    killcam_pinned_.image.destroy_immediate(ctx_, &descriptors_);
     for (auto &ks : killcam_slots_) ks.image.destroy_immediate(ctx_, &descriptors_);
     vram_rb_img_.destroy_immediate(ctx_, nullptr);
     if (vram_rb_buf_ != VK_NULL_HANDLE) {
@@ -1013,17 +1013,12 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 if (pack_slot == 0) {
                     std::uint32_t kc_slot = 0;
                     std::uint32_t kc_ox = 0, kc_oy = 0;
-                    const bool kc_candidate = setup_.through && ((info.stride == 512u && info.width >= 32u && info.height >= 16u) ||
-                                                                 (info.width >= 480u && info.height >= 256u));
+                    const bool kc_candidate = setup_.through && !info.swizzled && info.format <= 3u &&
+                                              ((info.stride >= 480u && info.width >= 32u && info.height >= 16u) ||
+                                               (info.width >= 480u && info.height >= 256u));
                     if (kc_candidate) {
-                        if (killcam_matched_slot_ != 0 && h == killcam_matched_hash_) {
-                            kc_slot = killcam_matched_slot_;
-                            kc_ox = killcam_matched_ox_;
-                            kc_oy = killcam_matched_oy_;
-                        } else {
-                            kc_slot = match_killcam_hires(info.address, info.stride, info.width, info.height, info.format,
-                                                          nullptr, kc_ox, kc_oy);
-                        }
+                        kc_slot = match_killcam_hires(info.address, info.stride, info.width, info.height, info.format,
+                                                      nullptr, kc_ox, kc_oy);
                     }
                     if (kc_slot != 0) {
                         setup_.tex_slot = kc_slot;
@@ -1051,10 +1046,6 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                                                               decode_buf_.data(), kc_ox, kc_oy);
                             }
                             if (kc_slot != 0) {
-                                killcam_matched_hash_ = h;
-                                killcam_matched_slot_ = kc_slot;
-                                killcam_matched_ox_ = kc_ox;
-                                killcam_matched_oy_ = kc_oy;
                                 setup_.tex_slot = kc_slot;
                                 setup_.uv_xform[0] = static_cast<float>(info.width) / 480.0f;
                                 setup_.uv_xform[1] = static_cast<float>(info.height) / 272.0f;
@@ -1150,7 +1141,7 @@ void VkBackend::draw_batch() {
             x2 = std::max(x2, v.x);
             y2 = std::max(y2, v.y);
         }
-        const bool whole_screen = (x2 - x1 >= 448.0f && y2 - y1 >= 32.0f) || (y2 - y1 >= 256.0f);
+        const bool whole_screen = setup_.is_killcam || (x2 - x1 >= 448.0f && y2 - y1 >= 32.0f) || (y2 - y1 >= 256.0f);
         if (!whole_screen) {
             constexpr float kHudClock[4] = {8.0f, 8.0f, 60.0f, 56.0f};
             const bool is_clock = std::fabs(x1 - kHudClock[0]) < 1.5f && std::fabs(y1 - kHudClock[1]) < 1.5f &&
@@ -1209,8 +1200,8 @@ void VkBackend::draw_batch() {
     const bool linear = ((R(kTexFilter) & 0x100u) != 0) ||
                         (live_->smooth_textures.load(std::memory_order_relaxed) && !setup_.through) ||
                         setup_.linear_override;
-    const bool clamp_s = (R(kTexWrap) & 1u) != 0;
-    const bool clamp_t = (R(kTexWrap) & 0x100u) != 0;
+    const bool clamp_s = setup_.is_killcam || ((R(kTexWrap) & 1u) != 0);
+    const bool clamp_t = setup_.is_killcam || ((R(kTexWrap) & 0x100u) != 0);
     const int aniso = std::clamp(live_->texture_pack_anisotropy.load(std::memory_order_relaxed), 1, 16);
 
     vk::DrawParams dp{};
@@ -1561,16 +1552,18 @@ void VkBackend::block_transfer(std::uint32_t src, std::uint32_t /*src_stride*/, 
 }
 
 void VkBackend::capture_clean_3d_snapshot(RenderTarget &rt) {
-    if (rt.color.image == VK_NULL_HANDLE) return;
-    const std::uint32_t cw = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
-    const std::uint32_t ch = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
-    if (cw == 0 || ch == 0) return;
+    if (rt.color.image == VK_NULL_HANDLE || rt.width < 480u || rt.height < 272u) return;
+    const std::uint32_t cw = 480u * static_cast<std::uint32_t>(scale_);
+    const std::uint32_t ch = 272u * static_cast<std::uint32_t>(scale_);
+    if (cw == 0 || ch == 0 || cw > rt.color.width || ch > rt.color.height) return;
 
     ensure_recording();
     end_render_pass();
 
     if (killcam_clean_.image == VK_NULL_HANDLE || killcam_clean_.width != cw || killcam_clean_.height != ch) {
         retire_image(killcam_clean_);
+        killcam_clean_valid_ = false;
+        killcam_clean_target_ = UINT32_MAX;
         killcam_clean_.create(ctx_, &descriptors_, cw, ch, VK_FORMAT_R8G8B8A8_UNORM,
                               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                               VK_IMAGE_ASPECT_COLOR_BIT);
@@ -1588,6 +1581,8 @@ void VkBackend::capture_clean_3d_snapshot(RenderTarget &rt) {
     cp.extent = {cw, ch, 1};
     vkCmdCopyImage(frames_[frame_slot_].cmd, rt.color.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    killcam_clean_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    killcam_clean_target_ = rt.address;
+    killcam_clean_valid_ = true;
     captured_clean_3d_ = true;
 }
 
@@ -1671,10 +1666,6 @@ void VkBackend::copy_shown_to_vram(RenderTarget *shown) {
         slot_idx = killcam_next_slot_;
         killcam_next_slot_ = (killcam_next_slot_ + 1u) % kKillcamSlots;
         auto &ks = killcam_slots_[slot_idx];
-        if (ks.image.bindless_slot != 0 && ks.image.bindless_slot == killcam_matched_slot_) {
-            killcam_matched_slot_ = 0;
-            killcam_matched_hash_ = 0;
-        }
         ks.valid = false;
         if (ks.image.image == VK_NULL_HANDLE || ks.image.width != src_w || ks.image.height != src_h) {
             retire_image(ks.image);
@@ -1750,7 +1741,9 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
     height = std::min(height, from.height - fy);
     if (width == 0 || height == 0) return;
 
-    const bool use_clean = is_shown_target(from.address) && captured_clean_3d_ && killcam_clean_.image != VK_NULL_HANDLE &&
+    const bool have_clean = killcam_clean_valid_ && killcam_clean_.image != VK_NULL_HANDLE &&
+                            (captured_clean_3d_ || killcam_clean_target_ == from.address);
+    const bool use_clean = is_shown_target(from.address) && have_clean &&
                            fx + width <= 480u && fy + height <= 272u;
     VkImageResource &src_img = use_clean ? killcam_clean_ : from.color;
 
@@ -1774,34 +1767,38 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
     ensure_recording();
     end_render_pass();
 
-    // If this is a full-screen killcam copy, promote the HUD-free internal-res snapshot into a killcam slot.
-    if (use_clean && width >= 480u && height >= 256u) {
-        const std::size_t slot_idx = killcam_next_slot_;
-        killcam_next_slot_ = (killcam_next_slot_ + 1u) % kKillcamSlots;
-        auto &ks = killcam_slots_[slot_idx];
-        if (ks.image.image == VK_NULL_HANDLE || ks.image.width != killcam_clean_.width || ks.image.height != killcam_clean_.height) {
+    // If this is a full-screen killcam readback, pin the full internal-res viewport snapshot in a dedicated slot
+    // that the rolling VRAM readback ring can never evict during long post-quest countdowns.
+    bool pinned_killcam = false;
+    const std::uint32_t pin_w = use_clean ? killcam_clean_.width : (480u * static_cast<std::uint32_t>(scale_));
+    const std::uint32_t pin_h = use_clean ? killcam_clean_.height : (272u * static_cast<std::uint32_t>(scale_));
+    if (is_shown_target(from.address) && fx == 0u && fy == 0u && width >= 480u && height >= 256u &&
+        pin_w <= src_img.width && pin_h <= src_img.height) {
+        auto &ks = killcam_pinned_;
+        if (ks.image.image == VK_NULL_HANDLE || ks.image.width != pin_w || ks.image.height != pin_h) {
             retire_image(ks.image);
-            ks.image.create(ctx_, &descriptors_, killcam_clean_.width, killcam_clean_.height, VK_FORMAT_R8G8B8A8_UNORM,
+            ks.image.create(ctx_, &descriptors_, pin_w, pin_h, VK_FORMAT_R8G8B8A8_UNORM,
                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         }
         if (ks.image.image != VK_NULL_HANDLE) {
-            transition_resource(killcam_clean_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            transition_resource(src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
             transition_resource(ks.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
             VkImageCopy cp{};
             cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            cp.extent = {killcam_clean_.width, killcam_clean_.height, 1};
-            vkCmdCopyImage(frames_[frame_slot_].cmd, killcam_clean_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            cp.extent = {pin_w, pin_h, 1};
+            vkCmdCopyImage(frames_[frame_slot_].cmd, src_img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            ks.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
             transition_resource(ks.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-            killcam_ram_addr_ = dst & 0x1FFFFFFFu;
+            killcam_ram_stride_ = dst_stride >= 480u ? dst_stride : 512u;
+            killcam_ram_addr_ = (dst + (dy * killcam_ram_stride_ + dx) * bpp) & 0x1FFFFFFFu;
             killcam_ram_bpp_ = bpp;
-            killcam_ram_slot_ = slot_idx;
             ks.valid = true;
             ks.frame = frame_number_;
+            pinned_killcam = true;
         }
     }
 
@@ -1851,8 +1848,8 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
             for (std::uint32_t x = 0; x < width; ++x) pack_pixel(line + x * 4u, from.format, row + x * bpp);
         }
     }
-    if (use_clean && width >= 480u && height >= 256u && killcam_ram_slot_ < kKillcamSlots) {
-        auto &ks = killcam_slots_[killcam_ram_slot_];
+    if (pinned_killcam) {
+        auto &ks = killcam_pinned_;
         ks.thumb.assign(480u * 272u, 0xFF000000u);
         const std::uint32_t copy_w = std::min(width, 480u);
         const std::uint32_t copy_h = std::min(height, 272u);
@@ -1872,35 +1869,72 @@ std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32
                                              std::uint32_t &out_oy) noexcept {
     out_ox = 0;
     out_oy = 0;
+    if (tex_fmt > 3u) return 0u;
     const std::uint32_t addr = tex_addr & 0x1FFFFFFFu;
     const std::uint32_t bpp = (tex_fmt == 3u) ? 4u : 2u;
 
-    // 1. Direct base/strip address match from block_transfer or a previously matched top-left killcam tile!
-    if (killcam_ram_addr_ != 0 && killcam_ram_slot_ < kKillcamSlots) {
-        const auto &ks = killcam_slots_[killcam_ram_slot_];
-        const std::uint32_t span = 512u * 272u * killcam_ram_bpp_;
-        if (ks.valid && ks.image.bindless_slot != 0 && addr >= killcam_ram_addr_ && addr < killcam_ram_addr_ + span &&
-            (tex_stride == 512u || addr == killcam_ram_addr_)) {
+    // 1. Direct base/strip address match against the pinned killcam slot, verified with an O(1) 8-pixel
+    //    content check so reused RAM buffers can never falsely hijack an unrelated texture.
+    if (killcam_ram_addr_ != 0 && bpp == killcam_ram_bpp_ && killcam_pinned_.valid &&
+        killcam_pinned_.image.bindless_slot != 0) {
+        const std::uint32_t row_stride = killcam_ram_stride_ >= 480u ? killcam_ram_stride_ : 512u;
+        const std::uint32_t span = row_stride * 272u * killcam_ram_bpp_;
+        if (addr >= killcam_ram_addr_ && addr < killcam_ram_addr_ + span &&
+            (tex_stride == row_stride || addr == killcam_ram_addr_)) {
             const std::uint32_t px_off = (addr - killcam_ram_addr_) / killcam_ram_bpp_;
-            out_ox = px_off % 512u;
-            out_oy = px_off / 512u;
-            if (out_ox < 480u && out_oy < 272u) {
-                return ks.image.bindless_slot;
+            const std::uint32_t ox = px_off % row_stride;
+            const std::uint32_t oy = px_off / row_stride;
+            if (ox < 480u && oy < 272u) {
+                bool verified = true;
+                if (killcam_pinned_.thumb.size() >= 480u * 272u) {
+                    const std::uint32_t cw = std::min(tex_w, 480u - ox);
+                    const std::uint32_t ch = std::min(tex_h, 272u - oy);
+                    const std::uint32_t eff_stride = tex_stride >= cw ? tex_stride : row_stride;
+                    std::uint32_t err = 0u;
+                    std::uint32_t samples = 0u;
+                    for (std::uint32_t gy = 0; gy < 2u; ++gy) {
+                        const std::uint32_t sy = (ch * (gy * 2u + 1u)) / 4u;
+                        for (std::uint32_t gx = 0; gx < 4u; ++gx) {
+                            const std::uint32_t sx = (cw * (gx * 2u + 1u)) / 8u;
+                            std::uint32_t a = 0u;
+                            if (rgba_pixels) {
+                                a = rgba_pixels[static_cast<std::size_t>(sy) * tex_w + sx];
+                            } else {
+                                const std::uint32_t paddr = addr + (sy * eff_stride + sx) * bpp;
+                                const std::uint8_t *raw = memory_.raw_pointer(paddr, bpp);
+                                if (!raw) continue;
+                                a = framebuffer_pixel(raw, tex_fmt);
+                            }
+                            const std::uint32_t b = killcam_pinned_.thumb[static_cast<std::size_t>(oy + sy) * 480u + (ox + sx)];
+                            const int ar = static_cast<int>(a & 0xFFu), ag = static_cast<int>((a >> 8u) & 0xFFu),
+                                      ab = static_cast<int>((a >> 16u) & 0xFFu);
+                            const int br = static_cast<int>(b & 0xFFu), bg = static_cast<int>((b >> 8u) & 0xFFu),
+                                      bb = static_cast<int>((b >> 16u) & 0xFFu);
+                            err += static_cast<std::uint32_t>(std::abs(ar - br) + std::abs(ag - bg) + std::abs(ab - bb));
+                            ++samples;
+                        }
+                    }
+                    verified = (samples > 0u) && (err <= 24u * 3u * samples);
+                }
+                if (verified) {
+                    out_ox = ox;
+                    out_oy = oy;
+                    return killcam_pinned_.image.bindless_slot;
+                }
+                if (addr == killcam_ram_addr_) {
+                    killcam_ram_addr_ = 0;
+                }
             }
         }
     }
     if (!rgba_pixels || tex_w < 32u || tex_h < 64u) return 0u;
 
-    // 2. Perceptual 16-sample match against saved 480x272 HUD-free captures (works for full 512x512 AND
-    //    vertical/tiled strips like 64x256, 32x256, 256x256 starting at the top-left of the killcam buffer!).
+    // 2. Perceptual 16-sample match against saved 480x272 HUD-free captures (checks pinned slot first, then
+    //    rolling ring slots for games that snapshot VRAM via CPU memcpy instead of block_transfer).
     const std::uint32_t cmp_w = std::min(tex_w, 480u);
     const std::uint32_t cmp_h = std::min(tex_h, 272u);
-    std::size_t best_idx = kKillcamSlots;
-    std::uint32_t best_err = 18u * 3u * 16u; // mean <= 18 per RGB channel (survives 16-bit packing & slight tint)
-    std::uint64_t best_frame = 0u;
-    for (std::size_t idx = 0; idx < kKillcamSlots; ++idx) {
-        const auto &ks = killcam_slots_[idx];
-        if (!ks.valid || ks.image.bindless_slot == 0 || ks.thumb.size() < 480u * 272u) continue;
+    auto score_slot = [&](const KillcamSlot &ks, std::uint32_t &out_err) -> bool {
+        if (!ks.valid || ks.image.bindless_slot == 0 || ks.thumb.size() < 480u * 272u) return false;
         std::uint32_t err = 0u;
         std::uint32_t non_black = 0u;
         for (std::uint32_t gy = 0; gy < 4u; ++gy) {
@@ -1909,24 +1943,47 @@ std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32
                 const std::uint32_t sx = (cmp_w * (gx * 2u + 1u)) / 8u;
                 const std::uint32_t a = rgba_pixels[static_cast<std::size_t>(sy) * tex_w + sx];
                 const std::uint32_t b = ks.thumb[static_cast<std::size_t>(sy) * 480u + sx];
-                const int ar = static_cast<int>(a & 0xFFu), ag = static_cast<int>((a >> 8u) & 0xFFu), ab = static_cast<int>((a >> 16u) & 0xFFu);
-                const int br = static_cast<int>(b & 0xFFu), bg = static_cast<int>((b >> 8u) & 0xFFu), bb = static_cast<int>((b >> 16u) & 0xFFu);
+                const int ar = static_cast<int>(a & 0xFFu), ag = static_cast<int>((a >> 8u) & 0xFFu),
+                          ab = static_cast<int>((a >> 16u) & 0xFFu);
+                const int br = static_cast<int>(b & 0xFFu), bg = static_cast<int>((b >> 8u) & 0xFFu),
+                          bb = static_cast<int>((b >> 16u) & 0xFFu);
                 if (ar > 10 || ag > 10 || ab > 10) ++non_black;
                 err += static_cast<std::uint32_t>(std::abs(ar - br) + std::abs(ag - bg) + std::abs(ab - bb));
             }
         }
-        if (non_black >= 6u && (err < best_err || (err == best_err && ks.frame > best_frame))) {
+        if (non_black < 6u) return false;
+        out_err = err;
+        return true;
+    };
+
+    std::size_t best_idx = kKillcamSlots + 1u; // kKillcamSlots == pinned slot, < kKillcamSlots == rolling slot
+    std::uint32_t best_err = 18u * 3u * 16u;
+    std::uint64_t best_frame = 0u;
+    std::uint32_t pin_err = 0u;
+    if (score_slot(killcam_pinned_, pin_err) && pin_err < best_err) {
+        best_err = pin_err;
+        best_frame = killcam_pinned_.frame;
+        best_idx = kKillcamSlots;
+    }
+    for (std::size_t idx = 0; idx < kKillcamSlots; ++idx) {
+        std::uint32_t err = 0u;
+        if (score_slot(killcam_slots_[idx], err) &&
+            (err < best_err || (err == best_err && killcam_slots_[idx].frame > best_frame))) {
             best_err = err;
-            best_frame = ks.frame;
+            best_frame = killcam_slots_[idx].frame;
             best_idx = idx;
         }
     }
-    if (best_idx < kKillcamSlots) {
+    if (best_idx <= kKillcamSlots) {
+        if (best_idx < kKillcamSlots) {
+            std::swap(killcam_pinned_, killcam_slots_[best_idx]);
+            killcam_slots_[best_idx].valid = false;
+        }
         // Lock this RAM base address so all remaining strips/tiles of the killcam hit in O(1)!
         killcam_ram_addr_ = addr;
         killcam_ram_bpp_ = bpp;
-        killcam_ram_slot_ = best_idx;
-        return killcam_slots_[best_idx].image.bindless_slot;
+        killcam_ram_stride_ = tex_stride >= 480u ? tex_stride : 512u;
+        return killcam_pinned_.image.bindless_slot;
     }
     return 0u;
 }
@@ -2311,6 +2368,8 @@ void VkBackend::apply_live_scale() {
         retire_image(copy_tex_);
         retire_image(soft_depth_copy_);
         retire_image(killcam_clean_);
+        killcam_clean_valid_ = false;
+        killcam_clean_target_ = UINT32_MAX;
     }
 }
 
@@ -2747,8 +2806,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
         dp.target_size[1] = static_cast<float>(blend_older_.height);
         dp.zmax_pad[0] = static_cast<float>(maxz);
         dp.tex_idx = textured ? rb.setup.tex_slot : 0u;
-        dp.sampler_idx = vk::BindlessDescriptors::sampler_index(
-            linear, rb.setup.texture_mips, (R(kTexWrap) & 1u) != 0, (R(kTexWrap) & 0x100u) != 0, aniso);
+        const bool clamp_s = rb.setup.is_killcam || ((R(kTexWrap) & 1u) != 0);
+        const bool clamp_t = rb.setup.is_killcam || ((R(kTexWrap) & 0x100u) != 0);
+        dp.sampler_idx = vk::BindlessDescriptors::sampler_index(linear, rb.setup.texture_mips, clamp_s, clamp_t, aniso);
         const std::uint32_t func = R(kTexFunc);
         dp.tex_func_bits = (func & 7u) | ((func & 0x100u) ? 8u : 0u) | ((func & 0x10000u) ? 16u : 0u) |
                            (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
