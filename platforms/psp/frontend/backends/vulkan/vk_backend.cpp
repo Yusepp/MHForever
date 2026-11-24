@@ -492,6 +492,7 @@ private:
         std::size_t partner = 0;
         std::uint32_t old_start = 0;
         std::uint32_t new_start = 0;
+        std::uint32_t max_deform_bits = 0;
         interpolation::Matrix eye_old{};
         interpolation::Matrix eye_new{};
         interpolation::Matrix inv_world_old{};
@@ -499,6 +500,7 @@ private:
         interpolation::RigidMotion rm{};
     };
     std::vector<PreparedDraw> prepared_draws_;
+    std::unordered_map<std::uint64_t, std::uint32_t> interp_key_counts_;
 
     RenderTarget interp_rt_;
     bool interp_active_ = false;
@@ -2576,6 +2578,25 @@ void VkBackend::prepare_interp_draws() {
     const bool new_buf_ok = raw_new_slot_ >= 0 && raw_ring_[raw_new_slot_].buf != VK_NULL_HANDLE &&
                             raw_ring_[raw_new_slot_].cap >= blend_newer_.raw_verts.size() * sizeof(vk::RawGpuVertex);
 
+    // Count skinned draw occurrences per key_hash (low 16 bits = older frame, high 16 bits = newer frame)
+    // so unique skinned entities (boss monsters, hunter, weapons) get a generous deformation limit for
+    // fast animations while instanced herds keep a tighter guard against cross-instance stretching.
+    interp_key_counts_.clear();
+    if (new_buf_ok) {
+        for (const auto &s : blend_older_.summaries) {
+            if (s.skinned) interp_key_counts_[s.key_hash] += 1u;
+        }
+        for (const auto &s : blend_newer_.summaries) {
+            if (s.skinned) interp_key_counts_[s.key_hash] += 0x10000u;
+        }
+    }
+    constexpr float kMaxDeformUnique = 600.0f;
+    constexpr float kMaxDeformShared = 180.0f;
+    std::uint32_t unique_deform_bits = 0;
+    std::uint32_t shared_deform_bits = 0;
+    std::memcpy(&unique_deform_bits, &kMaxDeformUnique, sizeof(float));
+    std::memcpy(&shared_deform_bits, &kMaxDeformShared, sizeof(float));
+
     for (std::size_t i = 0; i < ndraws; ++i) {
         PreparedDraw &pd = prepared_draws_[i];
         const std::uint32_t old_cnt = (i < blend_older_.draw_raw_count.size()) ? blend_older_.draw_raw_count[i] : 0u;
@@ -2589,6 +2610,7 @@ void VkBackend::prepare_interp_draws() {
         pd.has_inv_world_old = interpolation::affine_inverse(older.world, pd.inv_world_old);
         pd.old_start = (i < blend_older_.draw_raw_start.size()) ? blend_older_.draw_raw_start[i] : 0u;
         pd.new_start = 0u;
+        pd.max_deform_bits = shared_deform_bits;
         pd.has_rigid = false;
         pd.follow_cam = false;
         pd.has_vertex_pair = false;
@@ -2611,6 +2633,10 @@ void VkBackend::prepare_interp_draws() {
                     interpolation::affine_inverse(newer.world, pd.inv_world_new)) {
                     pd.new_start = cand_new_start;
                     pd.has_vertex_pair = true;
+                    const auto kc = interp_key_counts_.find(older.key_hash);
+                    pd.max_deform_bits = (kc != interp_key_counts_.end() && kc->second == 0x00010001u)
+                                             ? unique_deform_bits
+                                             : shared_deform_bits;
                 }
             }
         } else if (older.eligible && last_cam_motion_.valid) {
@@ -2686,9 +2712,6 @@ void VkBackend::render_interpolated_subframe(float phase) {
         out[8] = m[2]; out[9] = m[6]; out[10] = m[10]; out[11] = m[14];
     };
     auto *transforms = reinterpret_cast<vk::DrawTransform *>(tslice.ptr);
-    const float max_deform = 90.0f;
-    std::uint32_t max_deform_bits = 0;
-    std::memcpy(&max_deform_bits, &max_deform, sizeof(float));
     const bool zero_phase = (scene_phase <= 0.0f);
 
     for (std::size_t i = 0; i < ndraws; ++i) {
@@ -2704,7 +2727,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
             tr.pair_info[0] = pd.old_start;
             tr.pair_info[1] = pd.new_start;
             tr.pair_info[2] = 0u;
-            tr.pair_info[3] = max_deform_bits;
+            tr.pair_info[3] = pd.max_deform_bits;
         } else {
             interpolation::Matrix eye_blend = pd.eye_old;
             if (pd.has_partner) {
@@ -2739,7 +2762,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
             tr.pair_info[0] = pd.old_start;
             tr.pair_info[1] = pd.new_start;
             tr.pair_info[2] = pd.has_vertex_pair ? 1u : 0u;
-            tr.pair_info[3] = max_deform_bits;
+            tr.pair_info[3] = pd.max_deform_bits;
         }
 
         const auto &vp = blend_older_.viewports[i];
@@ -3008,8 +3031,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
 
             raw_old_slot_ = raw_new_slot_;
             raw_new_slot_ = -1;
-            const auto ut0 = prof_.enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             if (!blend_newer_.raw_verts.empty()) {
+                ScopedTimer up_scope(prof_.enabled, prof_.up_raw_ns);
                 const int slot = raw_next_slot_;
                 raw_next_slot_ = (raw_next_slot_ + 1) % 3;
                 if (upload_snap_raw(raw_ring_[slot], blend_newer_.raw_verts)) {
@@ -3031,6 +3054,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                                                                    : interpolation::RigidMotion{};
                     bool ok_old = (raw_old_slot_ >= 0 && raw_ring_[raw_old_slot_].buf != VK_NULL_HANDLE);
                     if (!ok_old) {
+                        ScopedTimer up_scope(prof_.enabled, prof_.up_raw_ns);
                         const int slot = raw_next_slot_;
                         raw_next_slot_ = (raw_next_slot_ + 1) % 3;
                         if (upload_snap_raw(raw_ring_[slot], blend_older_.raw_verts)) {
@@ -3039,8 +3063,6 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                         }
                     }
                     if (prof_.enabled) {
-                        prof_.up_raw_ns += static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ut0).count());
                         prof_.raw_verts += blend_older_.raw_verts.size();
                         prof_.flat_verts += blend_older_.flat_verts.size();
                     }
