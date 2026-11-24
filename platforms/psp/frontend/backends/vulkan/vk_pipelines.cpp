@@ -86,8 +86,6 @@ VkPipeline create_fullscreen_pipe(const Context &ctx, VkPipelineLayout layout, V
 } // namespace
 
 bool Pipelines::init(const Context &ctx, VkDescriptorSetLayout bindless_layout, VkFormat swap_fmt) {
-    swapchain_format = swap_fmt;
-
     auto make_layout = [&](std::uint32_t push_size, VkShaderStageFlags stages) -> VkPipelineLayout {
         VkPushConstantRange pcr{stages, 0, push_size};
         VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0,
@@ -120,7 +118,6 @@ bool Pipelines::init(const Context &ctx, VkDescriptorSetLayout bindless_layout, 
 }
 
 bool Pipelines::rebuild_swapchain_pipelines(const Context &ctx, VkFormat swap_fmt) {
-    swapchain_format = swap_fmt;
     if (present_pipe) { vkDestroyPipeline(ctx.device, present_pipe, nullptr); present_pipe = VK_NULL_HANDLE; }
     if (overlay_pipe) { vkDestroyPipeline(ctx.device, overlay_pipe, nullptr); overlay_pipe = VK_NULL_HANDLE; }
 

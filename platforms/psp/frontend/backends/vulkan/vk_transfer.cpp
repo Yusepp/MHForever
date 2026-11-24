@@ -199,8 +199,6 @@ bool PackStreamer::upload_image_sync_transfer(const Context &ctx, BindlessDescri
         out.image = VK_NULL_HANDLE;
         return false;
     }
-    out.width = img.width;
-    out.height = img.height;
     out.mip_levels = mip_levels;
     out.vram_bytes = static_cast<std::size_t>(img.width) * img.height * 4u * (mip_levels > 1u ? 4u : 3u) / 3u;
     out.bindless_slot = desc.allocate_texture(ctx, out.view);

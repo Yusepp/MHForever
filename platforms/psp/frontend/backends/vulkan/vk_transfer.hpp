@@ -9,7 +9,6 @@
 #include "texture_pack.hpp"
 
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -22,7 +21,7 @@ struct PackGpuImage {
     VmaAllocation alloc = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     std::uint32_t bindless_slot = 0;
-    std::uint32_t width = 0, height = 0, mip_levels = 1;
+    std::uint32_t mip_levels = 1;
     std::size_t vram_bytes = 0;
     std::uint64_t last_used = 0;
 };

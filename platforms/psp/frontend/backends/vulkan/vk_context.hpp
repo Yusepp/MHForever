@@ -10,7 +10,6 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
-#include <vector>
 
 struct SDL_Window;
 
@@ -28,11 +27,7 @@ struct Capabilities {
     std::uint32_t api_version = 0;
     float max_anisotropy = 1.0f;
     bool extended_dynamic_state3 = false;
-    bool eds3_color_blend_enable = false;
-    bool eds3_color_blend_equation = false;
-    bool eds3_color_write_mask = false;
     bool memory_budget = false;
-    bool dynamic_rendering_local_read = false;
     bool bc_compression = false;
     bool present_fifo_latest_ready = false;
     bool present_id = false;
@@ -55,14 +50,10 @@ struct Context {
 
     QueueFamilyIndices families;
     VkQueue graphics_queue = VK_NULL_HANDLE;
-    VkQueue transfer_queue = VK_NULL_HANDLE;
-    VkQueue compute_queue = VK_NULL_HANDLE;
-    std::mutex graphics_queue_mutex;
+    mutable std::mutex graphics_queue_mutex;
 
     VkSemaphore graphics_timeline = VK_NULL_HANDLE;
     std::uint64_t graphics_timeline_value = 0;
-    VkSemaphore transfer_timeline = VK_NULL_HANDLE;
-    std::uint64_t transfer_timeline_value = 0;
 
     Capabilities caps;
 

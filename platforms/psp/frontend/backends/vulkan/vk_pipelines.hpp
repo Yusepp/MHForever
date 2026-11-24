@@ -79,7 +79,6 @@ struct Pipelines {
     VkShaderModule ge_frag = VK_NULL_HANDLE;
     VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
-    VkFormat swapchain_format = VK_FORMAT_B8G8R8A8_UNORM;
 
     std::unordered_map<std::uint64_t, VkPipeline> ge_pipes;
 

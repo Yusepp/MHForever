@@ -1,11 +1,11 @@
 // Modern Vulkan 1.3+ drawing backend for the GE (see VULKAN.md).
 //
-// Phase 1 + Phase 2 implementation:
 // - Vulkan 1.3 dynamic rendering, Synchronization2, timeline semaphores, VMA, volk via SDL3.
 // - Global bindless texture array (16384 UPDATE_AFTER_BIND slots) + 64 immutable samplers.
 // - Persistently mapped per-frame ring buffers for GpuVertex, BDA DrawParams, and texture staging.
 // - Specialized SPIR-V GE pipelines with Extended Dynamic State 1/2/3 + on-disk VkPipelineCache.
-// - Upscaled VkRenderTarget pool, RTT + self-sampling copies, block transfers, overlays, and menu blur.
+// - Upscaled render target pool, RTT + self-sampling copies, block transfers, overlays, compute
+//   lighting/VFX, GPU frame interpolation, and HUD-free internal-res killcam capture.
 
 #include "vk_backend.hpp"
 #include "vk_buffers.hpp"
@@ -14,7 +14,6 @@
 #include "vk_interpolate.hpp"
 #include "vk_lighting.hpp"
 #include "vk_pipelines.hpp"
-#include "vk_shadows.hpp"
 #include "vk_swapchain.hpp"
 #include "vk_transfer.hpp"
 
@@ -160,7 +159,6 @@ struct RenderTarget {
 struct CachedTexture {
     VkImageResource image;
     std::uint64_t last_used = 0;
-    std::uint32_t width = 0, height = 0;
 };
 
 struct DrawSetup {
@@ -306,7 +304,6 @@ private:
     vk::BindlessDescriptors descriptors_;
     vk::Pipelines pipelines_;
     vk::PackStreamer pack_streamer_;
-    vk::ShadowCompute shadow_compute_;
     vk::LightingPipeline lighting_;
     vk::GpuInterpolator interpolator_;
 
@@ -512,7 +509,6 @@ bool VkBackend::init() {
     if (!pipelines_.init(ctx_, descriptors_.layout(), swapchain_.format)) return false;
     pack_streamer_.init(ctx_, live_->texture_pack_folder, live_->texture_pack_game,
                         live_->builtin_textures_folder, live_->texture_pack_mipmaps.load());
-    shadow_compute_.init(ctx_, descriptors_.layout());
     lighting_.init(ctx_, descriptors_.layout(), live_);
     interpolator_.init(ctx_);
 
@@ -535,7 +531,6 @@ bool VkBackend::init() {
         }
     }
 
-    // Initialize fallback 1x1 white image pixels on slot 0.
     batch_.reserve(65536);
     subframes_ = std::clamp((target_fps_ + 15) / 30, 1, 6);
     std::fprintf(stderr, "[vk] ready, internal resolution %dx%d, target %d fps (%dx subframes)\n",
@@ -589,7 +584,6 @@ void VkBackend::shutdown() {
     }
 
     pack_streamer_.shutdown(ctx_, descriptors_);
-    shadow_compute_.shutdown(ctx_, descriptors_);
     lighting_.shutdown(ctx_, descriptors_);
     interpolator_.shutdown(ctx_);
 
@@ -1057,8 +1051,6 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                                 setup_.is_killcam = true;
                             } else {
                                 CachedTexture ct{};
-                                ct.width = info.width;
-                                ct.height = info.height;
                                 ct.last_used = frame_number_;
                                 upload_texture_2d(ct.image, info.width, info.height, decode_buf_.data());
                                 it = textures_.emplace(h, std::move(ct)).first;

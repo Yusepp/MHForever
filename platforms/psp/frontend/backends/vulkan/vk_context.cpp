@@ -23,6 +23,7 @@
 #include <cstring>
 #include <fstream>
 #include <set>
+#include <vector>
 
 namespace mhf::psp::vk {
 
@@ -276,9 +277,6 @@ bool Context::init(SDL_Window *win) {
             eds3_query.extendedDynamicState3ColorWriteMask) {
             dev_exts.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
             caps.extended_dynamic_state3 = true;
-            caps.eds3_color_blend_enable = true;
-            caps.eds3_color_blend_equation = true;
-            caps.eds3_color_write_mask = true;
             eds3_enable.extendedDynamicState3ColorBlendEnable = VK_TRUE;
             eds3_enable.extendedDynamicState3ColorBlendEquation = VK_TRUE;
             eds3_enable.extendedDynamicState3ColorWriteMask = VK_TRUE;
@@ -385,8 +383,6 @@ bool Context::init(SDL_Window *win) {
     volkLoadDevice(device);
 
     vkGetDeviceQueue(device, families.graphics, 0, &graphics_queue);
-    vkGetDeviceQueue(device, families.transfer, 0, &transfer_queue);
-    vkGetDeviceQueue(device, families.compute, 0, &compute_queue);
 
     // Initialize VMA with volk dynamic pointers + BDA (+ optional memory budget).
     VmaVulkanFunctions vma_funcs{};
@@ -407,12 +403,11 @@ bool Context::init(SDL_Window *win) {
         return false;
     }
 
-    // Timeline semaphores for graphics and transfer queues.
+    // Timeline semaphore for graphics queue.
     VkSemaphoreTypeCreateInfo stci{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, nullptr, VK_SEMAPHORE_TYPE_TIMELINE, 0};
     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &stci, 0};
-    if (vkCreateSemaphore(device, &sci, nullptr, &graphics_timeline) != VK_SUCCESS ||
-        vkCreateSemaphore(device, &sci, nullptr, &transfer_timeline) != VK_SUCCESS) {
-        std::fprintf(stderr, "[vk] failed to create timeline semaphores\n");
+    if (vkCreateSemaphore(device, &sci, nullptr, &graphics_timeline) != VK_SUCCESS) {
+        std::fprintf(stderr, "[vk] failed to create timeline semaphore\n");
         shutdown();
         return false;
     }
@@ -490,10 +485,6 @@ void Context::shutdown() {
         if (graphics_timeline != VK_NULL_HANDLE) {
             vkDestroySemaphore(device, graphics_timeline, nullptr);
             graphics_timeline = VK_NULL_HANDLE;
-        }
-        if (transfer_timeline != VK_NULL_HANDLE) {
-            vkDestroySemaphore(device, transfer_timeline, nullptr);
-            transfer_timeline = VK_NULL_HANDLE;
         }
         if (allocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(allocator);

@@ -10,7 +10,6 @@
 #include "frame_matching.hpp"
 
 #include <cstdint>
-#include <vector>
 
 namespace mhf::psp::vk {
 
@@ -59,7 +58,6 @@ public:
                            std::uint32_t vertex_count, float phase);
 
     [[nodiscard]] VkBuffer out_vertex_buffer(int slot) const noexcept { return out_buf_[slot & 1]; }
-    [[nodiscard]] VkDeviceAddress out_vertex_address(int slot) const noexcept { return out_addr_[slot & 1]; }
     [[nodiscard]] std::uint32_t max_in_vertices() const noexcept { return max_in_vertices_; }
 
     interpolation::Matcher &matcher() noexcept { return matcher_; }

@@ -2,8 +2,6 @@
 #include "vk_shaders_spv.hpp"
 #include "../gpu_common.hpp"
 
-#include <cstdio>
-
 namespace mhf::psp::vk {
 
 bool GpuInterpolator::init(const Context &ctx) {
