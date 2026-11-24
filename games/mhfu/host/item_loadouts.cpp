@@ -22,7 +22,9 @@ constexpr std::uint16_t kBoxStackLimit = 99u;
 constexpr std::uint16_t kEquipIndexNone = 0xFFFFu;
 constexpr std::uint8_t kQuestPhaseActive = 2u;
 constexpr std::uint8_t kQuestPhasePostClear = 3u;
-constexpr std::uint64_t kBoxHeartbeatUs = 80'000u; // disappears promptly (~2-3 frames) when closing the box
+constexpr std::uint64_t kBoxHeartbeatUs = 80'000u;   // disappears promptly (~2-3 frames) when closing the box
+constexpr std::uint64_t kSelectHoldOpenUs = 350'000u; // hold SELECT 0.35s to open Loadouts; tap SELECT to Sort
+constexpr std::uint64_t kSortPulseUs = 50'000u;       // brief SELECT pulse forwarded to MHFU for native Sort
 
 // Monster Hunter warm leather-slate & antique-gold palette.
 constexpr mhf::overlay::Color kMhTop{0.125f, 0.106f, 0.086f};
@@ -579,6 +581,21 @@ bool ItemLoadouts::box_open(std::uint64_t now_us) const noexcept {
     return box_seen_us_ != 0u && now_us >= box_seen_us_ && (now_us - box_seen_us_) <= kBoxHeartbeatUs;
 }
 
+std::uint32_t ItemLoadouts::game_button_clear_mask() const noexcept {
+    if (!box_active_ || panel_open_ || sort_pulse_active_) return 0u;
+    return mhf::psp::buttons::kSelect;
+}
+
+std::uint32_t ItemLoadouts::game_button_force_mask() const noexcept {
+    if (!box_active_ || panel_open_ || !sort_pulse_active_) return 0u;
+    return mhf::psp::buttons::kSelect;
+}
+
+float ItemLoadouts::select_hold_progress(std::uint64_t now_us) const noexcept {
+    if (!select_holding_ || now_us < select_hold_start_us_) return 0.0f;
+    return std::clamp(static_cast<float>(now_us - select_hold_start_us_) / static_cast<float>(kSelectHoldOpenUs), 0.0f, 1.0f);
+}
+
 void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t buttons, std::uint64_t now_us, bool enabled) {
     const std::uint32_t pressed = buttons & ~prev_buttons_;
     prev_buttons_ = buttons;
@@ -589,18 +606,40 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
     }
 
     if (!enabled || !box_open(now_us) || !can_use_loadouts(memory)) {
+        box_active_ = false;
         panel_open_ = false;
         release_guard_ = false;
+        select_holding_ = false;
+        sort_pulse_active_ = false;
+        sort_pulse_until_us_ = 0u;
         return;
     }
+    box_active_ = true;
 
     if (!panel_open_) {
-        if ((pressed & kSelect) != 0u) {
-            panel_open_ = true;
-            release_guard_ = false;
+        if ((buttons & kSelect) != 0u) {
+            if (!select_holding_ && !release_guard_) {
+                select_holding_ = true;
+                select_hold_start_us_ = now_us;
+            } else if (select_holding_ && now_us >= select_hold_start_us_ &&
+                       (now_us - select_hold_start_us_) >= kSelectHoldOpenUs) {
+                select_holding_ = false;
+                sort_pulse_active_ = false;
+                sort_pulse_until_us_ = 0u;
+                panel_open_ = true;
+                release_guard_ = false;
+            }
+        } else if (select_holding_) {
+            // Released before the hold threshold: forward a clean SELECT tap so MHFU sorts normally.
+            select_holding_ = false;
+            sort_pulse_until_us_ = now_us + kSortPulseUs;
         }
+        sort_pulse_active_ = !panel_open_ && now_us < sort_pulse_until_us_;
         return;
     }
+    select_holding_ = false;
+    sort_pulse_active_ = false;
+    sort_pulse_until_us_ = 0u;
 
     if ((pressed & (kLTrigger | kRTrigger | kLeft | kRight)) != 0u) {
         tab_ = tab_ == Tab::Items ? Tab::Armor : Tab::Items;

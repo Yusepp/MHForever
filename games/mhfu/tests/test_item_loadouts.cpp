@@ -96,11 +96,62 @@ void test_armor_set_save_and_equip_after_box_sort() {
     MHF_CHECK(mem.load16(kEqIdx + 2u * 2u) == 15u);
 }
 
+void test_select_tap_sorts_and_hold_opens() {
+    using namespace mhf::psp::buttons;
+    psprecomp::GuestMemory mem;
+    mem.store32(kGameSysPtrAddr, kGameSysAddr);
+    mem.store8(kGameSysAddr + 0x2Eu, 0u); // Village
+
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt});
+    loadouts.mark_box_open(100'000u);
+    loadouts.poll_box_ui(mem, 0u, 100'000u, true);
+    MHF_CHECK(!loadouts.panel_open());
+    MHF_CHECK(loadouts.game_button_clear_mask() == kSelect);
+    MHF_CHECK(loadouts.game_button_force_mask() == 0u);
+
+    // Short tap (< 0.35s) forwards a clean SELECT sort pulse without opening the panel.
+    loadouts.mark_box_open(120'000u);
+    loadouts.poll_box_ui(mem, kSelect, 120'000u, true);
+    MHF_CHECK(!loadouts.panel_open());
+    MHF_CHECK(loadouts.select_hold_progress(220'000u) > 0.2f);
+    loadouts.mark_box_open(220'000u);
+    loadouts.poll_box_ui(mem, 0u, 220'000u, true);
+    MHF_CHECK(!loadouts.panel_open());
+    MHF_CHECK(loadouts.game_button_force_mask() == kSelect);
+    MHF_CHECK(loadouts.game_button_clear_mask() == 0u);
+
+    // After pulse expires, SELECT is masked again.
+    loadouts.mark_box_open(300'000u);
+    loadouts.poll_box_ui(mem, 0u, 300'000u, true);
+    MHF_CHECK(loadouts.game_button_force_mask() == 0u);
+    MHF_CHECK(loadouts.game_button_clear_mask() == kSelect);
+
+    // Holding SELECT for >= 0.35s opens Loadouts without firing a sort pulse.
+    loadouts.mark_box_open(320'000u);
+    loadouts.poll_box_ui(mem, kSelect, 320'000u, true);
+    loadouts.mark_box_open(700'000u);
+    loadouts.poll_box_ui(mem, kSelect, 700'000u, true);
+    MHF_CHECK(loadouts.panel_open());
+    MHF_CHECK(loadouts.suppress_game_input());
+    MHF_CHECK(loadouts.game_button_force_mask() == 0u);
+
+    // Closing with SELECT and releasing does not emit an accidental sort pulse.
+    loadouts.mark_box_open(740'000u);
+    loadouts.poll_box_ui(mem, 0u, 740'000u, true);
+    loadouts.mark_box_open(760'000u);
+    loadouts.poll_box_ui(mem, kSelect, 760'000u, true);
+    MHF_CHECK(!loadouts.panel_open());
+    loadouts.mark_box_open(780'000u);
+    loadouts.poll_box_ui(mem, 0u, 780'000u, true);
+    MHF_CHECK(loadouts.game_button_force_mask() == 0u);
+}
+
 } // namespace
 
 int main() {
     test_save_and_restock_roundtrip();
     test_blocked_during_quest();
     test_armor_set_save_and_equip_after_box_sort();
+    test_select_tap_sorts_and_hold_opens();
     return 0;
 }

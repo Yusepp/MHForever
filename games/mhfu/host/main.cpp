@@ -1526,6 +1526,7 @@ int main(int argc, char **argv) {
                                            g_quest_start_tracker.load(std::memory_order_relaxed),
                                            g_capturable_indicator.load(std::memory_order_relaxed));
                     frontend.set_game_input_suppressed(false);
+                    frontend.set_game_button_overrides(0u, 0u);
                 } else {
                     g_quest_timer_skip.clear();
                     g_infinite_consumables.clear(&rt->memory());
@@ -1535,6 +1536,8 @@ int main(int argc, char **argv) {
                     g_item_loadouts.poll_box_ui(rt->memory(), raw_btns, now,
                                                 g_item_pouch_loadouts.load(std::memory_order_relaxed));
                     frontend.set_game_input_suppressed(g_item_loadouts.suppress_game_input());
+                    frontend.set_game_button_overrides(g_item_loadouts.game_button_clear_mask(),
+                                                       g_item_loadouts.game_button_force_mask());
                 }
                 if (now - read_at >= 50'000) {
                     read_at = now;

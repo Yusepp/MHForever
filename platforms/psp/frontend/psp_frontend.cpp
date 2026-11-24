@@ -206,6 +206,8 @@ struct Frontend::Impl {
     float songs_aspect = 0.0f;
     bool songs_active = false;
     std::atomic<bool> game_input_suppressed{false};
+    std::atomic<std::uint32_t> game_button_clear{0};
+    std::atomic<std::uint32_t> game_button_force{0};
     std::atomic<std::uint32_t> raw_buttons{0};
     using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
@@ -558,6 +560,11 @@ void Frontend::set_game_hint(std::string hint, std::vector<overlay::HintSprite> 
 
 void Frontend::set_game_input_suppressed(bool suppressed) {
     impl_->game_input_suppressed.store(suppressed, std::memory_order_relaxed);
+}
+
+void Frontend::set_game_button_overrides(std::uint32_t clear_mask, std::uint32_t force_mask) {
+    impl_->game_button_clear.store(clear_mask, std::memory_order_relaxed);
+    impl_->game_button_force.store(force_mask, std::memory_order_relaxed);
 }
 
 std::uint32_t Frontend::raw_buttons() const {
@@ -2283,7 +2290,12 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                 // A held Circle that closed the menu belongs to the menu until released.
                 if (impl->game_hint_input_latched) state.buttons &= ~buttons::kCircle;
                 impl->host.mouse_motion(state.mouse_x, state.mouse_y);
-                set_controller_state(*runtime, impl->game_input_suppressed.load(std::memory_order_relaxed) ? idle : state);
+                const bool suppressed = impl->game_input_suppressed.load(std::memory_order_relaxed);
+                if (!suppressed) {
+                    state.buttons = (state.buttons & ~impl->game_button_clear.load(std::memory_order_relaxed)) |
+                                    impl->game_button_force.load(std::memory_order_relaxed);
+                }
+                set_controller_state(*runtime, suppressed ? idle : state);
                 update_dialogs(*impl, *runtime);
                 watch_friends(*impl, *runtime);
                 show_songs(*impl, *runtime);

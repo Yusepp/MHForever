@@ -85,6 +85,9 @@ public:
     [[nodiscard]] bool box_open(std::uint64_t now_us) const noexcept;
     [[nodiscard]] bool panel_open() const noexcept { return panel_open_; }
     [[nodiscard]] bool suppress_game_input() const noexcept { return panel_open_ || release_guard_; }
+    [[nodiscard]] std::uint32_t game_button_clear_mask() const noexcept;
+    [[nodiscard]] std::uint32_t game_button_force_mask() const noexcept;
+    [[nodiscard]] float select_hold_progress(std::uint64_t now_us) const noexcept;
     void poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t buttons, std::uint64_t now_us, bool enabled);
     // Draws the MH-styled [SELECT] Loadouts pill or full two-column Item & Armor Sets visualizer using TrueType Painter.
     bool render_box_ui(mhf::overlay::Painter &painter, const psprecomp::GuestMemory &memory, std::uint64_t now_us) const;
@@ -101,8 +104,13 @@ private:
     std::uint32_t prev_buttons_{0};
     std::size_t selected_{0};
     Tab tab_{Tab::Items};
+    bool box_active_{false};
     bool panel_open_{false};
     bool release_guard_{false};
+    bool select_holding_{false};
+    bool sort_pulse_active_{false};
+    std::uint64_t select_hold_start_us_{0};
+    std::uint64_t sort_pulse_until_us_{0};
     std::string toast_;
     bool toast_ok_{true};
     std::uint64_t toast_until_us_{0};

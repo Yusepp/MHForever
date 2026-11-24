@@ -133,6 +133,8 @@ public:
     // Suppresses guest PSP controller input (e.g. while an in-game QoL modal panel is open) while keeping
     // raw host buttons readable via raw_buttons().
     void set_game_input_suppressed(bool suppressed);
+    // Masks off `clear_mask` and forces on `force_mask` in the guest PSP button state (when not fully suppressed).
+    void set_game_button_overrides(std::uint32_t clear_mask, std::uint32_t force_mask);
     [[nodiscard]] std::uint32_t raw_buttons() const;
     // Native pixel size of the 16:9 overlay canvas (matches window/internal resolution, capped at 1920x1088).
     [[nodiscard]] std::pair<int, int> overlay_size() const;
