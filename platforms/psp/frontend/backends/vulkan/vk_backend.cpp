@@ -388,7 +388,6 @@ private:
         std::uint32_t format = 3;
         std::uint32_t width = 480;
         std::uint32_t height = 272;
-        std::size_t killcam_slot = 0;
         bool has_killcam_hires = false;
     };
     VkImageResource killcam_clean_;
@@ -1736,7 +1735,6 @@ void VkBackend::copy_shown_to_vram(RenderTarget *shown) {
     pending_vram_rb_.format = shown->format;
     pending_vram_rb_.width = std::min(kW, shown->width);
     pending_vram_rb_.height = std::min(kH, shown->height);
-    pending_vram_rb_.killcam_slot = 0;
     pending_vram_rb_.has_killcam_hires = saved_hires;
 }
 
@@ -1813,18 +1811,6 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
             ks.frame = frame_number_;
             pinned_killcam = true;
         }
-    }
-    static const bool kc_log = [] {
-        const char *v = std::getenv("MHF_VK_KILLCAM_LOG");
-        return v != nullptr && v[0] == '1';
-    }();
-    if (kc_log) {
-        std::fprintf(stderr,
-                     "[vk][killcam] copy_target_to_ram src=0x%08X dst=0x%08X fx=%u fy=%u w=%u h=%u dst_stride=%u bpp=%u "
-                     "use_clean=%d pinned=%d pin=%ux%u\n",
-                     src, dst, fx, fy, width, height, dst_stride, bpp, use_clean ? 1 : 0, pinned_killcam ? 1 : 0,
-                     pin_w, pin_h);
-        std::fflush(stderr);
     }
 
     transition_resource(src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2027,18 +2013,6 @@ std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32
         killcam_ram_stride_ = tex_stride >= 480u ? tex_stride : 512u;
         killcam_ram_verified_frame_ = frame_number_;
         return killcam_pinned_.image.bindless_slot;
-    }
-    static const bool kc_log = [] {
-        const char *v = std::getenv("MHF_VK_KILLCAM_LOG");
-        return v != nullptr && v[0] == '1';
-    }();
-    if (kc_log) {
-        std::fprintf(stderr,
-                     "[vk][killcam] miss addr=0x%08X stride=%u %ux%u fmt=%u swz=%d (ram_addr=0x%08X ram_bpp=%u "
-                     "ram_stride=%u pin_valid=%d best_err=%u)\n",
-                     addr, tex_stride, tex_w, tex_h, tex_fmt, swizzled ? 1 : 0, killcam_ram_addr_, killcam_ram_bpp_,
-                     killcam_ram_stride_, killcam_pinned_.valid ? 1 : 0, best_err / 48u);
-        std::fflush(stderr);
     }
     return 0u;
 }
