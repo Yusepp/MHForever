@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mhf::mhfu {
@@ -43,11 +44,13 @@ inline constexpr std::size_t kItemLoadoutCount = 5u;
 
 struct ItemLoadoutPreset {
     bool saved{false};
+    std::string name;
     std::array<ItemSlot, kItemPouchSlots> slots{};
 };
 
 struct ArmorLoadoutPreset {
     bool saved{false};
+    std::string name;
     std::array<std::uint16_t, kEquipSlots> box_indices{}; // 0xFFFF = empty
     std::array<EquipPiece, kEquipSlots> pieces{};
 };
@@ -81,20 +84,27 @@ public:
     // Item Pouch Sets (0..4)
     LoadoutResult save_preset(const psprecomp::GuestMemory &memory, std::size_t index);
     LoadoutResult apply_preset(psprecomp::GuestMemory &memory, std::size_t index) const;
+    LoadoutResult rename_preset(std::size_t index, std::string name);
 
     // Armor & Weapon Sets (0..4)
     LoadoutResult save_armor_preset(const psprecomp::GuestMemory &memory, std::size_t index);
     LoadoutResult apply_armor_preset(psprecomp::GuestMemory &memory, std::size_t index) const;
+    LoadoutResult rename_armor_preset(std::size_t index, std::string name);
 
     // House & Guild Hall Item Box integration (driven by mh_item_box_update hook).
     void mark_box_open(std::uint64_t now_us) noexcept;
     [[nodiscard]] bool box_open(std::uint64_t now_us) const noexcept;
     [[nodiscard]] bool panel_open() const noexcept { return panel_open_; }
+    [[nodiscard]] bool renaming() const noexcept { return renaming_; }
     [[nodiscard]] bool suppress_game_input() const noexcept { return panel_open_ || release_guard_; }
     [[nodiscard]] std::uint32_t game_button_clear_mask() const noexcept;
     [[nodiscard]] std::uint32_t game_button_force_mask() const noexcept;
     [[nodiscard]] float select_hold_progress(std::uint64_t now_us) const noexcept;
     void poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t buttons, std::uint64_t now_us, bool enabled);
+    void handle_text_input(std::string_view text);
+    void handle_text_backspace();
+    void handle_text_confirm(std::uint64_t now_us);
+    void handle_text_cancel();
     // Draws the MH-styled [SELECT] Loadouts pill or full two-column Item & Armor Sets visualizer using TrueType Painter.
     bool render_box_ui(mhf::overlay::Painter &painter, const psprecomp::GuestMemory &memory, std::uint64_t now_us) const;
 
@@ -116,6 +126,11 @@ private:
     bool release_guard_{false};
     bool select_holding_{false};
     bool sort_pulse_active_{false};
+    bool renaming_{false};
+    std::string rename_buf_;
+    int osk_row_{0};
+    int osk_col_{0};
+    int osk_page_{0}; // 0: ABC, 1: abc, 2: 123
     std::uint64_t select_hold_start_us_{0};
     std::uint64_t sort_pulse_until_us_{0};
     std::string toast_;

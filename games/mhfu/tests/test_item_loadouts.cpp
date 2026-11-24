@@ -146,6 +146,40 @@ void test_select_tap_sorts_and_hold_opens() {
     MHF_CHECK(loadouts.game_button_force_mask() == 0u);
 }
 
+void test_rename_loadout_and_osk() {
+    using namespace mhf::psp::buttons;
+    psprecomp::GuestMemory mem;
+    mem.store32(kGameSysPtrAddr, kGameSysAddr);
+    mem.store8(kGameSysAddr + 0x2Eu, 0u);
+
+    mhf::mhfu::ItemLoadouts loadouts({kGameSysPtrAddr, std::nullopt, std::nullopt, std::nullopt, std::nullopt});
+    // Open panel via hold SELECT
+    loadouts.mark_box_open(100'000u);
+    loadouts.poll_box_ui(mem, kSelect, 100'000u, true);
+    loadouts.mark_box_open(500'000u);
+    loadouts.poll_box_ui(mem, kSelect, 500'000u, true);
+    MHF_CHECK(loadouts.panel_open());
+
+    // Press Square to open Rename OSK
+    loadouts.mark_box_open(520'000u);
+    loadouts.poll_box_ui(mem, kSquare, 520'000u, true);
+    MHF_CHECK(loadouts.renaming());
+
+    // Type 'A' via OSK (row 0, col 0) with Circle, then 'K' (row 1, col 0), then physical keyboard "47", then Confirm with START
+    loadouts.mark_box_open(540'000u);
+    loadouts.poll_box_ui(mem, kCircle, 540'000u, true);
+    loadouts.mark_box_open(560'000u);
+    loadouts.poll_box_ui(mem, kDown, 560'000u, true);
+    loadouts.mark_box_open(580'000u);
+    loadouts.poll_box_ui(mem, kCircle, 580'000u, true);
+    loadouts.handle_text_input("47");
+    loadouts.mark_box_open(600'000u);
+    loadouts.poll_box_ui(mem, kStart, 600'000u, true);
+
+    MHF_CHECK(!loadouts.renaming());
+    MHF_CHECK(loadouts.preset(0).name == "AK47");
+}
+
 } // namespace
 
 int main() {
@@ -153,5 +187,6 @@ int main() {
     test_blocked_during_quest();
     test_armor_set_save_and_equip_after_box_sort();
     test_select_tap_sorts_and_hold_opens();
+    test_rename_loadout_and_osk();
     return 0;
 }

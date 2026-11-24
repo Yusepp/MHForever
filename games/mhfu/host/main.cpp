@@ -1540,6 +1540,7 @@ int main(int argc, char **argv) {
                                            g_capturable_indicator.load(std::memory_order_relaxed));
                     frontend.set_game_input_suppressed(false);
                     frontend.set_game_button_overrides(0u, 0u);
+                    frontend.set_game_text_input(false);
                 } else {
                     g_quest_timer_skip.clear();
                     g_infinite_consumables.clear(&rt->memory());
@@ -1548,9 +1549,19 @@ int main(int argc, char **argv) {
                     const std::uint32_t raw_btns = frontend.game_input_blocked() ? 0u : frontend.raw_buttons();
                     g_item_loadouts.poll_box_ui(rt->memory(), raw_btns, now,
                                                 g_item_pouch_loadouts.load(std::memory_order_relaxed));
+                    if (g_item_loadouts.renaming()) {
+                        using G = mhf::psp::Frontend::GameTextEvent::Kind;
+                        for (const auto &ev : frontend.take_game_key_events()) {
+                            if (ev.kind == G::Text) g_item_loadouts.handle_text_input(ev.text);
+                            else if (ev.kind == G::Backspace) g_item_loadouts.handle_text_backspace();
+                            else if (ev.kind == G::Enter) g_item_loadouts.handle_text_confirm(now);
+                            else if (ev.kind == G::Escape) g_item_loadouts.handle_text_cancel();
+                        }
+                    }
                     frontend.set_game_input_suppressed(g_item_loadouts.suppress_game_input());
                     frontend.set_game_button_overrides(g_item_loadouts.game_button_clear_mask(),
                                                        g_item_loadouts.game_button_force_mask());
+                    frontend.set_game_text_input(g_item_loadouts.renaming());
                 }
                 if (now - read_at >= 50'000) {
                     read_at = now;

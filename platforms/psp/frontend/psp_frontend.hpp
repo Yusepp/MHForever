@@ -135,6 +135,14 @@ public:
     void set_game_input_suppressed(bool suppressed);
     // Masks off `clear_mask` and forces on `force_mask` in the guest PSP button state (when not fully suppressed).
     void set_game_button_overrides(std::uint32_t clear_mask, std::uint32_t force_mask);
+    // Enables physical keyboard text capture for an active in-game overlay (e.g. loadout rename) when no dialog is open.
+    struct GameTextEvent {
+        enum class Kind { Text, Backspace, Enter, Escape };
+        Kind kind{Kind::Text};
+        std::string text;
+    };
+    void set_game_text_input(bool active);
+    [[nodiscard]] std::vector<GameTextEvent> take_game_key_events();
     [[nodiscard]] std::uint32_t raw_buttons() const;
     // Native pixel size of the 16:9 overlay canvas (matches window/internal resolution, capped at 1920x1088).
     [[nodiscard]] std::pair<int, int> overlay_size() const;

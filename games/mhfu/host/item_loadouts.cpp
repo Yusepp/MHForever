@@ -49,7 +49,32 @@ constexpr mhf::overlay::Color kBtnCapBg{0.130f, 0.130f, 0.130f};
 constexpr mhf::overlay::Color kBtnCapBorder{0.580f, 0.575f, 0.545f};
 constexpr mhf::overlay::Color kBtnCircle{0.930f, 0.350f, 0.350f};
 constexpr mhf::overlay::Color kBtnTriangle{0.280f, 0.860f, 0.480f};
+constexpr mhf::overlay::Color kBtnSquare{0.930f, 0.480f, 0.760f};
 constexpr mhf::overlay::Color kBtnCross{0.430f, 0.670f, 0.960f};
+constexpr std::size_t kMaxLoadoutNameLen = 16u;
+
+constexpr std::array<std::array<const char *, 3>, 3> kOskPages{{
+    {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ-_/+"},
+    {"abcdefghij", "klmnopqrst", "uvwxyz-_/+"},
+    {"0123456789", "!@#$%&()[]", ".,:;'-_/+?"},
+}};
+constexpr std::array<const char *, 3> kOskPageNames{{"ABC", "abc", "123"}};
+constexpr std::array<const char *, 4> kOskActions{{"Space", "Del", "Clear", "OK"}};
+
+std::string sanitize_loadout_name(std::string raw) {
+    std::string out;
+    out.reserve(std::min(raw.size(), kMaxLoadoutNameLen));
+    for (char ch : raw) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c >= 0x20u && c <= 0x7Eu) {
+            out.push_back(ch);
+            if (out.size() >= kMaxLoadoutNameLen) break;
+        }
+    }
+    while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
 
 bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
     return (address & 3u) == 0u && memory.contains(address, 4u);
@@ -586,16 +611,27 @@ void ItemLoadouts::load_from_disk() {
         while (std::getline(in, line)) {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream iss(line);
+            if (line.rfind("name ", 0) == 0) {
+                std::string tag;
+                std::size_t idx = 0;
+                if (iss >> tag >> idx && idx < kItemLoadoutCount) {
+                    std::string custom;
+                    std::getline(iss >> std::ws, custom);
+                    presets_[idx].name = sanitize_loadout_name(std::move(custom));
+                }
+                continue;
+            }
             std::size_t idx = 0;
             if (!(iss >> idx) || idx >= kItemLoadoutCount) continue;
             ItemLoadoutPreset p;
             p.saved = true;
+            p.name = presets_[idx].name;
             for (std::size_t s = 0; s < kItemPouchSlots; ++s) {
                 std::uint16_t id = 0, count = 0;
                 char colon = 0;
                 if (iss >> id >> colon >> count) p.slots[s] = {id, count};
             }
-            presets_[idx] = p;
+            presets_[idx] = std::move(p);
         }
     }
 
@@ -604,10 +640,21 @@ void ItemLoadouts::load_from_disk() {
         while (std::getline(in, line)) {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream iss(line);
+            if (line.rfind("name ", 0) == 0) {
+                std::string tag;
+                std::size_t idx = 0;
+                if (iss >> tag >> idx && idx < kItemLoadoutCount) {
+                    std::string custom;
+                    std::getline(iss >> std::ws, custom);
+                    armor_presets_[idx].name = sanitize_loadout_name(std::move(custom));
+                }
+                continue;
+            }
             std::size_t idx = 0;
             if (!(iss >> idx) || idx >= kItemLoadoutCount) continue;
             ArmorLoadoutPreset a;
             a.saved = true;
+            a.name = armor_presets_[idx].name;
             for (std::size_t s = 0; s < kEquipSlots; ++s) {
                 std::uint16_t box_idx = kEquipIndexNone;
                 std::string hex;
@@ -617,7 +664,7 @@ void ItemLoadouts::load_from_disk() {
                     a.pieces[s][b] = static_cast<std::uint8_t>(std::stoul(hex.substr(b * 2u, 2u), nullptr, 16));
                 }
             }
-            armor_presets_[idx] = a;
+            armor_presets_[idx] = std::move(a);
         }
     }
 }
@@ -627,6 +674,7 @@ void ItemLoadouts::save_to_disk() const {
     if (std::ofstream out(storage_path_, std::ios::trunc); out) {
         out << "# MHForever item pouch loadouts (slot_index id:count ...)\n";
         for (std::size_t i = 0; i < kItemLoadoutCount; ++i) {
+            if (!presets_[i].name.empty()) out << "name " << i << ' ' << presets_[i].name << '\n';
             if (!presets_[i].saved) continue;
             out << i;
             for (const ItemSlot &s : presets_[i].slots) out << ' ' << s.id << ':' << s.count;
@@ -636,6 +684,7 @@ void ItemLoadouts::save_to_disk() const {
     if (std::ofstream out(armor_storage_path(), std::ios::trunc); out) {
         out << "# MHForever armor loadouts (slot_index box_idx hex12 ...)\n";
         for (std::size_t i = 0; i < kItemLoadoutCount; ++i) {
+            if (!armor_presets_[i].name.empty()) out << "name " << i << ' ' << armor_presets_[i].name << '\n';
             if (!armor_presets_[i].saved) continue;
             out << i;
             for (std::size_t s = 0; s < kEquipSlots; ++s) {
@@ -679,12 +728,22 @@ LoadoutResult ItemLoadouts::save_preset(const psprecomp::GuestMemory &memory, st
     const std::uint32_t gs = valid_game_sys(memory, symbols_);
     ItemLoadoutPreset p;
     p.saved = true;
+    p.name = presets_[index].name;
     for (std::size_t s = 0; s < kItemPouchSlots; ++s) {
         p.slots[s] = read_slot(memory, gs + kGameSysPouchBase, s);
     }
-    presets_[index] = p;
+    presets_[index] = std::move(p);
     save_to_disk();
-    return {true, "Saved Item Set " + std::to_string(index + 1)};
+    const std::string label = presets_[index].name.empty() ? ("Item Set " + std::to_string(index + 1)) : presets_[index].name;
+    return {true, "Saved " + label};
+}
+
+LoadoutResult ItemLoadouts::rename_preset(std::size_t index, std::string name) {
+    if (index >= kItemLoadoutCount) return {false, "Invalid loadout slot."};
+    presets_[index].name = sanitize_loadout_name(std::move(name));
+    save_to_disk();
+    return {true, presets_[index].name.empty() ? ("Reset Item Set " + std::to_string(index + 1) + " name")
+                                               : ("Renamed to " + presets_[index].name)};
 }
 
 LoadoutResult ItemLoadouts::apply_preset(psprecomp::GuestMemory &memory, std::size_t index) const {
@@ -765,13 +824,23 @@ LoadoutResult ItemLoadouts::save_armor_preset(const psprecomp::GuestMemory &memo
     const std::uint32_t gs = valid_game_sys(memory, symbols_);
     ArmorLoadoutPreset a;
     a.saved = true;
+    a.name = armor_presets_[index].name;
     for (std::size_t s = 0; s < kEquipSlots; ++s) {
         a.pieces[s] = read_piece(memory, gs + kGameSysEquippedBase + static_cast<std::uint32_t>(s) * kEquipPieceSize);
         a.box_indices[s] = memory.load16(gs + kGameSysEquipIdxBase + static_cast<std::uint32_t>(s) * 2u);
     }
-    armor_presets_[index] = a;
+    armor_presets_[index] = std::move(a);
     save_to_disk();
-    return {true, "Saved Armor Set " + std::to_string(index + 1)};
+    const std::string label = armor_presets_[index].name.empty() ? ("Armor Set " + std::to_string(index + 1)) : armor_presets_[index].name;
+    return {true, "Saved " + label};
+}
+
+LoadoutResult ItemLoadouts::rename_armor_preset(std::size_t index, std::string name) {
+    if (index >= kItemLoadoutCount) return {false, "Invalid armor set slot."};
+    armor_presets_[index].name = sanitize_loadout_name(std::move(name));
+    save_to_disk();
+    return {true, armor_presets_[index].name.empty() ? ("Reset Armor Set " + std::to_string(index + 1) + " name")
+                                                     : ("Renamed to " + armor_presets_[index].name)};
 }
 
 LoadoutResult ItemLoadouts::apply_armor_preset(psprecomp::GuestMemory &memory, std::size_t index) const {
@@ -861,6 +930,7 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
     if (!enabled || !box_open(now_us) || !can_use_loadouts(memory)) {
         box_active_ = false;
         panel_open_ = false;
+        renaming_ = false;
         release_guard_ = false;
         select_holding_ = false;
         sort_pulse_active_ = false;
@@ -870,6 +940,7 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
     box_active_ = true;
 
     if (!panel_open_) {
+        renaming_ = false;
         if ((buttons & kSelect) != 0u) {
             if (!select_holding_ && !release_guard_) {
                 select_holding_ = true;
@@ -894,6 +965,56 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
     sort_pulse_active_ = false;
     sort_pulse_until_us_ = 0u;
 
+    if (renaming_) {
+        if ((pressed & kLTrigger) != 0u) {
+            osk_page_ = (osk_page_ + 2) % 3;
+        } else if ((pressed & kRTrigger) != 0u) {
+            osk_page_ = (osk_page_ + 1) % 3;
+        } else if ((pressed & kUp) != 0u) {
+            osk_row_ = (osk_row_ + 3) % 4;
+            if (osk_row_ == 3) osk_col_ = std::min(osk_col_ * 4 / 10, 3);
+        } else if ((pressed & kDown) != 0u) {
+            const int prev_row = osk_row_;
+            osk_row_ = (osk_row_ + 1) % 4;
+            if (osk_row_ == 3) osk_col_ = std::min(osk_col_ * 4 / 10, 3);
+            else if (prev_row == 3) osk_col_ = std::min(osk_col_ * 10 / 4, 9);
+        } else if ((pressed & kLeft) != 0u) {
+            const int cols = osk_row_ == 3 ? 4 : 10;
+            osk_col_ = (osk_col_ + cols - 1) % cols;
+        } else if ((pressed & kRight) != 0u) {
+            const int cols = osk_row_ == 3 ? 4 : 10;
+            osk_col_ = (osk_col_ + 1) % cols;
+        } else if ((pressed & kSquare) != 0u) {
+            if (!rename_buf_.empty()) rename_buf_.pop_back();
+        } else if ((pressed & kStart) != 0u) {
+            const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
+            toast_ = res.message;
+            toast_ok_ = res.ok;
+            toast_until_us_ = now_us + 2'200'000u;
+            renaming_ = false;
+        } else if ((pressed & (kCross | kSelect)) != 0u) {
+            renaming_ = false;
+        } else if ((pressed & kCircle) != 0u) {
+            if (osk_row_ < 3) {
+                if (rename_buf_.size() < kMaxLoadoutNameLen) {
+                    rename_buf_.push_back(kOskPages[static_cast<std::size_t>(osk_page_)][static_cast<std::size_t>(osk_row_)][osk_col_]);
+                }
+            } else {
+                if (osk_col_ == 0 && rename_buf_.size() < kMaxLoadoutNameLen) rename_buf_.push_back(' ');
+                else if (osk_col_ == 1 && !rename_buf_.empty()) rename_buf_.pop_back();
+                else if (osk_col_ == 2) rename_buf_.clear();
+                else if (osk_col_ == 3) {
+                    const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
+                    toast_ = res.message;
+                    toast_ok_ = res.ok;
+                    toast_until_us_ = now_us + 2'200'000u;
+                    renaming_ = false;
+                }
+            }
+        }
+        return;
+    }
+
     if ((pressed & (kLTrigger | kRTrigger | kLeft | kRight)) != 0u) {
         tab_ = tab_ == Tab::Items ? Tab::Armor : Tab::Items;
     } else if ((pressed & kUp) != 0u) {
@@ -910,10 +1031,43 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
         toast_ = res.message;
         toast_ok_ = res.ok;
         toast_until_us_ = now_us + 2'200'000u;
+    } else if ((pressed & kSquare) != 0u) {
+        renaming_ = true;
+        rename_buf_ = tab_ == Tab::Items ? presets_[selected_].name : armor_presets_[selected_].name;
+        osk_row_ = 0;
+        osk_col_ = 0;
+        osk_page_ = 0;
     } else if ((pressed & (kCross | kSelect | kStart)) != 0u) {
         panel_open_ = false;
         release_guard_ = true;
     }
+}
+
+void ItemLoadouts::handle_text_input(std::string_view text) {
+    if (!renaming_) return;
+    for (char ch : text) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c >= 0x20u && c <= 0x7Eu && rename_buf_.size() < kMaxLoadoutNameLen) {
+            rename_buf_.push_back(ch);
+        }
+    }
+}
+
+void ItemLoadouts::handle_text_backspace() {
+    if (renaming_ && !rename_buf_.empty()) rename_buf_.pop_back();
+}
+
+void ItemLoadouts::handle_text_confirm(std::uint64_t now_us) {
+    if (!renaming_) return;
+    const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
+    toast_ = res.message;
+    toast_ok_ = res.ok;
+    toast_until_us_ = now_us + 2'200'000u;
+    renaming_ = false;
+}
+
+void ItemLoadouts::handle_text_cancel() {
+    renaming_ = false;
 }
 
 bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp::GuestMemory &memory,
@@ -1016,8 +1170,10 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
             painter.image(l_in_x + 12.5f, ry + 4.0f, 12.0f, list_icon->pixels->data(), list_icon->size, sel ? 1.0f : 0.85f);
             text_x = l_in_x + 27.0f;
         }
-        const std::string name = (on_items ? "Item Set " : "Armor Set ") + std::to_string(i + 1);
-        painter.text(text_x, ry + 13.2f, name, 8.0f, sel ? kMhWhite : kMhWhite, sel ? 1.0f : 0.88f, sel);
+        const std::string &custom = on_items ? presets_[i].name : armor_presets_[i].name;
+        const std::string fallback = (on_items ? "Item Set " : "Armor Set ") + std::to_string(i + 1);
+        const std::string name = fit_text(painter, custom.empty() ? fallback : custom, 8.0f, l_in_w - (text_x - l_in_x) - 28.0f);
+        painter.text(text_x, ry + 13.2f, name, 8.0f, kMhWhite, sel ? 1.0f : 0.88f, sel);
 
         const bool saved = on_items ? presets_[i].saved : armor_presets_[i].saved;
         const std::string detail = !saved ? "---"
@@ -1040,11 +1196,79 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
         painter.text(l_in_x + 2.0f, win_y + win_h - 14.0f, "Box Controls Locked", 6.8f, kMhHeaderYellow, 0.85f, false);
     }
 
-    // --- Right Window: Native MHFU Pouch Grid or Equipment Inspector ---
+    // --- Right Window: Native MHFU Rename Keyboard, Pouch Grid, or Equipment Inspector ---
     const float r_in_x = rx + 8.0f;
     const float r_in_w = rw - 16.0f;
 
-    if (on_items) {
+    if (renaming_) {
+        const std::string target_lbl = (on_items ? "Item Set " : "Armor Set ") + std::to_string(selected_ + 1);
+        painter.text(r_in_x, win_y + 16.5f, "[Rename " + target_lbl + "]", 8.6f, kMhHeaderYellow, 0.98f, false);
+        const std::string pg = kOskPageNames[static_cast<std::size_t>(osk_page_)];
+        const float pg_w = painter.font_ok() ? painter.measure(pg, 7.4f, false) : 18.0f;
+        const float pg_cx = rx + rw - 30.0f;
+        painter.text(pg_cx - pg_w * 0.5f - 11.0f, win_y + 16.2f, "<<", 7.4f, kMhArrowGreen, 0.96f, true);
+        painter.text(pg_cx - pg_w * 0.5f, win_y + 16.2f, pg, 7.4f, kMhWhite, 0.96f, false);
+        painter.text(pg_cx + pg_w * 0.5f + 3.0f, win_y + 16.2f, ">>", 7.4f, kMhArrowGreen, 0.96f, true);
+        painter.rect(r_in_x, win_y + 22.0f, r_in_w, 1.3f, kMhRuleGreen, 0.92f);
+
+        // Text input box with blinking caret
+        const float in_y = win_y + 30.0f;
+        const float in_h = 24.0f;
+        painter.rect(r_in_x, in_y, r_in_w, in_h, kMhCellBg, 0.94f);
+        painter.rect(r_in_x, in_y, r_in_w, 1.0f, kMhBrassLight, 0.92f);
+        painter.rect(r_in_x, in_y + in_h - 1.0f, r_in_w, 1.0f, kMhBrassLight, 0.92f);
+        painter.rect(r_in_x, in_y, 1.0f, in_h, kMhBrassLight, 0.92f);
+        painter.rect(r_in_x + r_in_w - 1.0f, in_y, 1.0f, in_h, kMhBrassLight, 0.92f);
+        const bool blink = ((now_us / 400'000u) % 2u) == 0u;
+        const std::string shown = rename_buf_ + (blink && rename_buf_.size() < kMaxLoadoutNameLen ? "_" : "");
+        painter.text(r_in_x + 8.0f, in_y + 15.8f, shown.empty() ? "Type name or use pad..." : shown, 9.2f,
+                     rename_buf_.empty() ? kMhDimText : kMhWhite, 0.98f, false);
+        const std::string len_s = std::to_string(rename_buf_.size()) + "/" + std::to_string(kMaxLoadoutNameLen);
+        const float lw_s = painter.font_ok() ? painter.measure(len_s, 7.0f, false) : 22.0f;
+        painter.text(r_in_x + r_in_w - 6.0f - lw_s, in_y + 15.2f, len_s, 7.0f, kMhHeaderYellow, 0.92f, false);
+
+        // 3 x 10 character grid
+        const float grid_y = win_y + 64.0f;
+        const float gap = 3.0f;
+        const float kw = (r_in_w - gap * 9.0f) / 10.0f;
+        const float kh = 28.0f;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 10; ++c) {
+                const float kx = r_in_x + static_cast<float>(c) * (kw + gap);
+                const float ky = grid_y + static_cast<float>(r) * (kh + gap);
+                const bool sel = (osk_row_ == r && osk_col_ == c);
+                painter.rect(kx, ky, kw, kh, sel ? kMhSelectGreen : kMhCellBg, sel ? 0.92f : 0.86f);
+                const mhf::overlay::Color bd = sel ? kMhWhite : kMhBrassDark;
+                painter.rect(kx, ky, kw, 0.85f, bd, 0.92f);
+                painter.rect(kx, ky + kh - 0.85f, kw, 0.85f, bd, 0.92f);
+                painter.rect(kx, ky, 0.85f, kh, bd, 0.92f);
+                painter.rect(kx + kw - 0.85f, ky, 0.85f, kh, bd, 0.92f);
+                const std::string ch(1u, kOskPages[static_cast<std::size_t>(osk_page_)][static_cast<std::size_t>(r)][c]);
+                const float cw = painter.font_ok() ? painter.measure(ch, 9.5f, sel) : 6.0f;
+                painter.text(kx + (kw - cw) * 0.5f, ky + 18.2f, ch, 9.5f, kMhWhite, 0.98f, sel);
+            }
+        }
+
+        // Action row: Space, Del, Clear, OK
+        const float act_y = grid_y + 3.0f * (kh + gap) + 6.0f;
+        const float aw = (r_in_w - gap * 3.0f) / 4.0f;
+        const float ah = 24.0f;
+        for (int c = 0; c < 4; ++c) {
+            const float ax = r_in_x + static_cast<float>(c) * (aw + gap);
+            const bool sel = (osk_row_ == 3 && osk_col_ == c);
+            painter.rect(ax, act_y, aw, ah, sel ? kMhSelectGreen : kMhCellBg, sel ? 0.94f : 0.88f);
+            const mhf::overlay::Color bd = sel ? kMhWhite : (c == 3 ? kMhRuleGreen : kMhBrassDark);
+            painter.rect(ax, act_y, aw, 0.9f, bd, 0.95f);
+            painter.rect(ax, act_y + ah - 0.9f, aw, 0.9f, bd, 0.95f);
+            painter.rect(ax, act_y, 0.9f, ah, bd, 0.95f);
+            painter.rect(ax + aw - 0.9f, act_y, 0.9f, ah, bd, 0.95f);
+            const std::string lbl = kOskActions[static_cast<std::size_t>(c)];
+            const float tw = painter.font_ok() ? painter.measure(lbl, 8.0f, sel) : 24.0f;
+            painter.text(ax + (aw - tw) * 0.5f, act_y + 15.2f, lbl, 8.0f,
+                         c == 3 ? kMhHeaderYellow : kMhWhite, 0.98f, sel || c == 3);
+        }
+        painter.text(r_in_x + 2.0f, win_y + win_h - 14.0f, "Physical keyboard typing is also supported.", 6.8f, kMhDimText, 0.92f, false);
+    } else if (on_items) {
         const bool saved = presets_[selected_].saved;
         std::array<ItemSlot, kItemPouchSlots> view_slots{};
         if (saved) {
@@ -1058,7 +1282,9 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
         for (const auto &s : view_slots) {
             if (s.id != 0u && s.count > 0u) ++used;
         }
-        const std::string hdr = saved ? ("[Item Set " + std::to_string(selected_ + 1) + "]")
+        const std::string set_title = presets_[selected_].name.empty()
+            ? ("Item Set " + std::to_string(selected_ + 1)) : presets_[selected_].name;
+        const std::string hdr = saved ? ("[" + set_title + "]")
                                       : "[Current Pouch — Press △ to Save]";
         painter.text(r_in_x, win_y + 16.5f, hdr, 8.6f, kMhHeaderYellow, 0.98f, false);
         const std::string cnt = std::to_string(used) + " / 24";
@@ -1123,7 +1349,9 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
                 view_armor.box_indices[s] = memory.load16(gs + kGameSysEquipIdxBase + static_cast<std::uint32_t>(s) * 2u);
             }
         }
-        const std::string hdr = saved ? ("[Armor Set " + std::to_string(selected_ + 1) + "]")
+        const std::string set_title = armor_presets_[selected_].name.empty()
+            ? ("Armor Set " + std::to_string(selected_ + 1)) : armor_presets_[selected_].name;
+        const std::string hdr = saved ? ("[" + set_title + "]")
                                       : "[Current Equipment — Press △ to Save]";
         painter.text(r_in_x, win_y + 16.5f, hdr, 8.6f, kMhHeaderYellow, 0.98f, false);
         painter.rect(r_in_x, win_y + 22.0f, r_in_w, 1.3f, kMhRuleGreen, 0.92f);
@@ -1213,13 +1441,22 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
     float fx = lx + 8.0f;
     auto add_hint = [&](const std::string &btn, float bw, mhf::overlay::Color fg, bool round_badge, const std::string &act) {
         draw_ps_button(painter, fx, fy + 2.3f, bw, 10.4f, btn, fg, round_badge);
-        fx += bw + 4.0f;
-        fx += painter.text(fx, fy + 10.2f, act, 7.5f, kMhWhite, 0.96f, false) + 12.0f;
+        fx += bw + 3.5f;
+        fx += painter.text(fx, fy + 10.2f, act, 7.2f, kMhWhite, 0.96f, false) + 9.5f;
     };
-    add_hint("O", 11.0f, kBtnCircle, true, on_items ? "Load Item Set" : "Equip Armor Set");
-    add_hint("△", 11.0f, kBtnTriangle, true, "Save Current");
-    add_hint("L1/R1", 23.0f, kMhWhite, false, "Switch Tab");
-    add_hint("X", 11.0f, kBtnCross, true, "Close");
+    if (renaming_) {
+        add_hint("O", 11.0f, kBtnCircle, true, "Insert");
+        add_hint("□", 11.0f, kBtnSquare, true, "Backspace");
+        add_hint("L1/R1", 23.0f, kMhWhite, false, "Case");
+        add_hint("START", 24.0f, kMhWhite, false, "Confirm");
+        add_hint("X", 11.0f, kBtnCross, true, "Cancel");
+    } else {
+        add_hint("O", 11.0f, kBtnCircle, true, on_items ? "Load Set" : "Equip Set");
+        add_hint("△", 11.0f, kBtnTriangle, true, "Save");
+        add_hint("□", 11.0f, kBtnSquare, true, "Rename");
+        add_hint("L1/R1", 23.0f, kMhWhite, false, "Tab");
+        add_hint("X", 11.0f, kBtnCross, true, "Close");
+    }
     return true;
 }
 

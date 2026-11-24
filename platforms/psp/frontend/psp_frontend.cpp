@@ -208,6 +208,9 @@ struct Frontend::Impl {
     std::atomic<bool> game_input_suppressed{false};
     std::atomic<std::uint32_t> game_button_clear{0};
     std::atomic<std::uint32_t> game_button_force{0};
+    std::atomic<bool> game_text_input{false};
+    std::mutex game_key_mutex;
+    std::vector<Frontend::GameTextEvent> game_key_events;
     std::atomic<std::uint32_t> raw_buttons{0};
     using OverlayOwner = mhf::psp::OverlayOwner;
     std::atomic<OverlayOwner> overlay_owner{OverlayOwner::none};
@@ -567,6 +570,19 @@ void Frontend::set_game_button_overrides(std::uint32_t clear_mask, std::uint32_t
     impl_->game_button_force.store(force_mask, std::memory_order_relaxed);
 }
 
+void Frontend::set_game_text_input(bool active) {
+    const bool prev = impl_->game_text_input.exchange(active, std::memory_order_relaxed);
+    if (!active && prev) {
+        std::lock_guard lock(impl_->game_key_mutex);
+        impl_->game_key_events.clear();
+    }
+}
+
+std::vector<Frontend::GameTextEvent> Frontend::take_game_key_events() {
+    std::lock_guard lock(impl_->game_key_mutex);
+    return std::exchange(impl_->game_key_events, {});
+}
+
 std::uint32_t Frontend::raw_buttons() const {
     return impl_->raw_buttons.load(std::memory_order_relaxed);
 }
@@ -834,9 +850,19 @@ void show_songs(Frontend::Impl &impl, Runtime &rt) {
 // Keys, text and the redraw of the system dialogs (mhf/psp/dialog.hpp).
 void update_dialogs(Frontend::Impl &impl, Runtime &rt) {
     const bool open = current_dialog(rt).kind != DialogView::Kind::None;
+    const bool game_typing = !open && impl.game_text_input.load(std::memory_order_relaxed);
     for (const auto &k : impl.host.take_key_events()) {
         using K = host::KeyEvent::Kind;
         if (!open) {
+            if (game_typing) {
+                std::lock_guard lock(impl.game_key_mutex);
+                using G = Frontend::GameTextEvent::Kind;
+                if (k.kind == K::Text) impl.game_key_events.push_back({G::Text, k.text});
+                else if (k.kind == K::Backspace) impl.game_key_events.push_back({G::Backspace, {}});
+                else if (k.kind == K::Enter) impl.game_key_events.push_back({G::Enter, {}});
+                else if (k.kind == K::Escape) impl.game_key_events.push_back({G::Escape, {}});
+                continue;
+            }
             if (k.kind == K::Escape) impl.menu_requested = true;
             continue;
         }
@@ -853,7 +879,7 @@ void update_dialogs(Frontend::Impl &impl, Runtime &rt) {
         case K::NextTab: break;
         }
     }
-    impl.host.set_text_input(dialog_wants_text(rt));
+    impl.host.set_text_input(dialog_wants_text(rt) || game_typing);
     const DialogView &view = current_dialog(rt);
     if (view.version == impl.dialog_version) return;
     impl.dialog_version = view.version;
