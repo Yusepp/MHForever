@@ -1116,6 +1116,65 @@ int main(int argc, char **argv) {
         CHECK(!fuc::prepare(dir / "no_such_image.iso", dir / "fuc_empty_stick", options).empty());
     }
 
+    // Updater: version comparison (including pre-release vs release) and user-data protection during install.
+    {
+        CHECK(update::newer("v0.15.1", "0.15.0"));
+        CHECK(update::newer("0.15.0", "0.15.0-dev.1"));
+        CHECK(!update::newer("0.15.0-dev.1", "0.15.0"));
+        CHECK(update::newer("0.15.0-dev.10", "0.15.0-dev.2"));
+        CHECK(update::newer("0.15.0", "dev"));
+        CHECK(!update::newer("0.15.0", "0.15.0"));
+
+        const fs::path src = dir / "upd_src", dst = dir / "upd_dst";
+        fs::create_directories(src / "saves");
+        fs::create_directories(dst / "saves");
+        std::ofstream(dst / "mhfu") << "old_bin";
+        std::ofstream(dst / "launcher.json") << R"({"keep":true})";
+        std::ofstream(dst / "saves" / "save.dat") << "player_save";
+        std::ofstream(src / "mhfu") << "new_bin";
+        std::ofstream(src / "launcher.json") << R"({"overwrite":true})";
+        std::ofstream(src / "saves" / "save.dat") << "bad_overwrite";
+        CHECK(update::install(src, dst).empty());
+        auto slurp = [](const fs::path &p) {
+            std::ifstream in(p, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        CHECK(slurp(dst / "mhfu") == "new_bin");
+        CHECK(slurp(dst / "mhfu.old") == "old_bin");
+        CHECK(slurp(dst / "launcher.json") == R"({"keep":true})");
+        CHECK(slurp(dst / "saves" / "save.dat") == "player_save");
+        update::remove_old(dst);
+        CHECK(!fs::exists(dst / "mhfu.old"));
+    }
+
+    // Forward-compatible config migration: loading an older launcher.json keeps every user value, path, save folder,
+    // and identity while filling in newly added feature defaults (including nested key/pad bindings).
+    {
+        const fs::path mig_data = dir / "mig_data";
+        fs::create_directories(mig_data);
+        const std::string seed(64, 'a');
+        std::ofstream(mig_data / "launcher.json")
+            << R"({"identitySeed":")" << seed
+            << R"(","pseudonym":"Veteran","savesFolder":"/custom/saves","settings":{"scale":6,"widescreen":true,"keys":{"south":"KeyZ"}}})";
+        Launcher migrated(dir, mig_data);
+        const Json st = migrated.state();
+        CHECK(st["pseudonym"].as_string() == "Veteran");
+        CHECK(st["savesFolder"].as_string() == "/custom/saves");
+        CHECK(st["settings"]["scale"].as_number() == 6);
+        CHECK(st["settings"]["widescreen"].as_bool() == true);
+        CHECK(st["settings"]["keys"]["south"].as_string() == "KeyZ");
+        // Newly added defaults are populated without clobbering existing user values.
+        CHECK(st["settings"]["checkUpdates"].as_bool() == true);
+        CHECK(st["settings"]["itemPouchLoadouts"].is_bool());
+        CHECK(st["settings"]["skipQuestClearTimer"].is_bool());
+        CHECK(st["settings"]["keys"]["east"].is_string() && !st["settings"]["keys"]["east"].as_string().empty());
+        // And the upgraded config was persisted cleanly to disk.
+        std::ifstream in(mig_data / "launcher.json");
+        const auto on_disk = Json::parse(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        CHECK(on_disk.has_value() && (*on_disk)["identitySeed"].as_string() == seed);
+        CHECK(on_disk.has_value() && (*on_disk)["settings"]["itemPouchLoadouts"].is_bool());
+    }
+
     // The player's copy (requires game data).
     if (const char *iso = std::getenv("MHF_TEST_ISO")) {
         // Identification: a developer executable of the right size is already known, so only the image is checked.

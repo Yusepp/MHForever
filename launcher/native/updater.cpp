@@ -20,17 +20,19 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// "v0.6.3-beta" -> {0, 6, 3}
-std::vector<int> parts(std::string_view version) {
+// "v0.6.3-beta" -> {0, 6, 3}, has_digits = true; "dev" -> {0}, has_digits = false
+std::vector<int> parts(std::string_view version, bool &has_digits) {
     if (!version.empty() && (version.front() == 'v' || version.front() == 'V')) version.remove_prefix(1);
     version = version.substr(0, version.find_first_of("-+ "));
     std::vector<int> out;
     int value = 0;
     bool digits = false;
+    has_digits = false;
     for (const char c : version) {
         if (c >= '0' && c <= '9') {
             value = value * 10 + (c - '0');
             digits = true;
+            has_digits = true;
         } else if (c == '.') {
             out.push_back(digits ? value : 0);
             value = 0;
@@ -43,6 +45,39 @@ std::vector<int> parts(std::string_view version) {
     return out;
 }
 
+// "v0.15.0-dev.2+abc" -> "dev.2"; "v0.15.0" -> ""
+std::string_view prerelease(std::string_view version) {
+    const std::size_t dash = version.find('-');
+    if (dash == std::string_view::npos) return {};
+    version.remove_prefix(dash + 1);
+    return version.substr(0, version.find_first_of("+ "));
+}
+
+int compare_prerelease(std::string_view a, std::string_view b) {
+    while (!a.empty() || !b.empty()) {
+        const std::size_t da = a.find('.');
+        const std::size_t db = b.find('.');
+        const std::string_view pa = a.substr(0, da);
+        const std::string_view pb = b.substr(0, db);
+        a = da == std::string_view::npos ? std::string_view{} : a.substr(da + 1);
+        b = db == std::string_view::npos ? std::string_view{} : b.substr(db + 1);
+        if (pa == pb) continue;
+        if (pa.empty()) return -1;
+        if (pb.empty()) return 1;
+        auto all_digits = [](std::string_view s) {
+            return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+        };
+        if (all_digits(pa) && all_digits(pb)) {
+            const unsigned long long na = std::strtoull(std::string(pa).c_str(), nullptr, 10);
+            const unsigned long long nb = std::strtoull(std::string(pb).c_str(), nullptr, 10);
+            if (na != nb) return na < nb ? -1 : 1;
+        } else {
+            return pa < pb ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
 bool ends_with(std::string_view text, std::string_view end) {
     return text.size() >= end.size() && text.substr(text.size() - end.size()) == end;
 }
@@ -50,6 +85,13 @@ bool ends_with(std::string_view text, std::string_view end) {
 std::string lower(std::string s) {
     for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+bool is_protected_user_path(const fs::path &relative) {
+    auto it = relative.begin();
+    if (it == relative.end()) return false;
+    const std::string top = lower(platform::to_utf8(*it));
+    return top == "launcher.json" || top == "saves" || top == "memstick";
 }
 
 // The system's curl or tar: both ship with Windows 10 and 11 (System32) and with every Linux desktop.
@@ -105,11 +147,19 @@ std::string archive_suffix() {
 }
 
 bool newer(std::string_view candidate, std::string_view current) {
-    std::vector<int> a = parts(candidate), b = parts(current);
+    bool a_digits = false, b_digits = false;
+    std::vector<int> a = parts(candidate, a_digits), b = parts(current, b_digits);
     const std::size_t n = std::max(a.size(), b.size());
     a.resize(n, 0);
     b.resize(n, 0);
-    return a > b;
+    if (a != b) return a > b;
+    if (a_digits && !b_digits) return true;
+    if (!a_digits) return false;
+    const std::string_view pa = prerelease(candidate), pb = prerelease(current);
+    if (pa.empty() && !pb.empty()) return true;  // 0.15.0 > 0.15.0-dev.1
+    if (!pa.empty() && pb.empty()) return false; // 0.15.0-dev.1 < 0.15.0
+    if (!pa.empty() && !pb.empty()) return compare_prerelease(pa, pb) > 0;
+    return false;
 }
 
 std::optional<Release> pick(const Json &release, std::string_view suffix) {
@@ -151,7 +201,9 @@ std::string install(const fs::path &unpacked, const fs::path &install) {
     std::error_code ec;
     std::vector<fs::path> files;
     for (auto it = fs::recursive_directory_iterator(unpacked, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (it->is_regular_file(ec)) files.push_back(fs::relative(it->path(), unpacked, ec));
+        if (!it->is_regular_file(ec)) continue;
+        const fs::path rel = fs::relative(it->path(), unpacked, ec);
+        if (!is_protected_user_path(rel)) files.push_back(rel);
     }
     if (ec) return "Cannot read the unpacked update: " + ec.message();
     if (files.empty()) return "The update archive is empty.";
@@ -210,9 +262,15 @@ std::string download(const std::string &url, const fs::path &to, std::uint64_t e
     if (!curl) return "curl was not found on this system.";
     std::error_code ec;
     fs::remove(to, ec);
-    const std::vector<std::string> args = {"--fail", "--location", "--silent", "--show-error", "--retry", "2",
-                                           "--connect-timeout", "20", "--user-agent", "MHForever-launcher",
-                                           "--output", platform::to_utf8(to), url};
+    std::vector<std::string> args = {"--fail", "--location", "--silent", "--show-error", "--retry", "2",
+                                     "--connect-timeout", "20", "--user-agent", "MHForever-launcher"};
+    if (expected_size == 0) {
+        args.push_back("--max-time");
+        args.push_back("15");
+    }
+    args.push_back("--output");
+    args.push_back(platform::to_utf8(to));
+    args.push_back(url);
     return run(*curl, args, work, [&] {
         if (!progress || expected_size == 0) return;
         std::error_code e;

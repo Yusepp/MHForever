@@ -841,10 +841,57 @@ void Launcher::load() {
         data_["pseudonym"] = "Hunter";
         changed = true;
     }
-    Json settings = default_settings();
-    for (const auto &[k, v] : data_["settings"].as_object()) settings[k] = v;
+    const Json defaults = default_settings();
+    Json settings = defaults;
+    const Json &stored_settings = data_["settings"];
+    auto merge_object_defaults = [&](Json &dst, const Json &def_obj, const Json &src_obj, bool &modified) {
+        if (!def_obj.is_object()) return;
+        if (!dst.is_object()) dst = Json(Json::Object{});
+        for (const auto &[dk, dv] : def_obj.as_object()) {
+            if (!src_obj.is_object() || src_obj.as_object().find(dk) == src_obj.as_object().end()) {
+                dst[dk] = dv;
+                modified = true;
+            } else {
+                dst[dk] = src_obj[dk];
+            }
+        }
+        if (src_obj.is_object()) {
+            for (const auto &[sk, sv] : src_obj.as_object()) {
+                if (dst.as_object().find(sk) == dst.as_object().end()) dst[sk] = sv;
+            }
+        }
+    };
+    if (stored_settings.is_object()) {
+        for (const auto &[dk, dv] : defaults.as_object()) {
+            if (stored_settings.as_object().find(dk) == stored_settings.as_object().end()) changed = true;
+        }
+        for (const auto &[k, v] : stored_settings.as_object()) {
+            if ((k == "keys" || k == "pad") && v.is_object() && defaults[k].is_object()) {
+                Json merged;
+                merge_object_defaults(merged, defaults[k], v, changed);
+                settings[k] = std::move(merged);
+            } else {
+                settings[k] = v;
+            }
+        }
+    } else {
+        changed = true;
+    }
     data_["settings"] = settings;
-    if (!data_["gameSettings"].is_object()) data_["gameSettings"] = Json(Json::Object{});
+    if (!data_["gameSettings"].is_object()) {
+        data_["gameSettings"] = Json(Json::Object{});
+    } else {
+        for (auto &[disc, own] : data_["gameSettings"].object()) {
+            if (!own.is_object()) continue;
+            for (const char *nested : {"keys", "pad"}) {
+                if (own.as_object().find(nested) != own.as_object().end() && own[nested].is_object() && defaults[nested].is_object()) {
+                    Json merged;
+                    merge_object_defaults(merged, defaults[nested], own[nested], changed);
+                    own[nested] = std::move(merged);
+                }
+            }
+        }
+    }
     if (!data_["games"].is_array()) data_["games"] = Json(Json::Array{});
     if (!data_["stats"].is_object()) {
         Json stats;
