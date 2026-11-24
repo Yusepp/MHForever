@@ -100,6 +100,7 @@ export interface Settings {
   texturePack?: string;
   texturePackEnabled?: boolean;
   texturePackSummary?: string;
+  aaMode?: number;
   enhancedLighting?: boolean;
   vkAo?: boolean;
   vkContactShadows?: boolean;

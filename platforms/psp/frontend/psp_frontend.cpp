@@ -532,6 +532,11 @@ void Frontend::set_vulkan_effects_mask(std::uint32_t mask) {
     impl_->vulkan_lighting_known = true;
 }
 
+void Frontend::set_aa_mode(int mode) {
+    impl_->live.aa_mode.store(std::clamp(mode, 0, 3), std::memory_order_relaxed);
+    impl_->vulkan_lighting_known = true;
+}
+
 void Frontend::set_song_spot(overlay::SongSpot spot) { impl_->song_spot = spot; }
 
 void Frontend::offer_songs(bool on, overlay::SongSpot spot) {
@@ -895,7 +900,7 @@ void update_dialogs(Frontend::Impl &impl, Runtime &rt) {
 enum MenuId {
     kResume = 1, kQuit, kQuitYes, kQuitNo, kMusic, kSfx, kScale, kFps, kFullscreen, kSmooth, kTexturePack, kHudSize, kSongPlace, kSongMove, kPadStick, kRestoreKeys, kRestorePad,
     kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen,
-    kVkEnhancedLighting, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
+    kVkEnhancedLighting, kVkAaMode, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
 };
 constexpr int kGameOptionBase = 3000; // the QoL tab's options of the game: kGameOptionBase + an index into Impl::game_options
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
@@ -1314,12 +1319,26 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
     if (impl.backend == GraphicsBackend::Vulkan && impl.gpu_state == 1) {
         const bool lit_on = impl.live.enhanced_lighting.load(std::memory_order_relaxed);
         const std::uint32_t mask = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
+        const int aa_mode = std::clamp(impl.live.aa_mode.load(std::memory_order_relaxed), 0, 3);
+        const bool msaa_ok = impl.live.msaa_4x_supported.load(std::memory_order_relaxed);
+        static constexpr const char *kAaDetails[4] = {
+            "No anti-aliasing (sharpest native pixels).",
+            "Fast post-process edge smoothing applied before the 2D HUD.",
+            "4x hardware multisampling on 3D geometry edges.",
+            "Temporal anti-aliasing with subpixel jitter and reprojection.",
+        };
         overlay::MenuTab vk_tab{"Vulkan", {}, "Changes apply immediately.", lit_on ? "On" : "Off"};
         auto add_toggle = [&](int id, const char *label, const char *detail, bool on) {
             overlay::MenuItem item = menu_item(Kind::Toggle, id, label, on ? 1 : 0);
             item.detail = detail;
             vk_tab.items.push_back(std::move(item));
         };
+        overlay::MenuItem aa_item = menu_item(Kind::Choice, kVkAaMode, "Anti-aliasing", aa_mode);
+        aa_item.options = {"Off", "FXAA", msaa_ok ? "MSAA 4x" : "MSAA 4x (N/A)", "TAA"};
+        aa_item.detail = (aa_mode == 2 && !msaa_ok)
+                             ? "MSAA 4x is not supported on this GPU; falls back to FXAA."
+                             : kAaDetails[aa_mode];
+        vk_tab.items.push_back(std::move(aa_item));
         add_toggle(kVkEnhancedLighting, "Enhanced lighting", "Enables modern Vulkan lighting, shadows, and visual effects.", lit_on);
         if (lit_on) {
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Lighting & shadows"));
@@ -1332,7 +1351,6 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             add_toggle(kVkBloom, "Emissive bloom & shimmer", "Selective glow on fire, lava, and lightning with rising heat haze.", (mask & LiveSettings::kVkEffectBloom) != 0u);
             add_toggle(kVkSoftParticles, "Soft 3D particles", "Depth-softened smoke, snow, fire, and monster breath.", (mask & LiveSettings::kVkEffectSoftParticles) != 0u);
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Post-processing"));
-            add_toggle(kVkFxaa, "Pre-HUD anti-aliasing", "Smooths 3D edges before the 2D HUD is drawn.", (mask & LiveSettings::kVkEffectFxaa) != 0u);
             add_toggle(kVkVignette, "Moody vignette", "Subtle edge framing in caves, swamps, volcanoes, and sieges.", (mask & LiveSettings::kVkEffectVignette) != 0u);
             add_toggle(kVkKillcamDof, "Killcam depth of field", "Peripheral bokeh blur during the monster killcam.", (mask & LiveSettings::kVkEffectKillcamDof) != 0u);
         }
@@ -1384,6 +1402,7 @@ void save_controls(const Frontend::Impl &impl) {
                 "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
             };
             const std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
+            out << "option.aaMode=" << impl.live.aa_mode.load(std::memory_order_relaxed) << "\n";
             out << "option.enhancedLighting=" << (impl.live.enhanced_lighting ? "true" : "false") << "\n";
             for (unsigned bit = 0u; bit < std::size(kVkEffectNames); ++bit) {
                 out << "option." << kVkEffectNames[bit] << "=" << ((m & (1u << bit)) ? "true" : "false") << "\n";
@@ -1773,6 +1792,12 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
             impl.vulkan_lighting_known = true;
             save_controls(impl);
             refresh_menu(impl); // per-effect rows unfold under the master switch
+            break;
+        case kVkAaMode:
+            impl.live.aa_mode.store(std::clamp(e.value, 0, 3), std::memory_order_relaxed);
+            impl.vulkan_lighting_known = true;
+            save_controls(impl);
+            refresh_menu(impl);
             break;
         case kVkAo:
         case kVkContactShadows:

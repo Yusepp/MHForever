@@ -34,6 +34,7 @@ SHADERS = [
     ("kEmissiveFlashCompSpv", "emissive_flash.comp"),
     ("kLightingCompositeCompSpv", "lighting_composite.comp"),
     ("kFxaaPrehudCompSpv", "fxaa_prehud.comp"),
+    ("kTaaResolveCompSpv", "taa_resolve.comp"),
 ]
 
 

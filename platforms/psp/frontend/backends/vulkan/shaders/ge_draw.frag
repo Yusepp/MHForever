@@ -17,6 +17,7 @@ struct DrawParams {
     uint sampler_idx;
     uint tex_func_bits;
     uint alpha_bits;
+    vec4 jitter_and_lod;
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer DrawParamsBuf {
@@ -86,7 +87,7 @@ void main() {
             if ((bits & 16u) != 0u) c.rgb *= 2.0;
         } else if (kSpecTextured != 0u && ((bits & 0x40u) != 0u)) {
             vec4 t = texture(sampler2D(u_textures[p.tex_idx],
-                                       u_samplers[p.sampler_idx]), v_uv);
+                                       u_samplers[p.sampler_idx]), v_uv, p.jitter_and_lod.z);
             uint func = bits & 7u;
             bool rgba = (bits & 8u) != 0u;
             if (func == 0u) { c.rgb *= t.rgb; if (rgba) c.a *= t.a; }

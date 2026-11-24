@@ -642,6 +642,31 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
       </motion.div>
       {(s.graphicsBackend ?? 'opengl') === 'vulkan' && <motion.div className="glass section" {...rise(0.062)}>
         <h3>Vulkan Rendering</h3>
+        <div className="srow">
+          <div className="slabel">
+            <b>Anti-aliasing</b>
+            <span>
+              {(s.aaMode ?? 1) === 0
+                ? 'Off — sharpest native pixels with zero smoothing.'
+                : (s.aaMode ?? 1) === 1
+                ? 'FXAA — fast post-process edge smoothing applied before the 2D HUD.'
+                : (s.aaMode ?? 1) === 2
+                ? 'MSAA 4× — 4× hardware multisampling on 3D geometry edges.'
+                : 'TAA — temporal anti-aliasing with subpixel jitter and reprojection.'}
+            </span>
+          </div>
+          <Segmented
+            label="Anti-aliasing"
+            value={s.aaMode ?? 1}
+            options={[
+              { value: 0, label: 'Off' },
+              { value: 1, label: 'FXAA' },
+              { value: 2, label: 'MSAA 4×' },
+              { value: 3, label: 'TAA' },
+            ]}
+            onSelect={(aaMode) => onChange({ aaMode })}
+          />
+        </div>
         <ToggleRow
           label="Enhanced lighting"
           help="Enables modern Vulkan lighting, shadows, and visual effects. Can also be adjusted live in-game from the Esc menu."
@@ -658,7 +683,6 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
               ['vkVolumetricFog', 'Volumetric fog & shafts', 'Biome height fog, outdoor sun shafts, and cave doorway rays.'],
               ['vkBloom', 'Emissive bloom & shimmer', 'Selective glow on fire, lava, and lightning with rising heat haze.'],
               ['vkSoftParticles', 'Soft 3D particles', 'Depth-softened smoke, snow, fire, and monster breath.'],
-              ['vkFxaa', 'Pre-HUD anti-aliasing', 'Smooths 3D edges before the 2D HUD is drawn.'],
               ['vkVignette', 'Moody vignette', 'Subtle edge framing in caves, swamps, volcanoes, and sieges.'],
               ['vkKillcamDof', 'Killcam depth of field', 'Peripheral bokeh blur during the monster killcam.'],
             ] as const).map(([key, label, help]) => (

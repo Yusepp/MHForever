@@ -243,6 +243,14 @@ bool Context::init(SDL_Window *win) {
             caps.device_name = props.deviceName;
             caps.vendor_id = props.vendorID;
             caps.device_id = props.deviceID;
+            VkPhysicalDeviceDepthStencilResolveProperties ds_resolve{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES, nullptr};
+            VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ds_resolve};
+            vkGetPhysicalDeviceProperties2(pd, &props2);
+            const bool color_4x = (props.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) != 0;
+            const bool depth_4x = (props.limits.framebufferDepthSampleCounts & VK_SAMPLE_COUNT_4_BIT) != 0;
+            const bool depth_resolve = (ds_resolve.supportedDepthResolveModes & VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) != 0;
+            caps.msaa_4x = color_4x && depth_4x && depth_resolve;
         }
     }
 
@@ -431,13 +439,14 @@ bool Context::init(SDL_Window *win) {
     vkCreatePipelineCache(device, &pcci, nullptr, &pipeline_cache);
 
     std::fprintf(stderr,
-                 "[vk] %s (Vulkan %u.%u.%u, EDS3=%s, BC=%s, MemBudget=%s, DedicatedTransfer=%s, AsyncCompute=%s, "
+                 "[vk] %s (Vulkan %u.%u.%u, EDS3=%s, BC=%s, MSAA4x=%s, MemBudget=%s, DedicatedTransfer=%s, AsyncCompute=%s, "
                  "FifoLatestReady=%s, PresentWait=%s)\n",
                  caps.device_name.c_str(),
                  VK_API_VERSION_MAJOR(caps.api_version), VK_API_VERSION_MINOR(caps.api_version),
                  VK_API_VERSION_PATCH(caps.api_version),
                  caps.extended_dynamic_state3 ? "yes" : "no",
                  caps.bc_compression ? "yes" : "no",
+                 caps.msaa_4x ? "yes" : "no",
                  caps.memory_budget ? "yes" : "no",
                  families.has_dedicated_transfer() ? "yes" : "no",
                  families.has_dedicated_compute() ? "yes" : "no",

@@ -1125,6 +1125,7 @@ int main(int argc, char **argv) {
     // monsters casting, --shadow-quality 0..2 (low by default), --shadow-darkness 0..100 (50: as each zone was tuned).
     bool projected_shadows = false, whole_map_shadows = true, enhanced_lighting = false;
     std::uint32_t vulkan_effects_mask = 0x3FFu;
+    int aa_mode = 1; // 0=Off, 1=FXAA, 2=MSAA 4x, 3=TAA
     int shadow_quality = 0, shadow_darkness = 50;
     bool true_weapon_values = false; // --true-weapon-values: menus show attack and element without display multipliers
     bool fast_supply_box = false; // --fast-supply-box: the supply box takes the next button soon after a take-out
@@ -1175,6 +1176,8 @@ int main(int argc, char **argv) {
         else if (a == "--no-enhanced-lighting") enhanced_lighting = false;
         else if (a == "--vulkan-effects-mask" && i + 1 < argc)
             vulkan_effects_mask = static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0)) & 0x3FFu;
+        else if (a == "--aa-mode" && i + 1 < argc)
+            aa_mode = std::clamp(std::stoi(argv[++i]), 0, 3);
         else if (a == "--no-whole-map-shadows") whole_map_shadows = false;
         else if (a == "--shadow-quality" && i + 1 < argc) shadow_quality = std::clamp(std::stoi(argv[++i]), 0, 2);
         else if (a == "--shadow-darkness" && i + 1 < argc) shadow_darkness = std::clamp(std::stoi(argv[++i]), 0, 100);
@@ -1519,6 +1522,7 @@ int main(int argc, char **argv) {
                                  shadow_darkness);
             frontend.set_enhanced_lighting(enhanced_lighting);
             frontend.set_vulkan_effects_mask(vulkan_effects_mask);
+            frontend.set_aa_mode(aa_mode);
             // The horn's songs over the quest HUD, read from the game a few times a second (horn_songs.hpp). The
             // in-game menu turns them on and off, so they are read even while off.
             g_gathering.input_blocked = [&frontend] { return frontend.game_input_blocked(); };

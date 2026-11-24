@@ -76,7 +76,8 @@ struct VkImageResource {
     std::uint32_t bindless_slot = 0;
 
     bool create(const vk::Context &ctx, vk::BindlessDescriptors *desc, std::uint32_t w, std::uint32_t h,
-                VkFormat fmt, VkImageUsageFlags usage, VkImageAspectFlags asp, std::uint32_t mips = 1) {
+                VkFormat fmt, VkImageUsageFlags usage, VkImageAspectFlags asp, std::uint32_t mips = 1,
+                VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT) {
         width = w;
         height = h;
         format = fmt;
@@ -91,7 +92,7 @@ struct VkImageResource {
         ici.extent = {w, h, 1};
         ici.mipLevels = mips;
         ici.arrayLayers = 1;
-        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.samples = samples;
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
         ici.usage = usage;
 
@@ -217,9 +218,30 @@ private:
 
     void ensure_recording();
     void end_render_pass();
-    void begin_target_pass(RenderTarget &rt);
+    void begin_target_pass(RenderTarget &rt, bool use_msaa = false);
     void transition_resource(VkImageResource &res, VkImageLayout new_layout,
                              VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access);
+    [[nodiscard]] int effective_aa_mode() const noexcept {
+        int m = live_->aa_mode.load(std::memory_order_relaxed);
+        if (m == LiveSettings::kAaMsaa4x && !ctx_.caps.msaa_4x) m = LiveSettings::kAaFxaa;
+        return std::clamp(m, static_cast<int>(LiveSettings::kAaOff), static_cast<int>(LiveSettings::kAaTaa));
+    }
+    bool ensure_msaa_targets(std::uint32_t pw, std::uint32_t ph);
+    static void get_taa_jitter(std::uint64_t idx, float &jx, float &jy) noexcept {
+        static constexpr float kHalton23[8][2] = {
+            { 0.000000f, -0.166667f},
+            {-0.250000f,  0.166667f},
+            { 0.250000f, -0.388889f},
+            {-0.375000f, -0.055556f},
+            { 0.125000f,  0.277778f},
+            {-0.125000f, -0.277778f},
+            { 0.375000f,  0.055556f},
+            {-0.437500f,  0.388889f},
+        };
+        const std::size_t s = static_cast<std::size_t>(idx & 7u);
+        jx = kHalton23[s][0];
+        jy = kHalton23[s][1];
+    }
 
     RenderTarget &ensure_target(std::uint32_t address, std::uint32_t stride, std::uint32_t format, std::uint32_t min_h);
     void apply_state(const gpu::Ge &ge);
@@ -233,7 +255,9 @@ private:
     void apply_live_fps();
     void prepare_interp_draws();
     void render_interpolated_subframe(float phase);
-    void apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in);
+    void apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in,
+                       const float *taa_prev_from_curr = nullptr, bool taa_valid_reproj = false,
+                       bool taa_reset = false, const float *curr_jitter_uv = nullptr);
     void snapshot_soft_depth(RenderTarget &rt);
     [[nodiscard]] bool want_vk_effect(std::uint32_t bit) const noexcept {
         return live_->enhanced_lighting.load(std::memory_order_relaxed) &&
@@ -270,8 +294,9 @@ private:
     PassStateCache main_pass_state_{};
 
     [[nodiscard]] bool bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w,
-                                          std::uint32_t rt_h, bool is_soft_particle, VkDeviceAddress &out_params_addr,
-                                          PassStateCache &cache);
+                                          std::uint32_t rt_h, bool is_soft_particle, bool msaa_4x,
+                                          float jitter_ndc_x, float jitter_ndc_y, float mip_lod_bias,
+                                          VkDeviceAddress &out_params_addr, PassStateCache &cache);
     void reset_interp_state() noexcept {
         interp_active_ = false;
         interp_can_blend_ = false;
@@ -391,8 +416,21 @@ private:
     VkImageResource cpu_display_tex_;
     VkImageResource copy_tex_;
     VkImageResource soft_depth_copy_;
+    VkImageResource msaa_color_;
+    VkImageResource msaa_depth_;
     VkImageResource overlay_tex_;
     bool main_depth_snapped_ = false;
+    bool active_pass_msaa_ = false;
+    bool main_msaa_started_ = false;
+    bool main_3d_finished_ = false;
+    std::uint64_t taa_sample_idx_ = 0;
+    float taa_prev_phase_ = 0.0f;
+    bool taa_have_prev_ = false;
+    float taa_prev_jitter_uv_[2]{0.0f, 0.0f};
+    float main_taa_jitter_uv_[2]{0.0f, 0.0f};
+    float main_taa_jitter_ndc_[2]{0.0f, 0.0f};
+    bool main_taa_jitter_set_ = false;
+    int last_aa_mode_ = -1;
     std::uint64_t overlay_gen_ = 0;
     std::uint64_t overlay_shown_at_ms_ = 0;
     bool overlay_visible_ = false;
@@ -561,6 +599,7 @@ bool VkBackend::init() {
         prof_.window_start = std::chrono::steady_clock::now();
     }
     if (!ctx_.init(window_)) return false;
+    live_->msaa_4x_supported.store(ctx_.caps.msaa_4x, std::memory_order_relaxed);
 
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(window_, &pw, &ph);
@@ -620,6 +659,8 @@ void VkBackend::shutdown() {
     cpu_display_tex_.destroy_immediate(ctx_, &descriptors_);
     copy_tex_.destroy_immediate(ctx_, &descriptors_);
     soft_depth_copy_.destroy_immediate(ctx_, &descriptors_);
+    msaa_color_.destroy_immediate(ctx_, nullptr);
+    msaa_depth_.destroy_immediate(ctx_, nullptr);
     overlay_tex_.destroy_immediate(ctx_, &descriptors_);
     blur_a_.destroy_immediate(ctx_, &descriptors_);
     blur_b_.destroy_immediate(ctx_, &descriptors_);
@@ -732,7 +773,24 @@ void VkBackend::end_render_pass() {
     if (!in_render_pass_) return;
     vkCmdEndRendering(frames_[frame_slot_].cmd);
     in_render_pass_ = false;
+    active_pass_msaa_ = false;
     active_target_addr_ = UINT32_MAX;
+}
+
+bool VkBackend::ensure_msaa_targets(std::uint32_t pw, std::uint32_t ph) {
+    if (!ctx_.caps.msaa_4x || pw == 0 || ph == 0) return false;
+    if (msaa_color_.image != VK_NULL_HANDLE && msaa_color_.width == pw && msaa_color_.height == ph &&
+        msaa_depth_.image != VK_NULL_HANDLE && msaa_depth_.width == pw && msaa_depth_.height == ph) {
+        return true;
+    }
+    retire_image(msaa_color_);
+    retire_image(msaa_depth_);
+    return msaa_color_.create(ctx_, nullptr, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                              VK_SAMPLE_COUNT_4_BIT) &&
+           msaa_depth_.create(ctx_, nullptr, pw, ph, VK_FORMAT_D32_SFLOAT,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, 1,
+                              VK_SAMPLE_COUNT_4_BIT);
 }
 
 void VkBackend::transition_resource(VkImageResource &res, VkImageLayout new_layout,
@@ -801,9 +859,12 @@ RenderTarget &VkBackend::ensure_target(std::uint32_t address, std::uint32_t stri
     return rt;
 }
 
-void VkBackend::begin_target_pass(RenderTarget &rt) {
+void VkBackend::begin_target_pass(RenderTarget &rt, bool use_msaa) {
     ensure_recording();
-    if (in_render_pass_ && active_target_addr_ == rt.address) return;
+    if (use_msaa && !ensure_msaa_targets(rt.color.width, rt.color.height)) {
+        use_msaa = false;
+    }
+    if (in_render_pass_ && active_target_addr_ == rt.address && active_pass_msaa_ == use_msaa) return;
     end_render_pass();
 
     const bool first_use_color = (rt.color.layout == VK_IMAGE_LAYOUT_UNDEFINED);
@@ -817,19 +878,40 @@ void VkBackend::begin_target_pass(RenderTarget &rt) {
 
     VkRenderingAttachmentInfo color_att{};
     color_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_att.imageView = rt.color.view;
     color_att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color_att.loadOp = first_use_color ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color_att.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 
     VkRenderingAttachmentInfo depth_att{};
     depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    depth_att.imageView = rt.depth.view;
     depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depth_att.loadOp = first_use_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     depth_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depth_att.clearValue.depthStencil = {1.0f, 0u};
+
+    if (use_msaa) {
+        transition_resource(msaa_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        transition_resource(msaa_depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        color_att.imageView = msaa_color_.view;
+        color_att.loadOp = main_msaa_started_ ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_att.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        color_att.resolveImageView = rt.color.view;
+        color_att.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        depth_att.imageView = msaa_depth_.view;
+        depth_att.loadOp = main_msaa_started_ ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_att.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+        depth_att.resolveImageView = rt.depth.view;
+        depth_att.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        main_msaa_started_ = true;
+    } else {
+        color_att.imageView = rt.color.view;
+        color_att.loadOp = first_use_color ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth_att.imageView = rt.depth.view;
+        depth_att.loadOp = first_use_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    }
 
     VkRenderingInfo ri{};
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -846,6 +928,7 @@ void VkBackend::begin_target_pass(RenderTarget &rt) {
     VkViewport vp{0.0f, 0.0f, static_cast<float>(rt.color.width), static_cast<float>(rt.color.height), 0.0f, 1.0f};
     vkCmdSetViewport(frames_[frame_slot_].cmd, 0, 1, &vp);
     in_render_pass_ = true;
+    active_pass_msaa_ = use_msaa;
     active_target_addr_ = rt.address;
     rt.last_draw = frame_number_;
 }
@@ -1148,7 +1231,8 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 }
 
 bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w, std::uint32_t rt_h,
-                                   bool is_soft_particle, VkDeviceAddress &out_params_addr, PassStateCache &cache) {
+                                   bool is_soft_particle, bool msaa_4x, float jitter_ndc_x, float jitter_ndc_y,
+                                   float mip_lod_bias, VkDeviceAddress &out_params_addr, PassStateCache &cache) {
     FrameSlice &f = frames_[frame_slot_];
     auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
     if (!pslice.ptr) return false;
@@ -1185,6 +1269,10 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
                        (clear ? 32u : 0u) | (textured ? 64u : 0u) | (fog ? 128u : 0u) | (zrange ? 256u : 0u);
     apply_draw_fx_bits(dp, is_soft_particle, setup.is_killcam, R(kBlendMode));
     dp.alpha_bits = alpha_test ? (R(kAlphaTest) & 0xFFFFFFu) : 1u;
+    dp.jitter_and_lod[0] = jitter_ndc_x;
+    dp.jitter_and_lod[1] = jitter_ndc_y;
+    dp.jitter_and_lod[2] = mip_lod_bias;
+    dp.jitter_and_lod[3] = 0.0f;
     std::memcpy(pslice.ptr, &dp, sizeof(dp));
 
     vk::GePipelineKey pkey{};
@@ -1192,6 +1280,7 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     pkey.spec_textured = textured ? 1u : 0u;
     pkey.spec_alpha_test = alpha_test ? 1u : 0u;
     pkey.spec_zrange = zrange ? 1u : 0u;
+    pkey.msaa_4x = msaa_4x ? 1u : 0u;
 
     VkBool32 blend_en = VK_FALSE;
     VkColorBlendEquationEXT blend_eq{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
@@ -1326,16 +1415,31 @@ void VkBackend::draw_batch() {
     const auto R = [&](std::uint32_t reg) { return key_reg(setup_.key, reg); };
     const bool clear = (R(kClearMode) & 1u) != 0;
 
+    const bool main_rt_skipped = (subframes_ > 1 && interp_can_blend_);
+    const int aa = effective_aa_mode();
+
     if (!clear && is_shown_target(setup_.target)) {
         if (!setup_.through) {
             frame_had_3d_ = true;
+            if (!main_rt_skipped && aa == LiveSettings::kAaTaa && !main_taa_jitter_set_) {
+                float jx = 0.0f, jy = 0.0f;
+                get_taa_jitter(taa_sample_idx_++, jx, jy);
+                const std::uint32_t sw = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
+                const std::uint32_t sh = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
+                main_taa_jitter_ndc_[0] = jx * 2.0f / static_cast<float>(rt.color.width);
+                main_taa_jitter_ndc_[1] = jy * 2.0f / static_cast<float>(rt.color.height);
+                main_taa_jitter_uv_[0] = jx / static_cast<float>(std::max(sw, 1u));
+                main_taa_jitter_uv_[1] = jy / static_cast<float>(std::max(sh, 1u));
+                main_taa_jitter_set_ = true;
+            }
         } else if (frame_had_3d_ && !setup_.self_sampled) {
-            // Skip redundant 5th lighting pass on main_rt when frame-gen is actively presenting interp_rt_!
-            const bool main_rt_skipped = (subframes_ > 1 && interp_can_blend_);
+            // Skip redundant 5th post-3D pass on main_rt when frame-gen is actively presenting interp_rt_!
             if (!lit_3d_this_frame_ && !main_rt_skipped) {
-                apply_enhanced_lighting(rt, cur_light_in_);
+                end_render_pass();
+                apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_);
                 lit_3d_this_frame_ = true;
             }
+            main_3d_finished_ = true;
             if (!captured_clean_3d_) {
                 capture_clean_3d_snapshot(rt);
             }
@@ -1351,7 +1455,10 @@ void VkBackend::draw_batch() {
         main_depth_snapped_ = true;
     }
 
-    begin_target_pass(rt);
+    const bool use_main_msaa = !main_rt_skipped && (aa == LiveSettings::kAaMsaa4x) &&
+                               is_shown_target(setup_.target) && !main_3d_finished_ &&
+                               (!setup_.through || clear);
+    begin_target_pass(rt, use_main_msaa);
 
     // Quest HUD detection, HUD scaling, and widescreen 2D aspect preservation (single tight pass).
     float hud_scale = 1.0f, hud_ax = 0.0f, hud_ay = 0.0f;
@@ -1415,7 +1522,12 @@ void VkBackend::draw_batch() {
 
     VkCommandBuffer cmd = f.cmd;
     VkDeviceAddress params_addr = 0;
-    if (!bind_ge_draw_state(cmd, setup_, rt.width, rt.height, is_soft_particle, params_addr, main_pass_state_)) {
+    const bool apply_main_taa_jitter = main_taa_jitter_set_ && !clear && !setup_.through && is_shown_target(setup_.target);
+    if (!bind_ge_draw_state(cmd, setup_, rt.width, rt.height, is_soft_particle, active_pass_msaa_,
+                            apply_main_taa_jitter ? main_taa_jitter_ndc_[0] : 0.0f,
+                            apply_main_taa_jitter ? main_taa_jitter_ndc_[1] : 0.0f,
+                            apply_main_taa_jitter ? -0.5f : 0.0f,
+                            params_addr, main_pass_state_)) {
         batch_.clear();
         return;
     }
@@ -2476,8 +2588,12 @@ void VkBackend::apply_live_scale() {
         retire_image(interp_rt_.depth);
         retire_image(copy_tex_);
         retire_image(soft_depth_copy_);
+        retire_image(msaa_color_);
+        retire_image(msaa_depth_);
         retire_image(killcam_clean_);
         retire_image(killcam_staging_);
+        lighting_.reset_taa_history();
+        taa_have_prev_ = false;
         killcam_clean_valid_ = false;
         killcam_clean_target_ = UINT32_MAX;
     }
@@ -2491,6 +2607,8 @@ void VkBackend::apply_live_fps() {
         if (subframes_ <= 1) {
             reset_interp_state();
         }
+        lighting_.reset_taa_history();
+        taa_have_prev_ = false;
     }
 }
 
@@ -2557,11 +2675,28 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 }
 
-void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in) {
-    if (!lighting_.ready() || !live_->enhanced_lighting.load(std::memory_order_relaxed)) return;
-    if ((live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectComputeMask) == 0u) return;
+void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in,
+                              const float *taa_prev_from_curr, bool taa_valid_reproj,
+                              bool taa_reset, const float *curr_jitter_uv) {
+    if (!lighting_.ready()) return;
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE ||
         rt.color.bindless_slot == 0 || rt.depth.bindless_slot == 0) return;
+
+    const int aa = effective_aa_mode();
+    if (aa != last_aa_mode_) {
+        lighting_.reset_taa_history();
+        taa_have_prev_ = false;
+        last_aa_mode_ = aa;
+    }
+
+    const std::uint32_t mask = live_->vulkan_effects_mask.load(std::memory_order_relaxed);
+    constexpr std::uint32_t kNonFxaaLightingMask = LiveSettings::kVkEffectComputeMask & ~LiveSettings::kVkEffectFxaa;
+    const bool want_lighting = live_->enhanced_lighting.load(std::memory_order_relaxed) &&
+                               ((mask & kNonFxaaLightingMask) != 0u);
+    const bool want_fxaa = (aa == LiveSettings::kAaFxaa);
+    const bool want_taa = (aa == LiveSettings::kAaTaa);
+    if (!want_lighting && !want_fxaa && !want_taa) return;
+
     ScopedTimer prof_scope(prof_.enabled, prof_.light_ns);
 
     const std::uint32_t w = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
@@ -2572,19 +2707,51 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
     end_render_pass();
 
     FrameSlice &f = frames_[frame_slot_];
-    auto pslice = f.params.allocate(sizeof(vk::LightingComputeParams) * vk::LightingPipeline::kParamSlotsPerDispatch, 16);
-    if (!pslice.ptr) return;
+    if (want_lighting) {
+        auto pslice = f.params.allocate(sizeof(vk::LightingComputeParams) * vk::LightingPipeline::kParamSlotsPerDispatch, 16);
+        if (!pslice.ptr) return;
 
-    transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    transition_resource(rt.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        transition_resource(rt.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
-    vk::LightingFrameInput fin = in;
-    fin.frame_index = frame_number_;
-    if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
-                           rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address)) {
-        rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
+        vk::LightingFrameInput fin = in;
+        fin.frame_index = frame_number_;
+        if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
+                               rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address, want_fxaa)) {
+            rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+    } else if (want_fxaa) {
+        auto pslice = f.params.allocate(sizeof(vk::LightingComputeParams), 16);
+        if (!pslice.ptr) return;
+
+        transition_resource(rt.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        if (lighting_.dispatch_fxaa_only(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, w, h,
+                                         pslice.ptr, pslice.address)) {
+            rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+    }
+
+    if (want_taa) {
+        auto tslice = f.params.allocate(sizeof(vk::TaaComputeParams), 16);
+        if (!tslice.ptr) return;
+
+        transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        transition_resource(rt.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+        if (lighting_.dispatch_taa(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.bindless_slot,
+                                   rt.depth.bindless_slot, w, h, in, taa_prev_from_curr, taa_valid_reproj,
+                                   taa_reset, curr_jitter_uv, taa_prev_jitter_uv_, tslice.ptr, tslice.address)) {
+            rt.color.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            if (curr_jitter_uv) {
+                taa_prev_jitter_uv_[0] = curr_jitter_uv[0];
+                taa_prev_jitter_uv_[1] = curr_jitter_uv[1];
+            }
+        }
     }
 }
 
@@ -2688,7 +2855,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
         interp_rt_.stride = blend_older_.width;
         interp_rt_.color.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
                                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                                 VK_IMAGE_ASPECT_COLOR_BIT);
         interp_rt_.depth.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_D32_SFLOAT,
                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -2828,6 +2996,42 @@ void VkBackend::render_interpolated_subframe(float phase) {
     if (cur_new_buf_ptr) cur_new_buf_ptr->last_gpu_timeline = ctx_.graphics_timeline_value + 1u;
 
     // 3. Render interpolated 3D + 2D batches into interp_rt_ via Dynamic Rendering.
+    const int aa = effective_aa_mode();
+    bool pass_msaa = (aa == LiveSettings::kAaMsaa4x) && ensure_msaa_targets(pw, ph);
+    const bool use_taa = (aa == LiveSettings::kAaTaa);
+
+    float taa_jitter_ndc[2]{0.0f, 0.0f};
+    float taa_jitter_uv[2]{0.0f, 0.0f};
+    float taa_prev_from_curr[12]{1.0f, 0.0f, 0.0f, 0.0f,
+                                 0.0f, 1.0f, 0.0f, 0.0f,
+                                 0.0f, 0.0f, 1.0f, 0.0f};
+    bool taa_valid_reproj = false;
+    if (use_taa) {
+        float jx = 0.0f, jy = 0.0f;
+        get_taa_jitter(taa_sample_idx_++, jx, jy);
+        const std::uint32_t sw = std::min(480u, blend_older_.width) * static_cast<std::uint32_t>(scale_);
+        const std::uint32_t sh = std::min(272u, blend_older_.height) * static_cast<std::uint32_t>(scale_);
+        taa_jitter_ndc[0] = jx * 2.0f / static_cast<float>(pw);
+        taa_jitter_ndc[1] = jy * 2.0f / static_cast<float>(ph);
+        taa_jitter_uv[0] = jx / static_cast<float>(std::max(sw, 1u));
+        taa_jitter_uv[1] = jy / static_cast<float>(std::max(sh, 1u));
+        if (taa_have_prev_) {
+            if (phase > 0.0f && last_cam_motion_.valid) {
+                const float dt = scene_phase - taa_prev_phase_;
+                const interpolation::Matrix pfc = interpolation::rigid_at(last_cam_motion_, -dt);
+                pack_3x4(pfc, taa_prev_from_curr);
+                taa_valid_reproj = true;
+            } else if (phase <= 0.0f && has_prev_cam_ && prev_cam_motion_.valid) {
+                const float dt = 1.0f - taa_prev_phase_;
+                const interpolation::Matrix pfc = interpolation::rigid_at(prev_cam_motion_, -dt);
+                pack_3x4(pfc, taa_prev_from_curr);
+                taa_valid_reproj = true;
+            }
+        }
+        taa_prev_phase_ = scene_phase;
+        taa_have_prev_ = true;
+    }
+
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -2837,7 +3041,6 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     VkRenderingAttachmentInfo color_att{};
     color_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_att.imageView = interp_rt_.color.view;
     color_att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2845,11 +3048,30 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     VkRenderingAttachmentInfo depth_att{};
     depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    depth_att.imageView = interp_rt_.depth.view;
     depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depth_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depth_att.clearValue.depthStencil = {1.0f, 0u};
+
+    if (pass_msaa) {
+        transition_resource(msaa_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        transition_resource(msaa_depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        color_att.imageView = msaa_color_.view;
+        color_att.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        color_att.resolveImageView = interp_rt_.color.view;
+        color_att.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        depth_att.imageView = msaa_depth_.view;
+        depth_att.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+        depth_att.resolveImageView = interp_rt_.depth.view;
+        depth_att.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    } else {
+        color_att.imageView = interp_rt_.color.view;
+        depth_att.imageView = interp_rt_.depth.view;
+    }
 
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO, nullptr, 0, {{0, 0}, {pw, ph}}, 1, 0, 1, &color_att, &depth_att, nullptr};
     vkCmdBeginRendering(f.cmd, &ri);
@@ -2901,37 +3123,54 @@ void VkBackend::render_interpolated_subframe(float phase) {
             last_vb = VK_NULL_HANDLE;
         }
 
-        // Run enhanced Vulkan lighting strictly after 3D draws and before 2D HUD draws on 120/180 Hz subframes too!
+        // Run enhanced lighting & AA strictly after 3D draws and before 2D HUD draws on 120/180 Hz subframes too!
         if (!clear) {
             if (!rb.setup.through) {
                 interp_saw_3d = true;
-            } else if (interp_saw_3d && !interp_lit && !rb.setup.self_sampled && lighting_.ready() &&
-                       live_->enhanced_lighting.load(std::memory_order_relaxed)) {
-                vkCmdEndRendering(f.cmd);
-                apply_enhanced_lighting(interp_rt_, last_light_in_);
-                interp_lit = true;
-                if (phase <= 0.0f) {
-                    capture_clean_3d_snapshot(interp_rt_);
+            } else if (interp_saw_3d && !interp_lit && !rb.setup.self_sampled) {
+                const bool need_boundary = pass_msaa ||
+                                           (lighting_.ready() &&
+                                            (live_->enhanced_lighting.load(std::memory_order_relaxed) ||
+                                             aa == LiveSettings::kAaFxaa || aa == LiveSettings::kAaTaa));
+                if (need_boundary) {
+                    vkCmdEndRendering(f.cmd);
+                    apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv);
+                    interp_lit = true;
+                    if (phase <= 0.0f) {
+                        capture_clean_3d_snapshot(interp_rt_);
+                    }
+                    // Switch to 1x single-sample attachments for crisp 2D HUD draws!
+                    pass_msaa = false;
+                    color_att.imageView = interp_rt_.color.view;
+                    color_att.resolveMode = VK_RESOLVE_MODE_NONE;
+                    color_att.resolveImageView = VK_NULL_HANDLE;
+                    depth_att.imageView = interp_rt_.depth.view;
+                    depth_att.resolveMode = VK_RESOLVE_MODE_NONE;
+                    depth_att.resolveImageView = VK_NULL_HANDLE;
+                    transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                    transition_resource(interp_rt_.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                    depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                    vkCmdBeginRendering(f.cmd, &ri);
+                    vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+                    vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
+                    interp_state.reset();
+                    last_vb = VK_NULL_HANDLE;
                 }
-                transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                transition_resource(interp_rt_.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-                color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-                depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-                vkCmdBeginRendering(f.cmd, &ri);
-                vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
-                vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
-                interp_state.reset();
-                last_vb = VK_NULL_HANDLE;
             }
         }
 
         VkDeviceAddress params_addr = 0;
-        if (!bind_ge_draw_state(f.cmd, rb.setup, blend_older_.width, blend_older_.height, is_soft_particle, params_addr,
-                                interp_state)) {
+        const bool apply_taa_jitter = use_taa && !clear && !rb.setup.through;
+        if (!bind_ge_draw_state(f.cmd, rb.setup, blend_older_.width, blend_older_.height, is_soft_particle, pass_msaa,
+                                apply_taa_jitter ? taa_jitter_ndc[0] : 0.0f,
+                                apply_taa_jitter ? taa_jitter_ndc[1] : 0.0f,
+                                apply_taa_jitter ? -0.5f : 0.0f,
+                                params_addr, interp_state)) {
             continue;
         }
 
@@ -2965,8 +3204,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
     }
 
     vkCmdEndRendering(f.cmd);
-    if (interp_saw_3d && !interp_lit && lighting_.ready() && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
-        apply_enhanced_lighting(interp_rt_, last_light_in_);
+    if (interp_saw_3d && !interp_lit) {
+        apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv);
     }
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -3001,7 +3240,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         RenderTarget &rt = it->second;
         const bool main_rt_skipped = (subframes_ > 1 && interp_can_blend_);
         if (frame_had_3d_ && !lit_3d_this_frame_ && !main_rt_skipped) {
-            apply_enhanced_lighting(rt, cur_light_in_);
+            end_render_pass();
+            apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_);
             lit_3d_this_frame_ = true;
         }
         if (frame_had_3d_ && !captured_clean_3d_) {
@@ -3120,10 +3360,14 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                 } else {
                     interpolator_.matcher().forget_motion();
                     has_prev_cam_ = false;
+                    lighting_.reset_taa_history();
+                    taa_have_prev_ = false;
                 }
             } else {
                 interpolator_.matcher().forget_motion();
                 has_prev_cam_ = false;
+                lighting_.reset_taa_history();
+                taa_have_prev_ = false;
             }
         } else {
             std::swap(blend_newer_, cur_snap_);
@@ -3147,7 +3391,8 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             // If lighting on main_rt was skipped assuming frame-gen would present interp_rt_,
             // run it now before falling back to main_rt on a camera cut (prevents 1-frame unlit flash).
             if (have_gpu_frame && frame_had_3d_ && !lit_3d_this_frame_ && it != targets_.end()) {
-                apply_enhanced_lighting(it->second, cur_light_in_);
+                end_render_pass();
+                apply_post_3d(it->second, cur_light_in_, nullptr, false, true, main_taa_jitter_uv_);
                 transition_resource(it->second.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
                 lit_3d_this_frame_ = true;
@@ -3168,6 +3413,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     captured_clean_3d_ = false;
     lit_3d_this_frame_ = false;
     main_depth_snapped_ = false;
+    main_msaa_started_ = false;
+    main_3d_finished_ = false;
+    main_taa_jitter_set_ = false;
     cur_light_in_ = vk::LightingFrameInput{};
     frame_tex_cache_.clear();
     if ((frame_number_ % 60u) == 0u) {

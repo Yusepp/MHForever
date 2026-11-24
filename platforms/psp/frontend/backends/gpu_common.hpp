@@ -105,6 +105,15 @@ struct LiveSettings {
     };
     std::atomic<bool> enhanced_lighting{false};
     std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectAll};
+    // Vulkan 3D anti-aliasing mode: 0 = Off, 1 = FXAA, 2 = MSAA 4x, 3 = TAA.
+    enum AaMode : int {
+        kAaOff = 0,
+        kAaFxaa = 1,
+        kAaMsaa4x = 2,
+        kAaTaa = 3,
+    };
+    std::atomic<int> aa_mode{kAaFxaa};
+    std::atomic<bool> msaa_4x_supported{false};
 };
 
 namespace gpu_common {

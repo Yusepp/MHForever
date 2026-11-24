@@ -12,6 +12,7 @@ struct DrawParams {
     uint sampler_idx;
     uint tex_func_bits; // bits 0..2: tex_func, bit 3: tex_rgba, bit 4: tex_double, bit 5: clear, bit 6: tex_enable, bit 7: fog_enable, bit 8: zrange_enable
     uint alpha_bits;    // bits 0..2: alpha_func, bits 8..15: alpha_ref, bits 16..23: alpha_mask
+    vec4 jitter_and_lod; // xy = NDC jitter (TAA), z = mip LOD bias, w = unused
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer DrawParamsBuf {
@@ -38,7 +39,7 @@ void main() {
     DrawParams p = pc.params.items[pc.draw_idx];
     float w = 1.0 / a_pos.w;
     // Vulkan clip space: X in [-1, 1], Y in [-1, 1] (top = -1, bottom = +1, matching PSP row 0 at top), Z in [0, 1].
-    vec2 ndc = a_pos.xy / p.target_size * 2.0 - 1.0;
+    vec2 ndc = a_pos.xy / p.target_size * 2.0 - 1.0 + p.jitter_and_lod.xy;
     float z = clamp(a_pos.z / 65535.0, 0.0, 1.0);
     gl_Position = vec4(ndc * w, z * w, w);
     v_uv = a_uv * p.uv_xform.xy + p.uv_xform.zw;

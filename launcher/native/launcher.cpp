@@ -132,6 +132,7 @@ Json default_settings() {
     Json s;
     s["scale"] = 4;
     s["graphicsBackend"] = "opengl"; // opengl, vulkan (experimental) or software
+    s["aaMode"] = 1; // 0 = Off, 1 = FXAA, 2 = MSAA 4x, 3 = TAA
     s["enhancedLighting"] = false; // Vulkan compute GTAO, volumetric fog/sun shafts, bloom, rim light
     s["vkAo"] = true;
     s["vkContactShadows"] = true;
@@ -1100,7 +1101,7 @@ void Launcher::import_game_controls() {
                                                                     "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                                                                     "analogCamera", "analogCameraTurnSpeed", "analogCameraTiltSpeed",
                                                                     "mouseCamera", "mouseCameraSpeed", "packMipmaps", "anisotropy",
-                                                                    "projectedShadows", "wholeMapShadows", "shadowQuality", "enhancedLighting",
+                                                                    "projectedShadows", "wholeMapShadows", "shadowQuality", "aaMode", "enhancedLighting",
                                                                     "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
                                                                     "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
                                                                     "shadowDarkness", "widescreen"};
@@ -1183,6 +1184,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     num("sfxVolume", 0, 100);
     num("shadowQuality", 0, 2);
     num("shadowDarkness", 0, 100);
+    num("aaMode", 0, 3);
     if (partial["hudSize"].is_number()) { // the in-game menu's steps: 50, 60, ... 100
         s["hudSize"] = std::clamp(std::round(partial["hudSize"].as_number() / 10.0), 5.0, 10.0) * 10.0;
     }
@@ -1691,6 +1693,13 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
     // The shadows' settings travel even while they are off, so that turning them on in the game's menu finds them.
     if (s["projectedShadows"].as_bool()) plan.args.push_back("--projected-shadows");
     if (s["enhancedLighting"].as_bool()) plan.args.push_back("--enhanced-lighting");
+    {
+        const int aa_mode = s["aaMode"].is_number()
+                                ? std::clamp(static_cast<int>(s["aaMode"].as_number()), 0, 3)
+                                : (s["vkFxaa"].as_bool(true) ? 1 : 0);
+        plan.args.push_back("--aa-mode");
+        plan.args.push_back(std::to_string(aa_mode));
+    }
     {
         std::uint32_t vk_mask = 0u;
         const char *const kVkKeys[10] = {"vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",

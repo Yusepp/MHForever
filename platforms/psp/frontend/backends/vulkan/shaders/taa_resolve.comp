@@ -1,0 +1,206 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Pre-HUD Temporal Anti-Aliasing (TAA) Resolve:
+// - 3x3 closest-depth velocity dilation (prevents foreground silhouette smearing)
+// - Camera-reprojected previous UV with exact +Y-up PSP view-space conversion
+// - 5-tap Catmull-Rom bicubic history sampling (preserves crisp HD textures)
+// - YCoCg 3x3 neighborhood variance clipping (eliminates ghosting on moving characters/monsters)
+// - Tone-mapped (Reinhard) temporal accumulation (prevents high-contrast fire/specular shimmer)
+// - Subtle FidelityFX-style RCAS sharpening to restore micro-contrast
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba8) uniform writeonly image2D u_taa_out;
+
+struct TaaParams {
+    vec4 proj_info;        // x = 1/p00, y = 1/p11, z = p10, w = p14
+    vec4 vz_and_size;      // x = vz_scale, y = vz_center, z = scene_w, w = scene_h
+    vec4 prev_from_curr0;  // row 0 of rigid prev_from_curr view transform
+    vec4 prev_from_curr1;  // row 1
+    vec4 prev_from_curr2;  // row 2
+    vec4 jitter_info;      // xy = curr_jitter_uv, zw = prev_jitter_uv
+    uvec4 slots;           // x = curr_color_slot, y = history_slot, z = depth_slot, w = linear_sampler
+    uvec4 flags;           // x = out_w, y = out_h, z = reset_history, w = valid_reproj
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer TaaParamsBuf {
+    TaaParams p;
+};
+
+layout(push_constant) uniform TaaPush {
+    TaaParamsBuf buf;
+} pc;
+
+vec3 rgb_to_ycocg(vec3 c) {
+    float co = c.r - c.b;
+    float t  = c.b + co * 0.5;
+    float cg = c.g - t;
+    float y  = t + cg * 0.5;
+    return vec3(y, co, cg);
+}
+
+vec3 ycocg_to_rgb(vec3 ycc) {
+    float t = ycc.x - ycc.z * 0.5;
+    float g = ycc.z + t;
+    float b = t - ycc.y * 0.5;
+    float r = b + ycc.y;
+    return vec3(r, g, b);
+}
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+vec3 tonemap(vec3 c) {
+    return c / (1.0 + luma(c));
+}
+
+vec3 untonemap(vec3 c) {
+    return c / max(1.0 - luma(c), 0.001);
+}
+
+// 5-tap Catmull-Rom bicubic filter (Jimenez / Filmic SMAA): much sharper than bilinear!
+vec3 sample_history_catmull_rom(uint slot, uint samp, vec2 uv, vec2 tex_size) {
+    vec2 pos = uv * tex_size;
+    vec2 center = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - center;
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+
+    vec2 w0 = f2 - 0.5 * (f3 + f);
+    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    vec2 w3 = 0.5 * (f3 - f2);
+    vec2 w2 = 1.0 - w0 - w1 - w3;
+
+    vec2 w12 = w1 + w2;
+    vec2 inv_sz = 1.0 / tex_size;
+    vec2 tc0  = clamp((center - 1.0) * inv_sz, vec2(0.5) * inv_sz, 1.0 - vec2(0.5) * inv_sz);
+    vec2 tc12 = clamp((center + w2 / max(w12, vec2(1e-5))) * inv_sz, vec2(0.5) * inv_sz, 1.0 - vec2(0.5) * inv_sz);
+    vec2 tc3  = clamp((center + 2.0) * inv_sz, vec2(0.5) * inv_sz, 1.0 - vec2(0.5) * inv_sz);
+
+    vec3 res =
+        texture(sampler2D(u_textures[slot], u_samplers[samp]), vec2(tc12.x, tc0.y)).rgb  * (w12.x * w0.y)  +
+        texture(sampler2D(u_textures[slot], u_samplers[samp]), vec2(tc0.x,  tc12.y)).rgb * (w0.x  * w12.y) +
+        texture(sampler2D(u_textures[slot], u_samplers[samp]), vec2(tc12.x, tc12.y)).rgb * (w12.x * w12.y) +
+        texture(sampler2D(u_textures[slot], u_samplers[samp]), vec2(tc3.x,  tc12.y)).rgb * (w3.x  * w12.y) +
+        texture(sampler2D(u_textures[slot], u_samplers[samp]), vec2(tc12.x, tc3.y)).rgb  * (w12.x * w3.y);
+    float wsum = (w12.x * w0.y) + (w0.x * w12.y) + (w12.x * w12.y) + (w3.x * w12.y) + (w12.x * w3.y);
+    return max(res / max(wsum, 1e-5), vec3(0.0));
+}
+
+void main() {
+    TaaParams p = pc.buf.p;
+    ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = ivec2(p.flags.xy);
+    if (ip.x >= sz.x || ip.y >= sz.y) return;
+
+    uint curr_slot = p.slots.x;
+    uint hist_slot = p.slots.y;
+    uint depth_slot = p.slots.z;
+    uint samp = p.slots.w;
+
+    vec4 c_center = texelFetch(u_textures[curr_slot], ip, 0);
+    if (p.flags.z != 0u || hist_slot == 0u) {
+        imageStore(u_taa_out, ip, c_center);
+        return;
+    }
+
+    // 3x3 neighborhood stats in YCoCg + closest-depth dilation for motion reprojection.
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    vec3 c_min_ycc = vec3(1e9);
+    vec3 c_max_ycc = vec3(-1e9);
+    float best_d = 2.0;
+    ivec2 best_ip = ip;
+
+    vec3 n_n = c_center.rgb, n_s = c_center.rgb, n_w = c_center.rgb, n_e = c_center.rgb;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = clamp(ip + ivec2(dx, dy), ivec2(0), sz - ivec2(1));
+            vec3 c = texelFetch(u_textures[curr_slot], q, 0).rgb;
+            if (dx == 0 && dy == -1) n_n = c;
+            if (dx == 0 && dy ==  1) n_s = c;
+            if (dx == -1 && dy == 0) n_w = c;
+            if (dx ==  1 && dy == 0) n_e = c;
+            vec3 ycc = rgb_to_ycocg(tonemap(c));
+            m1 += ycc;
+            m2 += ycc * ycc;
+            c_min_ycc = min(c_min_ycc, ycc);
+            c_max_ycc = max(c_max_ycc, ycc);
+
+            float d = texelFetch(u_textures[depth_slot], q, 0).r;
+            if (d < best_d) {
+                best_d = d;
+                best_ip = q;
+            }
+        }
+    }
+
+    vec2 fsz = vec2(sz);
+    vec2 inv_sz = 1.0 / fsz;
+    vec2 uv = (vec2(ip) + 0.5) * inv_sz;
+    vec2 uv_prev = uv;
+
+    // Reproject via camera rigid motion (exact +Y-up PSP view space!).
+    if (p.flags.w != 0u && best_d > 0.00001 && best_d < 0.99992) {
+        vec2 dil_uv = (vec2(best_ip) + 0.5) * inv_sz;
+        vec2 ndc_scr = dil_uv * 2.0 - 1.0;
+        // Convert screen NDC (+Y down) -> PSP view-space NDC (+Y up).
+        vec2 ndc_gl = vec2(ndc_scr.x, -ndc_scr.y);
+        float zn = (best_d * 65535.0 - p.vz_and_size.y) / max(abs(p.vz_and_size.x), 1e-3);
+        float denom = zn + p.proj_info.z;
+        if (abs(denom) < 1e-5) denom = (denom >= 0.0 ? 1e-5 : -1e-5);
+        float z_eye = clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
+        vec3 v_curr = vec3(ndc_gl.x * p.proj_info.x * z_eye, ndc_gl.y * p.proj_info.y * z_eye, -z_eye);
+
+        vec4 v4 = vec4(v_curr, 1.0);
+        vec3 v_prev = vec3(dot(p.prev_from_curr0, v4),
+                           dot(p.prev_from_curr1, v4),
+                           dot(p.prev_from_curr2, v4));
+        if (v_prev.z < -0.05) {
+            float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5) * sign(p.proj_info.x);
+            float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5) * sign(p.proj_info.y);
+            vec2 ndc_prev_gl = vec2(v_prev.x * p00, v_prev.y * p11) / (-v_prev.z);
+            vec2 uv_prev_dil = vec2(ndc_prev_gl.x, -ndc_prev_gl.y) * 0.5 + 0.5;
+            vec2 vel = uv_prev_dil - dil_uv;
+            uv_prev = uv + vel;
+        }
+    }
+
+    // Off-screen disocclusion -> trust current frame immediately.
+    if (uv_prev.x < 0.0 || uv_prev.x > 1.0 || uv_prev.y < 0.0 || uv_prev.y > 1.0) {
+        imageStore(u_taa_out, ip, c_center);
+        return;
+    }
+
+    // Sample history with 5-tap Catmull-Rom and clip to current 3x3 YCoCg variance AABB.
+    vec3 hist_rgb = sample_history_catmull_rom(hist_slot, samp, uv_prev, fsz);
+    vec3 hist_ycc = rgb_to_ycocg(tonemap(hist_rgb));
+
+    vec3 mu = m1 * (1.0 / 9.0);
+    vec3 sigma = sqrt(max(m2 * (1.0 / 9.0) - mu * mu, vec3(0.0)));
+    const float kGamma = 1.15;
+    vec3 aabb_min = max(c_min_ycc, mu - kGamma * sigma);
+    vec3 aabb_max = min(c_max_ycc, mu + kGamma * sigma);
+    vec3 clipped_hist = clamp(hist_ycc, aabb_min, aabb_max);
+
+    // Subtle unsharp micro-contrast on current frame to counteract subpixel softness.
+    vec3 curr_sharp = c_center.rgb + 0.12 * (c_center.rgb - 0.25 * (n_n + n_s + n_w + n_e));
+    curr_sharp = clamp(curr_sharp, vec3(0.0), vec3(1.0));
+    vec3 curr_ycc = rgb_to_ycocg(tonemap(curr_sharp));
+
+    // Adaptive blend weight: responsive on camera motion & disocclusion, rock-steady when still.
+    float motion_px = length((uv_prev - uv) * fsz);
+    float clamp_dist = length(hist_ycc - clipped_hist);
+    float alpha = clamp(0.10 + motion_px * 0.015 + clamp_dist * 0.35, 0.10, 0.28);
+
+    vec3 resolved_ycc = mix(clipped_hist, curr_ycc, alpha);
+    vec3 resolved_rgb = clamp(untonemap(ycocg_to_rgb(resolved_ycc)), vec3(0.0), vec3(1.0));
+    imageStore(u_taa_out, ip, vec4(resolved_rgb, c_center.a));
+}

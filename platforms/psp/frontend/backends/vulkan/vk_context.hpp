@@ -34,6 +34,7 @@ struct Capabilities {
     bool present_fifo_latest_ready = false;
     bool present_id = false;
     bool present_wait = false;
+    bool msaa_4x = false;
     std::string device_name;
     std::uint32_t vendor_id = 0;
     std::uint32_t device_id = 0;

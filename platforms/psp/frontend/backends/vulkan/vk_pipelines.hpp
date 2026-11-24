@@ -11,7 +11,7 @@
 
 namespace mhf::psp::vk {
 
-// Matches GLSL DrawParams in ge_draw.vert / ge_draw.frag (80 bytes, scalar layout).
+// Matches GLSL DrawParams in ge_draw.vert / ge_draw.frag (96 bytes, scalar layout).
 struct alignas(16) DrawParams {
     float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     float env_and_flags[4]{0.0f, 0.0f, 0.0f, 0.0f};
@@ -22,8 +22,9 @@ struct alignas(16) DrawParams {
     std::uint32_t sampler_idx{0};
     std::uint32_t tex_func_bits{0};
     std::uint32_t alpha_bits{1};
+    float jitter_and_lod[4]{0.0f, 0.0f, 0.0f, 0.0f}; // xy = NDC jitter (TAA), z = mip LOD bias, w = unused
 };
-static_assert(sizeof(DrawParams) == 80);
+static_assert(sizeof(DrawParams) == 96);
 
 struct PresentPush {
     float uv_max[2]{1.0f, 1.0f};
@@ -52,6 +53,7 @@ struct GePipelineKey {
     std::uint8_t spec_textured{1};
     std::uint8_t spec_alpha_test{1};
     std::uint8_t spec_zrange{0};
+    std::uint8_t msaa_4x{0};
     std::uint8_t blend_enable{0};
     std::uint8_t color_op{0};
     std::uint8_t src_factor{1};
@@ -63,7 +65,8 @@ struct GePipelineKey {
         const std::uint64_t spec_bits = (static_cast<std::uint64_t>(spec_clear & 1u)) |
                                         (static_cast<std::uint64_t>(spec_textured & 1u) << 1u) |
                                         (static_cast<std::uint64_t>(spec_alpha_test & 1u) << 2u) |
-                                        (static_cast<std::uint64_t>(spec_zrange & 1u) << 3u);
+                                        (static_cast<std::uint64_t>(spec_zrange & 1u) << 3u) |
+                                        (static_cast<std::uint64_t>(msaa_4x & 1u) << 4u);
         return spec_bits | (static_cast<std::uint64_t>(blend_enable) << 8u) |
                (static_cast<std::uint64_t>(color_op) << 16u) | (static_cast<std::uint64_t>(src_factor) << 24u) |
                (static_cast<std::uint64_t>(dst_factor) << 32u) | (static_cast<std::uint64_t>(color_mask) << 40u);

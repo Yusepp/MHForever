@@ -60,6 +60,18 @@ struct alignas(16) LightingComputeParams {
 };
 static_assert(sizeof(LightingComputeParams) == 224);
 
+struct alignas(16) TaaComputeParams {
+    float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
+    float vz_and_size[4]{};     // x = vz_scale, y = vz_center, z = scene_w, w = scene_h
+    float prev_from_curr0[4]{}; // row 0 of rigid prev_from_curr view transform
+    float prev_from_curr1[4]{}; // row 1
+    float prev_from_curr2[4]{}; // row 2
+    float jitter_info[4]{};     // xy = curr_jitter_uv, zw = prev_jitter_uv
+    std::uint32_t slots[4]{};   // x = curr_color_slot, y = history_slot, z = depth_slot, w = linear_sampler
+    std::uint32_t flags[4]{};   // x = out_w, y = out_h, z = reset_history, w = valid_reproj
+};
+static_assert(sizeof(TaaComputeParams) == 128);
+
 struct LightingFrameInput {
     float proj[16]{};         // active 3D perspective projection matrix (column-major)
     float view_rot[9]{1.0f, 0.0f, 0.0f,
@@ -85,7 +97,8 @@ public:
                vol_pipe_ != VK_NULL_HANDLE && bloom_pipe_ != VK_NULL_HANDLE &&
                ssgi_pipe_ != VK_NULL_HANDLE && glow_blur_pipe_ != VK_NULL_HANDLE &&
                flash_pipe_ != VK_NULL_HANDLE && comp_pipe_ != VK_NULL_HANDLE &&
-               comp_inplace_pipe_ != VK_NULL_HANDLE && fxaa_pipe_ != VK_NULL_HANDLE;
+               comp_inplace_pipe_ != VK_NULL_HANDLE && fxaa_pipe_ != VK_NULL_HANDLE &&
+               taa_pipe_ != VK_NULL_HANDLE;
     }
 
     // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
@@ -100,7 +113,26 @@ public:
                   VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                   const LightingFrameInput &in,
-                  void *params_cpu_ptr, VkDeviceAddress params_bda);
+                  void *params_cpu_ptr, VkDeviceAddress params_bda, bool run_fxaa = true);
+
+    // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
+    // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.
+    bool dispatch_fxaa_only(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
+                            VkImage scene_color, VkImageView scene_color_view,
+                            std::uint32_t scene_w, std::uint32_t scene_h,
+                            void *params_cpu_ptr, VkDeviceAddress params_bda);
+
+    // Pre-HUD Temporal Anti-Aliasing (TAA) resolve pass (works with or without Enhanced Lighting).
+    // Expects `scene_color` and `scene_depth` in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // leaves `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL.
+    bool dispatch_taa(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
+                      VkImage scene_color, std::uint32_t scene_color_slot, std::uint32_t scene_depth_slot,
+                      std::uint32_t scene_w, std::uint32_t scene_h, const LightingFrameInput &in,
+                      const float prev_from_curr_3x4[12], bool valid_reproj, bool reset_history,
+                      const float curr_jitter_uv[2], const float prev_jitter_uv[2],
+                      void *params_cpu_ptr, VkDeviceAddress params_bda);
+
+    void reset_taa_history() noexcept { taa_hist_valid_ = false; }
 
     // Invalidates any cached VkImageView -> VkDescriptorSet entry matching a retired view.
     void invalidate_scene_view(VkImageView view) noexcept {
@@ -116,6 +148,8 @@ public:
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
+    bool ensure_taa_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
+    VkDescriptorSet get_or_bind_scene_set(const Context &ctx, VkImageView scene_color_view);
     void fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept;
 
     struct Target2D {
@@ -140,6 +174,7 @@ private:
     VkDescriptorSet ssgi_blur_set_ = VK_NULL_HANDLE;
     VkDescriptorSet flash_set_ = VK_NULL_HANDLE;
     VkDescriptorSet lit_tmp_set_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, 2> taa_hist_sets_{};
     std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
     std::array<VkImageView, kSceneSetCount> scene_set_views_{};
     std::size_t scene_set_cursor_ = 0;
@@ -155,6 +190,7 @@ private:
     VkPipeline comp_pipe_ = VK_NULL_HANDLE;
     VkPipeline comp_inplace_pipe_ = VK_NULL_HANDLE;
     VkPipeline fxaa_pipe_ = VK_NULL_HANDLE;
+    VkPipeline taa_pipe_ = VK_NULL_HANDLE;
 
     Target2D gtao_tex_;       // half-res RGBA8 (ao, nx, ny, contact_shadow)
     Target2D gtao_blur_tex_;  // half-res RGBA8 (denoised ao, crisp nx, ny, denoised contact_shadow)
@@ -165,6 +201,9 @@ private:
     Target2D ssgi_blur_tex_;  // quarter-res RGBA16F (Kawase-smoothed indirect bounce.rgb)
     Target2D flash_tex_;      // 4x2 RGBA16F (coarse dynamic emissive flash light-field)
     Target2D lit_tmp_tex_;    // full-res RGBA8 (composite output -> FXAA input)
+    std::array<Target2D, 2> taa_hist_{}; // full-res RGBA8 ping-pong TAA history
+    int taa_hist_idx_ = 0;
+    bool taa_hist_valid_ = false;
 
     const LiveSettings *live_ = nullptr;
     // Zone & biome classification tables (populated once from LiveSettings).

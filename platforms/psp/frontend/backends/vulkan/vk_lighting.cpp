@@ -118,7 +118,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    constexpr std::uint32_t kTotalSets = 9u + static_cast<std::uint32_t>(kSceneSetCount);
+    constexpr std::uint32_t kTotalSets = 11u + static_cast<std::uint32_t>(kSceneSetCount);
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
@@ -137,8 +137,10 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     ssgi_blur_set_ = sets[6];
     flash_set_ = sets[7];
     lit_tmp_set_ = sets[8];
+    taa_hist_sets_[0] = sets[9];
+    taa_hist_sets_[1] = sets[10];
     for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        scene_sets_[i] = sets[9 + i];
+        scene_sets_[i] = sets[11 + i];
     }
     scene_set_cursor_ = 0;
 
@@ -174,6 +176,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     const VkSpecializationInfo inplace_spec{1, &inplace_entry, sizeof(inplace_val), &inplace_val};
     comp_inplace_pipe_ = make_pipe_spec(shaders::kLightingCompositeCompSpv, &inplace_spec);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
+    taa_pipe_ = make_pipe(shaders::kTaaResolveCompSpv);
 
     // Build fast zone & biome lookup tables from LiveSettings (supports MHFU zones + graceful MHF1 fallback).
     if (live && !live->shadow_zone_names.empty()) {
@@ -228,6 +231,9 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     ssgi_blur_tex_.destroy(ctx, desc);
     flash_tex_.destroy(ctx, desc);
     lit_tmp_tex_.destroy(ctx, desc);
+    taa_hist_[0].destroy(ctx, desc);
+    taa_hist_[1].destroy(ctx, desc);
+    taa_hist_valid_ = false;
     auto kill_pipe = [&](VkPipeline &p) {
         if (p != VK_NULL_HANDLE) {
             vkDestroyPipeline(ctx.device, p, nullptr);
@@ -244,6 +250,7 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(comp_pipe_);
     kill_pipe(comp_inplace_pipe_);
     kill_pipe(fxaa_pipe_);
+    kill_pipe(taa_pipe_);
     scene_set_views_.fill(VK_NULL_HANDLE);
     if (pipe_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(ctx.device, pipe_layout_, nullptr);
@@ -347,7 +354,8 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
         ici.arrayLayers = 1;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo vaci{};
         vaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         if (vmaCreateImage(ctx.allocator, &ici, &vaci, &t.image, &t.alloc, nullptr) != VK_SUCCESS) return false;
@@ -379,6 +387,69 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
            make_target(ssgi_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_blur_set_) &&
            make_target(flash_tex_, 4u, 2u, VK_FORMAT_R16G16B16A16_SFLOAT, flash_set_) &&
            make_target(lit_tmp_tex_, full_w, full_h, VK_FORMAT_R8G8B8A8_UNORM, lit_tmp_set_);
+}
+
+bool LightingPipeline::ensure_taa_targets(const Context &ctx, BindlessDescriptors &desc,
+                                          std::uint32_t full_w, std::uint32_t full_h) {
+    if (taa_hist_[0].image != VK_NULL_HANDLE && taa_hist_[0].w == full_w && taa_hist_[0].h == full_h &&
+        taa_hist_[1].image != VK_NULL_HANDLE && taa_hist_[1].w == full_w && taa_hist_[1].h == full_h) {
+        return true;
+    }
+    ctx.wait_idle();
+    taa_hist_valid_ = false;
+    taa_hist_idx_ = 0;
+    for (int i = 0; i < 2; ++i) {
+        Target2D &t = taa_hist_[static_cast<std::size_t>(i)];
+        t.destroy(ctx, desc);
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent = {full_w, full_h, 1};
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        VmaAllocationCreateInfo vaci{};
+        vaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(ctx.allocator, &ici, &vaci, &t.image, &t.alloc, nullptr) != VK_SUCCESS) return false;
+
+        VkImageViewCreateInfo ivci{};
+        ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ivci.image = t.image;
+        ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(ctx.device, &ivci, nullptr, &t.view) != VK_SUCCESS) return false;
+
+        t.w = full_w;
+        t.h = full_h;
+        t.slot = desc.allocate_texture(ctx, t.view);
+        VkDescriptorImageInfo dii{VK_NULL_HANDLE, t.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, taa_hist_sets_[static_cast<std::size_t>(i)],
+                                 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &dii, nullptr, nullptr};
+        vkUpdateDescriptorSets(ctx.device, 1, &wds, 0, nullptr);
+        if (t.slot == 0) return false;
+    }
+    return true;
+}
+
+VkDescriptorSet LightingPipeline::get_or_bind_scene_set(const Context &ctx, VkImageView scene_color_view) {
+    for (std::size_t i = 0; i < kSceneSetCount; ++i) {
+        if (scene_set_views_[i] == scene_color_view) {
+            return scene_sets_[i];
+        }
+    }
+    const std::size_t slot = scene_set_cursor_;
+    scene_set_cursor_ = (scene_set_cursor_ + 1u) % kSceneSetCount;
+    VkDescriptorSet scene_set = scene_sets_[slot];
+    scene_set_views_[slot] = scene_color_view;
+    VkDescriptorImageInfo sii{VK_NULL_HANDLE, scene_color_view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set, 0, 0, 1,
+                              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
+    vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
+    return scene_set;
 }
 
 void LightingPipeline::fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept {
@@ -537,29 +608,12 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
 bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
-                                const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda) {
+                                const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda,
+                                bool run_fxaa) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
-    // Cache VkImageView -> VkDescriptorSet so steady-state subframes do zero vkUpdateDescriptorSets calls,
-    // while cycling through kSceneSetCount slots whenever a new render target view appears.
-    VkDescriptorSet scene_set = VK_NULL_HANDLE;
-    for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        if (scene_set_views_[i] == scene_color_view) {
-            scene_set = scene_sets_[i];
-            break;
-        }
-    }
-    if (scene_set == VK_NULL_HANDLE) {
-        const std::size_t slot = scene_set_cursor_;
-        scene_set_cursor_ = (scene_set_cursor_ + 1u) % kSceneSetCount;
-        scene_set = scene_sets_[slot];
-        scene_set_views_[slot] = scene_color_view;
-        VkDescriptorImageInfo sii{VK_NULL_HANDLE, scene_color_view, VK_IMAGE_LAYOUT_GENERAL};
-        VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set, 0, 0, 1,
-                                  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
-        vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
-    }
+    VkDescriptorSet scene_set = get_or_bind_scene_set(ctx, scene_color_view);
 
     const std::uint32_t mask = live_ ? live_->vulkan_effects_mask.load(std::memory_order_relaxed) : LiveSettings::kVkEffectAll;
     const bool want_ao      = (mask & LiveSettings::kVkEffectAo) != 0u;
@@ -568,7 +622,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     const bool want_bloom   = (mask & LiveSettings::kVkEffectBloom) != 0u;
     const bool want_ssgi    = (mask & LiveSettings::kVkEffectSsgi) != 0u;
     const bool want_spec    = (mask & LiveSettings::kVkEffectSpecular) != 0u;
-    const bool want_fxaa    = (mask & LiveSettings::kVkEffectFxaa) != 0u;
+    const bool want_fxaa    = run_fxaa;
     const bool want_vig     = (mask & LiveSettings::kVkEffectVignette) != 0u;
 
     const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi;
@@ -722,6 +776,147 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         flush_barriers();
         run_pass(comp_inplace_pipe_, scene_set, scene_w, scene_h, kPassComposite);
     }
+    return true;
+}
+
+bool LightingPipeline::dispatch_fxaa_only(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
+                                          VkImage scene_color, VkImageView scene_color_view,
+                                          std::uint32_t scene_w, std::uint32_t scene_h,
+                                          void *params_cpu_ptr, VkDeviceAddress params_bda) {
+    if (!ready() || !params_cpu_ptr || params_bda == 0) return false;
+    if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
+
+    VkDescriptorSet scene_set = get_or_bind_scene_set(ctx, scene_color_view);
+
+    // Copy active 3D region (scene_w x scene_h) from scene_color -> lit_tmp_tex_, then FXAA back to scene_color.
+    Context::cmd_transition_image(cmd, lit_tmp_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy cp{};
+    cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.extent = {scene_w, scene_h, 1};
+    vkCmdCopyImage(cmd, scene_color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   lit_tmp_tex_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+
+    Context::cmd_transition_image(cmd, lit_tmp_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    Context::cmd_transition_image(cmd, scene_color, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    LightingComputeParams p{};
+    p.aux_slots[0] = lit_tmp_tex_.slot;
+    p.aux_slots[1] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
+    p.aux_slots[2] = scene_w;
+    p.aux_slots[3] = scene_h;
+    p.ext_slots[3] = 4u; // enable FXAA bit
+    std::memcpy(params_cpu_ptr, &p, sizeof(p));
+
+    const VkDescriptorSet bindless_set = desc.set();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fxaa_pipe_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1, &scene_set, 0, nullptr);
+    vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params_bda), &params_bda);
+    vkCmdDispatch(cmd, (scene_w + 7u) / 8u, (scene_h + 7u) / 8u, 1u);
+    return true;
+}
+
+bool LightingPipeline::dispatch_taa(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
+                                    VkImage scene_color, std::uint32_t scene_color_slot, std::uint32_t scene_depth_slot,
+                                    std::uint32_t scene_w, std::uint32_t scene_h, const LightingFrameInput &in,
+                                    const float prev_from_curr_3x4[12], bool valid_reproj, bool reset_history,
+                                    const float curr_jitter_uv[2], const float prev_jitter_uv[2],
+                                    void *params_cpu_ptr, VkDeviceAddress params_bda) {
+    if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_color_slot == 0 || scene_depth_slot == 0) return false;
+    if (!ensure_taa_targets(ctx, desc, scene_w, scene_h)) return false;
+
+    const int prev_idx = taa_hist_idx_;
+    const int next_idx = 1 - prev_idx;
+    const bool do_reset = reset_history || !taa_hist_valid_;
+
+    TaaComputeParams tp{};
+    const float p00 = std::fabs(in.proj[0]) > 1e-4f ? in.proj[0] : 1.0f;
+    const float p11 = std::fabs(in.proj[5]) > 1e-4f ? in.proj[5] : 1.76f;
+    tp.proj_info[0] = 1.0f / p00;
+    tp.proj_info[1] = 1.0f / p11;
+    tp.proj_info[2] = in.proj[10];
+    tp.proj_info[3] = std::fabs(in.proj[14]) > 1e-4f ? in.proj[14] : -10.0f;
+    tp.vz_and_size[0] = in.vz_scale;
+    tp.vz_and_size[1] = in.vz_center;
+    tp.vz_and_size[2] = static_cast<float>(scene_w);
+    tp.vz_and_size[3] = static_cast<float>(scene_h);
+    if (prev_from_curr_3x4 && valid_reproj) {
+        std::memcpy(tp.prev_from_curr0, prev_from_curr_3x4 + 0, 16);
+        std::memcpy(tp.prev_from_curr1, prev_from_curr_3x4 + 4, 16);
+        std::memcpy(tp.prev_from_curr2, prev_from_curr_3x4 + 8, 16);
+    } else {
+        tp.prev_from_curr0[0] = 1.0f;
+        tp.prev_from_curr1[1] = 1.0f;
+        tp.prev_from_curr2[2] = 1.0f;
+    }
+    if (curr_jitter_uv) {
+        tp.jitter_info[0] = curr_jitter_uv[0];
+        tp.jitter_info[1] = curr_jitter_uv[1];
+    }
+    if (prev_jitter_uv) {
+        tp.jitter_info[2] = prev_jitter_uv[0];
+        tp.jitter_info[3] = prev_jitter_uv[1];
+    }
+    tp.slots[0] = scene_color_slot;
+    tp.slots[1] = do_reset ? 0u : taa_hist_[static_cast<std::size_t>(prev_idx)].slot;
+    tp.slots[2] = scene_depth_slot;
+    tp.slots[3] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
+    tp.flags[0] = scene_w;
+    tp.flags[1] = scene_h;
+    tp.flags[2] = do_reset ? 1u : 0u;
+    tp.flags[3] = (valid_reproj && !do_reset) ? 1u : 0u;
+    std::memcpy(params_cpu_ptr, &tp, sizeof(tp));
+
+    Target2D &dst_hist = taa_hist_[static_cast<std::size_t>(next_idx)];
+    Context::cmd_transition_image(cmd, dst_hist.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    const VkDescriptorSet bindless_set = desc.set();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, taa_pipe_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1,
+                            &taa_hist_sets_[static_cast<std::size_t>(next_idx)], 0, nullptr);
+    vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params_bda), &params_bda);
+    vkCmdDispatch(cmd, (scene_w + 7u) / 8u, (scene_h + 7u) / 8u, 1u);
+
+    // Copy resolved TAA image back into scene_color and leave dst_hist in SHADER_READ_ONLY_OPTIMAL for next frame.
+    Context::cmd_transition_image(cmd, dst_hist.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    Context::cmd_transition_image(cmd, scene_color, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    VkImageCopy cp{};
+    cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.extent = {scene_w, scene_h, 1};
+    vkCmdCopyImage(cmd, dst_hist.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   scene_color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+
+    Context::cmd_transition_image(cmd, dst_hist.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+    taa_hist_idx_ = next_idx;
+    taa_hist_valid_ = true;
     return true;
 }
 
