@@ -1,5 +1,8 @@
 #include "quest_timer_skip.hpp"
 
+#include "mh_ui_style.hpp"
+#include "quest_player.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -18,17 +21,6 @@ constexpr std::int8_t kQuestStateClear = 1;
 constexpr std::uint32_t kGameSysQuestPhase = 0x2Eu;
 constexpr std::uint8_t kQuestPhasePostClear = 3u;
 
-bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
-    return (address & 3u) == 0u && memory.contains(address, 4u);
-}
-
-// Native MHFU HUD palette (matching Pokke House / Smithy green ribbons & antique-brass frames).
-constexpr mhf::overlay::Color kMhRibbonBg{0.114f, 0.251f, 0.078f};
-constexpr mhf::overlay::Color kMhBrassLight{0.804f, 0.651f, 0.373f};
-constexpr mhf::overlay::Color kMhBrassDark{0.463f, 0.349f, 0.188f};
-constexpr mhf::overlay::Color kMhFrameInk{0.055f, 0.047f, 0.039f};
-constexpr mhf::overlay::Color kMhHeaderYellow{0.925f, 0.871f, 0.341f};
-constexpr mhf::overlay::Color kMhWhite{0.960f, 0.955f, 0.935f};
 constexpr mhf::overlay::Color kBtnCapBg{0.110f, 0.110f, 0.110f};
 constexpr mhf::overlay::Color kBtnCapBorder{0.620f, 0.610f, 0.560f};
 

@@ -1,5 +1,7 @@
 #include "monster_tracker.hpp"
 
+#include "quest_player.hpp"
+
 #include <algorithm>
 #include <bit>
 
@@ -30,10 +32,6 @@ constexpr std::uint32_t kEnemyMinSize = kEnemyMaxHp + 2u;
 
 constexpr std::uint32_t kSpeciesStride = 0x1D0u;
 constexpr std::uint32_t kSpeciesScaleGroup = 0x14Fu;
-
-bool readable_word(const psprecomp::GuestMemory &memory, std::uint32_t addr) noexcept {
-    return (addr & 3u) == 0u && memory.contains(addr, 4u);
-}
 
 bool is_large_species(const psprecomp::GuestMemory &memory, std::uint32_t table, std::uint8_t species) noexcept {
     const std::uint32_t entry = table + static_cast<std::uint32_t>(species) * kSpeciesStride + kSpeciesScaleGroup;
@@ -83,8 +81,8 @@ void MonsterTracker::poll(psprecomp::GuestMemory &memory, bool quest_start_track
     capturable_in_area_ = false;
     in_active_quest_ = false;
 
-    if (!symbols_.complete() || !readable_word(memory, *symbols_.game_sys) || !readable_word(memory, *symbols_.player_manager) ||
-        !readable_word(memory, *symbols_.enemy_manager) || !readable_word(memory, *symbols_.quest_manager)) {
+    if (!symbols_.complete() || !readable_word_address(memory, *symbols_.game_sys) || !readable_word_address(memory, *symbols_.player_manager) ||
+        !readable_word_address(memory, *symbols_.enemy_manager) || !readable_word_address(memory, *symbols_.quest_manager)) {
         clear();
         return;
     }

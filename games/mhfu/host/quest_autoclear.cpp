@@ -1,5 +1,7 @@
 #include "quest_autoclear.hpp"
 
+#include "quest_player.hpp"
+
 namespace mhf::mhfu {
 namespace {
 
@@ -23,10 +25,6 @@ constexpr std::uint32_t kObjectiveFailed = 0x40u;
 // GameSys +0x2E: u8 quest phase (2 while a quest is actively running; transitions to 3 on Quest Clear).
 constexpr std::uint32_t kGameSysQuestPhase = 0x2Eu;
 constexpr std::uint8_t kQuestPhaseActive = 2u;
-
-bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
-    return (address & 3u) == 0u && memory.contains(address, 4u);
-}
 
 } // namespace
 

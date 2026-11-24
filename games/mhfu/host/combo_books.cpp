@@ -1,5 +1,7 @@
 #include "combo_books.hpp"
 
+#include "quest_player.hpp"
+
 namespace mhf::mhfu {
 namespace {
 
@@ -12,10 +14,6 @@ constexpr std::uint32_t kGameSysBoxBase = 0x3428u;
 constexpr std::size_t kBoxSlots = 1000u;
 constexpr std::uint32_t kSlotSize = 4u;
 constexpr std::uint8_t kAllFiveBooksMask = 0x1Fu; // bits 0..4 for item IDs 1..5
-
-bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
-    return (address & 3u) == 0u && memory.contains(address, 4u);
-}
 
 void scan_slots(const psprecomp::GuestMemory &memory, std::uint32_t base, std::size_t count, std::uint8_t &mask) noexcept {
     if (!memory.contains(base, static_cast<std::uint32_t>(count) * kSlotSize)) return;

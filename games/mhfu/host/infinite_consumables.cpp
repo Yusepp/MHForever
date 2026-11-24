@@ -1,5 +1,7 @@
 #include "infinite_consumables.hpp"
 
+#include "quest_player.hpp"
+
 namespace mhf::mhfu {
 namespace {
 
@@ -9,10 +11,6 @@ constexpr std::uint32_t kGameSysPouchBase = 0x6AEA6u;
 constexpr std::uint32_t kSlotSize = 4u;
 constexpr std::uint8_t kQuestPhaseActive = 2u;
 constexpr std::uint8_t kQuestPhasePostClear = 3u;
-
-bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
-    return (address & 3u) == 0u && memory.contains(address, 4u);
-}
 
 std::uint32_t pouch_slot_addr(std::uint32_t game_sys, std::size_t slot) noexcept {
     return game_sys + kGameSysPouchBase + static_cast<std::uint32_t>(slot) * kSlotSize;

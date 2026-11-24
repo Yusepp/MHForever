@@ -4,6 +4,11 @@
 
 namespace mhf::mhfu {
 
+// True when `address` is 4-byte aligned and holds at least one readable 32-bit guest word.
+inline bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
+    return (address & 3u) == 0u && memory.contains(address, 4u);
+}
+
 // The Player* of the hunter on this machine, or zero during transitions.
 inline std::uint32_t local_player(const psprecomp::GuestMemory &memory, std::uint32_t game_sys,
                                   std::uint32_t player_manager, std::size_t player_size) {

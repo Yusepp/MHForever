@@ -1,5 +1,8 @@
 #include "item_loadouts.hpp"
 
+#include "mh_ui_style.hpp"
+#include "quest_player.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -26,20 +29,14 @@ constexpr std::uint64_t kBoxHeartbeatUs = 80'000u;   // disappears promptly (~2-
 constexpr std::uint64_t kSelectHoldOpenUs = 350'000u; // hold SELECT 0.35s to open Loadouts; tap SELECT to Sort
 constexpr std::uint64_t kSortPulseUs = 50'000u;       // brief SELECT pulse forwarded to MHFU for native Sort
 
-// Native MHFU menu palette (matched to Pokke House Item Box, Equipment Box, and Smithy UI).
+// Loadouts-specific palette additions (shared brass/ribbon/ink colors come from mh_ui_style.hpp).
 constexpr mhf::overlay::Color kMhPanelBg{0.075f, 0.070f, 0.062f};
 constexpr mhf::overlay::Color kMhCellBg{0.032f, 0.032f, 0.032f};
-constexpr mhf::overlay::Color kMhBrassLight{0.804f, 0.651f, 0.373f};
-constexpr mhf::overlay::Color kMhBrassDark{0.463f, 0.349f, 0.188f};
-constexpr mhf::overlay::Color kMhFrameInk{0.055f, 0.047f, 0.039f};
 constexpr mhf::overlay::Color kMhSelectGreen{0.110f, 0.635f, 0.220f};
 constexpr mhf::overlay::Color kMhArrowGreen{0.180f, 0.880f, 0.240f};
-constexpr mhf::overlay::Color kMhHeaderYellow{0.925f, 0.871f, 0.341f};
 constexpr mhf::overlay::Color kMhRuleGreen{0.455f, 0.678f, 0.420f};
-constexpr mhf::overlay::Color kMhRibbonBg{0.114f, 0.251f, 0.078f};
 constexpr mhf::overlay::Color kMhRibbonEdge{0.278f, 0.420f, 0.180f};
 constexpr mhf::overlay::Color kMhRibbonTribal{0.235f, 0.392f, 0.145f};
-constexpr mhf::overlay::Color kMhWhite{0.960f, 0.955f, 0.935f};
 constexpr mhf::overlay::Color kMhDimText{0.620f, 0.612f, 0.576f};
 constexpr mhf::overlay::Color kMhEquippedBlue{0.118f, 0.361f, 0.620f};
 constexpr mhf::overlay::Color kMhOkText{0.640f, 0.940f, 0.580f};
@@ -74,10 +71,6 @@ std::string sanitize_loadout_name(std::string raw) {
     while (!out.empty() && out.front() == ' ') out.erase(out.begin());
     while (!out.empty() && out.back() == ' ') out.pop_back();
     return out;
-}
-
-bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t address) noexcept {
-    return (address & 3u) == 0u && memory.contains(address, 4u);
 }
 
 ItemSlot read_slot(const psprecomp::GuestMemory &memory, std::uint32_t base, std::size_t idx) noexcept {
