@@ -784,22 +784,31 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
     if (!box_open(now_us)) return false;
 
     if (!panel_open_) {
-        // Native MHFU dark forest-green prompt ribbon tucked cleanly in the top-right open margin
-        // so it never overlaps "SELECT Sort", item names, or "START Menu Off".
+        // Cohesive continuation of the Item Box's left-side green hint strip directly beneath
+        // "(L) Rotate" and "[START] Menu OFF" (soft translucent green fading right, no harsh box).
         const float hold = select_hold_progress(now_us);
-        const std::string lbl = hold > 0.01f ? "Opening Loadouts..." : "Hold: Loadouts";
-        const float fsize = 7.6f;
-        const float tw = painter.font_ok() ? painter.measure(lbl, fsize, false) : 64.0f;
-        const float cap_w = 27.0f;
-        const float rw = 6.0f + cap_w + 5.0f + tw + 16.0f;
-        const float rh = 14.5f;
-        const float rx = 480.0f - rw - 6.0f;
-        const float ry = 5.0f;
+        const float rx = 0.0f;
+        const float ry = 171.5f;
+        const float rw = 162.0f;
+        const float rh = 15.5f;
 
-        draw_mh_ribbon(painter, rx, ry, rw, rh, hold);
-        draw_ps_button(painter, rx + 5.0f, ry + 2.2f, cap_w, 10.0f, "SELECT", kMhWhite, false);
-        painter.text(rx + 5.0f + cap_w + 5.0f, ry + 10.1f, lbl, fsize,
-                     hold > 0.01f ? kMhHeaderYellow : kMhWhite, 0.98f, hold > 0.01f);
+        constexpr int kBands = 16;
+        const float bw = rw / static_cast<float>(kBands);
+        for (int i = 0; i < kBands; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(kBands - 1);
+            const float alpha = 0.72f * (1.0f - 0.85f * t * t);
+            painter.rect(rx + static_cast<float>(i) * bw, ry, bw + 0.35f, rh, kMhRibbonBg, alpha);
+        }
+        if (hold > 0.001f) {
+            const float fw = std::clamp(hold, 0.0f, 1.0f) * (rw - 12.0f);
+            painter.rect(rx, ry, fw, rh, kMhSelectGreen, 0.78f);
+        }
+
+        // Align the SELECT cap and label with MHFU's "(L) Rotate" and "[START] Menu OFF" column.
+        draw_ps_button(painter, rx + 10.5f, ry + 2.8f, 22.0f, 9.5f, "SELECT", kMhWhite, false);
+        const std::string lbl = hold > 0.01f ? "Opening..." : "Hold  Loadouts";
+        painter.text(rx + 36.5f, ry + 11.4f, lbl, 8.6f, kMhFrameInk, 0.85f, false, 0.6f);
+        painter.text(rx + 35.8f, ry + 10.7f, lbl, 8.6f, hold > 0.01f ? kMhHeaderYellow : kMhWhite, 0.98f, false, 0.6f);
         return true;
     }
 

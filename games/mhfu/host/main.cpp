@@ -622,9 +622,16 @@ void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
                                           g_damage_numbers_enabled.load(std::memory_order_relaxed));
 }
 
-void on_item_box_update(Runtime &rt, Context &) {
+void on_item_box_update(Runtime &rt, Context &ctx) {
     if (!g_item_pouch_loadouts.load(std::memory_order_relaxed)) return;
-    g_item_loadouts.mark_box_open(rt.now_us());
+    // Only expose Hunter Loadouts on the root Item Box options menu (Put In / Take Out / Combine / Equip / Arrange / Sell)
+    // while the menu is visible (box+56 == 0: root menu; box+96 != 0: Menu ON). Inside sub-menus (Put In / Take Out /
+    // Change Equipment), hide the prompt and leave SELECT completely untouched for native sorting.
+    const std::uint32_t box_obj = ctx.gpr[4];
+    if (box_obj != 0u && rt.memory().contains(box_obj + 96u, 1u) &&
+        rt.memory().load8(box_obj + 56u) == 0u && rt.memory().load8(box_obj + 96u) != 0u) {
+        g_item_loadouts.mark_box_open(rt.now_us());
+    }
 }
 
 void on_minimap_enemy_color(Runtime &, Context &ctx) {
