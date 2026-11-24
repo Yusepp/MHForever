@@ -102,8 +102,13 @@ public:
                   const LightingFrameInput &in,
                   void *params_cpu_ptr, VkDeviceAddress params_bda);
 
-    // Invalidates cached VkImageView -> VkDescriptorSet entries whenever a scene render target is retired.
-    void invalidate_scene_views() noexcept { scene_set_views_.fill(VK_NULL_HANDLE); }
+    // Invalidates any cached VkImageView -> VkDescriptorSet entry matching a retired view.
+    void invalidate_scene_view(VkImageView view) noexcept {
+        if (view == VK_NULL_HANDLE) return;
+        for (auto &v : scene_set_views_) {
+            if (v == view) v = VK_NULL_HANDLE;
+        }
+    }
 
     // Number of LightingComputeParams structs needed per dispatch
     // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa).

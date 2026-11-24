@@ -675,7 +675,7 @@ void VkBackend::shutdown() {
 
 void VkBackend::retire_image(VkImageResource &res) {
     if (res.image == VK_NULL_HANDLE && res.view == VK_NULL_HANDLE) return;
-    if (res.view != VK_NULL_HANDLE) lighting_.invalidate_scene_views();
+    if (res.view != VK_NULL_HANDLE) lighting_.invalidate_scene_view(res.view);
     // Frame-gen snapshots (blend_older_ / blend_newer_) hold bindless texture slots across up to
     // 2 full 30 Hz frames (2 * subframes_ submissions), so keep retired images alive past that horizon.
     const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
@@ -1681,6 +1681,7 @@ void VkBackend::copy_shown_to_vram(RenderTarget *shown) {
         const PendingVramReadback p = pending_vram_rb_;
         pending_vram_rb_.active = false;
         if (vram_rb_mapped_ != nullptr) {
+            vmaInvalidateAllocation(ctx_.allocator, vram_rb_alloc_, 0, VK_WHOLE_SIZE);
             const auto *rgba = static_cast<const std::uint8_t *>(vram_rb_mapped_);
             const std::uint32_t bpp = p.format == 3u ? 4u : 2u;
             for (std::uint32_t y = 0; y < p.height; ++y) {
@@ -1924,6 +1925,7 @@ void VkBackend::copy_target_to_ram(RenderTarget &from, std::uint32_t src, std::u
     ctx_.wait_timeline(ctx_.graphics_timeline, sig);
     frames_[frame_slot_].timeline_value = sig;
 
+    vmaInvalidateAllocation(ctx_.allocator, rb_alloc, 0, VK_WHOLE_SIZE);
     const auto *rgba = static_cast<const std::uint8_t *>(rb_info.pMappedData);
     for (std::uint32_t y = 0; y < height; ++y) {
         std::uint8_t *row = memory_.raw_pointer(dst + ((dy + y) * dst_stride + dx) * bpp, width * bpp);
@@ -2143,7 +2145,8 @@ void VkBackend::read_back() {
         ctx_.wait_timeline(ctx_.graphics_timeline, sig);
         frames_[frame_slot_].timeline_value = sig;
 
-        const auto *rgba = static_cast<const std::uint8_t *>(rb_info.pMappedData);
+        vmaInvalidateAllocation(ctx_.allocator, rb_alloc, 0, VK_WHOLE_SIZE);
+    const auto *rgba = static_cast<const std::uint8_t *>(rb_info.pMappedData);
         const std::uint32_t bpp = rt.bytes_per_pixel();
         for (std::uint32_t y = 0; y < rt.height; ++y) {
             std::uint8_t *row = memory_.raw_pointer(0x04000000u + rt.address + y * rt.stride * bpp, rt.width * bpp);
@@ -2263,7 +2266,7 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
         return;
     }
 
-    if (swapchain_dirty_ ||
+    if (swapchain_.handle == VK_NULL_HANDLE || swapchain_dirty_ ||
         static_cast<std::uint32_t>(pw) != swapchain_.extent.width ||
         static_cast<std::uint32_t>(ph) != swapchain_.extent.height) {
         // Submit already-recorded 3D work & layout transitions before recreating the swapchain
@@ -2273,6 +2276,7 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
             pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
             swapchain_dirty_ = false;
         } else {
+            swapchain_dirty_ = true;
             return;
         }
         ensure_recording();
@@ -2302,6 +2306,8 @@ void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float 
         if (swapchain_.recreate(ctx_, pw, ph)) {
             pipelines_.rebuild_swapchain_pipelines(ctx_, swapchain_.format);
             swapchain_dirty_ = false;
+        } else {
+            swapchain_dirty_ = true;
         }
         return;
     }
@@ -2542,7 +2548,7 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
     cp.extent = {rt.depth.width, rt.depth.height, 1};
     vkCmdCopyImage(frames_[frame_slot_].cmd, rt.depth.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    soft_depth_copy_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
-    transition_resource(soft_depth_copy_, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    transition_resource(soft_depth_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     transition_resource(rt.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -2569,7 +2575,7 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
 
     transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    transition_resource(rt.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    transition_resource(rt.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
     vk::LightingFrameInput fin = in;
@@ -2721,6 +2727,12 @@ void VkBackend::render_interpolated_subframe(float phase) {
     };
     auto *transforms = reinterpret_cast<vk::DrawTransform *>(tslice.ptr);
     const bool zero_phase = (scene_phase <= 0.0f);
+    const bool has_cam_rt = !zero_phase && last_cam_motion_.valid;
+    const interpolation::Matrix cam_rt =
+        has_cam_rt ? interpolation::rigid_at(last_cam_motion_, scene_phase) : interpolation::identity();
+    bool has_cached_cam_view = false;
+    interpolation::Matrix cached_cam_view{};
+    float cached_cam_mv[12]{};
 
     for (std::size_t i = 0; i < ndraws; ++i) {
         const PreparedDraw &pd = prepared_draws_[i];
@@ -2737,28 +2749,50 @@ void VkBackend::render_interpolated_subframe(float phase) {
             tr.pair_info[2] = 0u;
             tr.pair_info[3] = pd.max_deform_bits;
         } else {
-            interpolation::Matrix eye_blend = pd.eye_old;
-            if (pd.has_partner) {
-                if (pd.has_rigid) {
-                    eye_blend = interpolation::follow_rigid(pd.eye_old, pd.rm, scene_phase);
-                } else if (last_cam_motion_.valid) {
-                    eye_blend = interpolation::blend_eye(pd.eye_old, pd.eye_new, last_cam_motion_, scene_phase);
+            if (pd.has_partner && pd.has_rigid) {
+                // Algebraically: (R(t) * view * world) * inv(world) == R(t) * view (avoids a 4x4 multiply).
+                const interpolation::Matrix r_t = interpolation::rigid_at(pd.rm, scene_phase);
+                const interpolation::Matrix world_to_eye_old =
+                    pd.has_inv_world_old ? interpolation::multiply(r_t, older.view) : older.view;
+                pack_3x4(world_to_eye_old, tr.mv_old);
+                if (pd.has_vertex_pair) {
+                    const interpolation::Matrix eye_blend = interpolation::multiply(r_t, pd.eye_old);
+                    const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
+                    pack_3x4(world_to_eye_new, tr.mv_new);
                 } else {
-                    eye_blend = interpolation::blend_affine(pd.eye_old, pd.eye_new, scene_phase);
+                    std::copy_n(tr.mv_old, 12, tr.mv_new);
                 }
-            } else if (pd.follow_cam) {
-                eye_blend = interpolation::follow_rigid(pd.eye_old, last_cam_motion_, scene_phase);
-            }
-
-            const interpolation::Matrix world_to_eye_old =
-                pd.has_inv_world_old ? interpolation::multiply(eye_blend, pd.inv_world_old) : older.view;
-            pack_3x4(world_to_eye_old, tr.mv_old);
-
-            if (pd.has_vertex_pair) {
-                const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
-                pack_3x4(world_to_eye_new, tr.mv_new);
+            } else if (!pd.has_partner && pd.follow_cam && has_cam_rt && pd.has_inv_world_old) {
+                // Hoisted cam_rt * older.view, cached across consecutive draws sharing the same view matrix.
+                if (!has_cached_cam_view || cached_cam_view != older.view) {
+                    cached_cam_view = older.view;
+                    pack_3x4(interpolation::multiply(cam_rt, older.view), cached_cam_mv);
+                    has_cached_cam_view = true;
+                }
+                std::copy_n(cached_cam_mv, 12, tr.mv_old);
+                std::copy_n(cached_cam_mv, 12, tr.mv_new);
             } else {
-                pack_3x4(world_to_eye_old, tr.mv_new);
+                interpolation::Matrix eye_blend = pd.eye_old;
+                if (pd.has_partner) {
+                    if (last_cam_motion_.valid) {
+                        eye_blend = interpolation::blend_eye(pd.eye_old, pd.eye_new, last_cam_motion_, scene_phase);
+                    } else {
+                        eye_blend = interpolation::blend_affine(pd.eye_old, pd.eye_new, scene_phase);
+                    }
+                } else if (pd.follow_cam) {
+                    eye_blend = interpolation::multiply(cam_rt, pd.eye_old);
+                }
+
+                const interpolation::Matrix world_to_eye_old =
+                    pd.has_inv_world_old ? interpolation::multiply(eye_blend, pd.inv_world_old) : older.view;
+                pack_3x4(world_to_eye_old, tr.mv_old);
+
+                if (pd.has_vertex_pair) {
+                    const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
+                    pack_3x4(world_to_eye_new, tr.mv_new);
+                } else {
+                    std::copy_n(tr.mv_old, 12, tr.mv_new);
+                }
             }
 
             if (pd.proj_differs) {
@@ -2874,6 +2908,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 vkCmdEndRendering(f.cmd);
                 apply_enhanced_lighting(interp_rt_, last_light_in_);
                 interp_lit = true;
+                if (phase <= 0.0f) {
+                    capture_clean_3d_snapshot(interp_rt_);
+                }
                 transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -3105,6 +3142,12 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         if (interp_can_blend_) {
             render_interpolated_subframe(0.0f);
         } else {
+            // If lighting on main_rt was skipped assuming frame-gen would present interp_rt_,
+            // run it now before falling back to main_rt on a camera cut (prevents 1-frame unlit flash).
+            if (have_gpu_frame && frame_had_3d_ && !lit_3d_this_frame_ && it != targets_.end()) {
+                apply_enhanced_lighting(it->second, cur_light_in_);
+                lit_3d_this_frame_ = true;
+            }
             show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
         }
         interp_active_ = true;

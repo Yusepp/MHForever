@@ -49,11 +49,15 @@ bool Swapchain::create(const Context &ctx, int width, int height) {
     }
     next_present_id = 1;
 
+    VkExtent2D next_extent{};
     if (caps.currentExtent.width != UINT32_MAX && caps.currentExtent.width > 0 && caps.currentExtent.height > 0) {
-        extent = caps.currentExtent;
+        next_extent = caps.currentExtent;
     } else {
-        extent.width = std::clamp(static_cast<std::uint32_t>(width), caps.minImageExtent.width, caps.maxImageExtent.width);
-        extent.height = std::clamp(static_cast<std::uint32_t>(height), caps.minImageExtent.height, caps.maxImageExtent.height);
+        next_extent.width = std::clamp(static_cast<std::uint32_t>(width), caps.minImageExtent.width, caps.maxImageExtent.width);
+        next_extent.height = std::clamp(static_cast<std::uint32_t>(height), caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+    if (next_extent.width == 0 || next_extent.height == 0) {
+        return false;
     }
 
     std::uint32_t img_count = std::max(caps.minImageCount + 1u, 3u);
@@ -66,9 +70,9 @@ bool Swapchain::create(const Context &ctx, int width, int height) {
     sci.minImageCount = img_count;
     sci.imageFormat = chosen.format;
     sci.imageColorSpace = chosen.colorSpace;
-    sci.imageExtent = extent;
+    sci.imageExtent = next_extent;
     sci.imageArrayLayers = 1;
-    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform = caps.currentTransform;
     sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -87,6 +91,7 @@ bool Swapchain::create(const Context &ctx, int width, int height) {
     }
     handle = next;
     format = chosen.format;
+    extent = next_extent;
 
     std::uint32_t actual = 0;
     vkGetSwapchainImagesKHR(ctx.device, handle, &actual, nullptr);
