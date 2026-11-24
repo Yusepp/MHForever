@@ -262,34 +262,61 @@ const Matching &Matcher::match(
     if (pairs != 0u && !voters.empty()) {
         static constexpr std::array<std::array<float, 3>, 5> kProbes{{{0, 0, -150}, {-200, 0, -400}, {200, 0, -400},
                                                                       {0, -150, -300}, {0, 150, -800}}};
-        const auto apply = [](const Matrix &m, const std::array<float, 3> &p) {
+        static const std::array<float, 5> kProbeTolSq = [] {
+            std::array<float, 5> out_sq{};
+            for (std::size_t k = 0; k < 5u; ++k) {
+                const auto &p = kProbes[k];
+                const float tol = 0.5f + 0.002f * std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+                out_sq[k] = tol * tol;
+            }
+            return out_sq;
+        }();
+        const auto apply = [](const Matrix &m, const std::array<float, 3> &p) noexcept {
             return std::array<float, 3>{m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
                                         m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
                                         m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]};
         };
-        const auto apart = [](const std::array<float, 3> &a, const std::array<float, 3> &b) {
+        const auto apart_sq = [](const std::array<float, 3> &a, const std::array<float, 3> &b) noexcept {
+            const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+            return dx * dx + dy * dy + dz * dz;
+        };
+        const auto apart = [](const std::array<float, 3> &a, const std::array<float, 3> &b) noexcept {
             const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
             return std::sqrt(dx * dx + dy * dy + dz * dz);
         };
+
+        // Precompute transformed probes once per voter (and once for previous_camera_) so the
+        // candidate x voter loop avoids ~65x redundant matrix-vector products and ~330k sqrt()s.
+        voter_probes_.resize(voters.size());
+        for (std::size_t v = 0; v < voters.size(); ++v) {
+            for (std::size_t k = 0; k < 5u; ++k) voter_probes_[v][k] = apply(voters[v].motion, kProbes[k]);
+        }
+        std::array<std::array<float, 3>, 5> prev_pts{};
+        if (has_previous_camera_) {
+            for (std::size_t k = 0; k < 5u; ++k) prev_pts[k] = apply(previous_camera_, kProbes[k]);
+        }
+
         const Matrix *best = nullptr;
         std::size_t best_votes = 0;
         float best_size = 0;
         for (const Matrix &candidate : candidates) {
+            std::array<std::array<float, 3>, 5> cand_pts{};
+            for (std::size_t k = 0; k < 5u; ++k) cand_pts[k] = apply(candidate, kProbes[k]);
             std::size_t votes = 0;
-            for (const Voter &voter : voters) {
+            for (std::size_t v = 0; v < voters.size(); ++v) {
+                const auto &vp = voter_probes_[v];
                 bool agrees = true;
-                for (const auto &p : kProbes) {
-                    const float tolerance = 0.5f + 0.002f * std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
-                    if (apart(apply(candidate, p), apply(voter.motion, p)) > tolerance) {
+                for (std::size_t k = 0; k < 5u; ++k) {
+                    if (apart_sq(cand_pts[k], vp[k]) > kProbeTolSq[k]) {
                         agrees = false;
                         break;
                     }
                 }
-                votes += agrees ? voter.votes : 0u;
+                votes += agrees ? voters[v].votes : 0u;
             }
             float size = 0;
             if (has_previous_camera_) {
-                for (const auto &p : kProbes) size += apart(apply(candidate, p), apply(previous_camera_, p));
+                for (std::size_t k = 0; k < 5u; ++k) size += apart(cand_pts[k], prev_pts[k]);
             } else {
                 size = rotation_angle_degrees(identity(), candidate) +
                        std::sqrt(candidate[12] * candidate[12] + candidate[13] * candidate[13] + candidate[14] * candidate[14]);
@@ -303,12 +330,13 @@ const Matching &Matcher::match(
         if (thresholds.diagnose) {
             // Every object asked (instances too): which candidate the crowd follows, and how many follow the chosen one.
             const auto crowd = [&](const Matrix &candidate) {
+                std::array<std::array<float, 3>, 5> cand_pts{};
+                for (std::size_t k = 0; k < 5u; ++k) cand_pts[k] = apply(candidate, kProbes[k]);
                 std::uint32_t votes = 0;
                 for (std::size_t k = 0, step = std::max<std::size_t>(1u, objects_.size() / 512u); k < objects_.size(); k += step) {
                     bool agrees = true;
-                    for (const auto &p : kProbes) {
-                        const float tolerance = 0.5f + 0.002f * std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
-                        if (apart(apply(candidate, p), apply(objects_[k].motion, p)) > tolerance) {
+                    for (std::size_t p = 0; p < 5u; ++p) {
+                        if (apart_sq(cand_pts[p], apply(objects_[k].motion, kProbes[p])) > kProbeTolSq[p]) {
                             agrees = false;
                             break;
                         }
@@ -470,13 +498,23 @@ void Matcher::pair_nearest_instances(
         for (std::int32_t k = slot.first; k >= 0; k = next_[static_cast<std::size_t>(k)]) instance_newer_.push_back(k);
         // Every pair's distance in the newer frame's eye space, with the
         // older instance carried there by the camera's motion; the nearest
-        // pairs are taken first.
+        // pairs are taken first. Precompute predicted older positions once outside the O(A*B) loop.
+        instance_predicted_.resize(instance_older_.size());
+        for (std::size_t a = 0; a < instance_older_.size(); ++a) {
+            const auto &p = older[static_cast<std::size_t>(instance_older_[a])].eye_translation;
+            instance_predicted_[a] = {c[0] * p[0] + c[4] * p[1] + c[8] * p[2] + c[12],
+                                      c[1] * p[0] + c[5] * p[1] + c[9] * p[2] + c[13],
+                                      c[2] * p[0] + c[6] * p[1] + c[10] * p[2] + c[14]};
+        }
         candidates_.clear();
         for (std::size_t a = 0; a < instance_older_.size(); ++a) {
-            const DrawSummary &from = older[static_cast<std::size_t>(instance_older_[a])];
-            for (std::size_t b = 0; b < instance_newer_.size(); ++b)
-                candidates_.push_back({distance_squared(c, from, newer[static_cast<std::size_t>(instance_newer_[b])]),
+            const auto &pred = instance_predicted_[a];
+            for (std::size_t b = 0; b < instance_newer_.size(); ++b) {
+                const auto &q = newer[static_cast<std::size_t>(instance_newer_[b])].eye_translation;
+                const float dx = pred[0] - q[0], dy = pred[1] - q[1], dz = pred[2] - q[2];
+                candidates_.push_back({dx * dx + dy * dy + dz * dz,
                     static_cast<std::int32_t>(a), static_cast<std::int32_t>(b)});
+            }
         }
         // Ties keep drawing order, so instances that stand still pair as before.
         std::sort(candidates_.begin(), candidates_.end(), [](const Candidate &x, const Candidate &y) {

@@ -157,6 +157,8 @@ private:
     std::vector<SeenSlot> seen_table_;
     std::vector<Matrix> motion_candidates_;
     std::vector<Voter> voters_;
+    std::vector<std::array<std::array<float, 3>, 5>> voter_probes_;
+    std::vector<std::array<float, 3>> instance_predicted_;
     std::vector<const Object *> singles_, all_objects_;
     Matching result_;
     bool previous_blended_{};
