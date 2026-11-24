@@ -153,6 +153,12 @@ export default function App() {
       play();
     });
   };
+  const installUpdate = () => {
+    setUpdating({ phase: 'downloading', progress: 0 });
+    api.mhf_installUpdate().then((r) => {
+      if (!r.started) setUpdating({ phase: 'failed', progress: 0, message: 'The update cannot start while a game is running or a copy is being added.' });
+    });
+  };
   const waiting = friends.requests.length + friends.invites.length;
   const online = friends.friends.filter((f) => {
     const p = friends.presence[f.key];
@@ -256,12 +262,7 @@ export default function App() {
           {update && !updating && (
             <motion.div className="update-bar" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
               <span><b>MHForever {update.version}</b> is available{update.size > 0 ? ` (${Math.round(update.size / 1048576)} MB)` : ''}.</span>
-              <button className="ghost mid" onClick={() => {
-                setUpdating({ phase: 'downloading', progress: 0 });
-                api.mhf_installUpdate().then((r) => {
-                  if (!r.started) setUpdating({ phase: 'failed', progress: 0, message: 'The update cannot start while a game is running or a copy is being added.' });
-                });
-              }}>Update now</button>
+              <button className="ghost mid" onClick={installUpdate}>Update now</button>
             </motion.div>
           )}
 
@@ -292,12 +293,7 @@ export default function App() {
                     else if (r.picked) say(r.copied ? `Saves folder changed, saves of ${r.copied} game${r.copied === 1 ? '' : 's'} copied` : 'Saves folder changed');
                   })}
                   update={update}
-                  onInstallUpdate={() => {
-                    setUpdating({ phase: 'downloading', progress: 0 });
-                    api.mhf_installUpdate().then((r) => {
-                      if (!r.started) setUpdating({ phase: 'failed', progress: 0, message: 'The update cannot start while a game is running or a copy is being added.' });
-                    });
-                  }}
+                  onInstallUpdate={installUpdate}
                   say={say}
                 />
               )}

@@ -78,6 +78,18 @@ Json args_of(const char *req) {
 
 void reply(const char *id, const Json &value) { webview_return(g_app.view, id, 0, value.dump().c_str()); }
 
+void reply_async(std::string id, const Json &value) {
+    auto *payload = new std::pair<std::string, std::string>(std::move(id), value.dump());
+    webview_dispatch(
+        g_app.view,
+        [](webview_t w, void *arg) {
+            std::unique_ptr<std::pair<std::string, std::string>> p(
+                static_cast<std::pair<std::string, std::string> *>(arg));
+            webview_return(w, p->first.c_str(), 0, p->second.c_str());
+        },
+        payload);
+}
+
 using Handler = void (*)(const char *id, const Json &args);
 
 void bind(const char *name, Handler handler) {
@@ -341,14 +353,7 @@ void on_probe_server(const char *id, const Json &args) {
     const std::string server = args.as_array().empty() ? std::string() : args.as_array()[0].as_string();
     std::thread([call = std::string(id), server] {
         const auto ms = server.empty() || server.size() > 253 ? std::nullopt : mhf::launcher::probe_server(server, 3000);
-        auto *payload = new std::pair<std::string, std::string>(call, (ms ? Json(*ms) : Json(nullptr)).dump());
-        webview_dispatch(
-            g_app.view,
-            [](webview_t w, void *arg) {
-                std::unique_ptr<std::pair<std::string, std::string>> p(static_cast<std::pair<std::string, std::string> *>(arg));
-                webview_return(w, p->first.c_str(), 0, p->second.c_str());
-            },
-            payload);
+        reply_async(call, ms ? Json(*ms) : Json(nullptr));
     }).detach();
 }
 
@@ -413,6 +418,18 @@ fs::path launcher_program() {
 #endif
 }
 
+Json record_update(const update::Release &release) {
+    {
+        std::lock_guard lock(g_update_mutex);
+        g_update = release;
+    }
+    Json info = update_info(release);
+    Json e = info;
+    e["type"] = "update";
+    g_app.emit(e);
+    return info;
+}
+
 // Asks GitHub for the latest release on a thread of its own; when it is newer, the UI hears of it. Any failure (offline,
 // GitHub's rate limit) just means no update this time.
 void check_for_update() {
@@ -420,13 +437,7 @@ void check_for_update() {
         std::string error;
         const auto release = update::check(g_app.launcher->data_dir() / "update", MHF_VERSION_STRING, error);
         if (!release) return; // none newer, or offline or GitHub's rate limit: no update this time
-        {
-            std::lock_guard lock(g_update_mutex);
-            g_update = *release;
-        }
-        Json e = update_info(*release);
-        e["type"] = "update";
-        g_app.emit(e);
+        record_update(*release);
     }).detach();
 }
 
@@ -442,15 +453,8 @@ void on_check_update(const char *id, const Json &) {
         const auto release = update::check(g_app.launcher->data_dir() / "update", MHF_VERSION_STRING, error);
         Json result;
         if (release) {
-            {
-                std::lock_guard lock(g_update_mutex);
-                g_update = *release;
-            }
-            Json e = update_info(*release);
-            e["type"] = "update";
-            g_app.emit(e);
             result["status"] = "available";
-            result["update"] = update_info(*release);
+            result["update"] = record_update(*release);
         } else if (!error.empty()) {
             result["status"] = "error";
             result["message"] = error;
@@ -458,15 +462,7 @@ void on_check_update(const char *id, const Json &) {
             result["status"] = "upToDate";
             result["current"] = MHF_VERSION_STRING;
         }
-        auto *payload = new std::pair<std::string, std::string>(req_id, result.dump());
-        webview_dispatch(
-            g_app.view,
-            [](webview_t w, void *arg) {
-                auto *p = static_cast<std::pair<std::string, std::string> *>(arg);
-                webview_return(w, p->first.c_str(), 0, p->second.c_str());
-                delete p;
-            },
-            payload);
+        reply_async(req_id, result);
     }).detach();
 }
 

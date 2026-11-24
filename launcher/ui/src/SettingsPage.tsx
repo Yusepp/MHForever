@@ -37,6 +37,36 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: () => void; la
   return <button className={'tog' + (on ? ' on' : '')} onClick={onToggle} role="switch" aria-checked={on} aria-label={label} />;
 }
 
+function ToggleRow({ label, help, on, onToggle, prose }: {
+  label: string; help: string; on: boolean; onToggle: () => void; prose?: boolean;
+}) {
+  return (
+    <div className="srow">
+      <div className="slabel"><b>{label}</b><span className={prose ? 'prose' : undefined}>{help}</span></div>
+      <Toggle on={on} onToggle={onToggle} label={label} />
+    </div>
+  );
+}
+
+function Segmented<T extends string | number>({ label, value, options, onSelect, hidePill }: {
+  label: string;
+  value: T;
+  options: readonly { value: T; label: string }[];
+  onSelect: (value: T) => void;
+  hidePill?: boolean;
+}) {
+  const index = Math.max(0, options.findIndex((o) => o.value === value));
+  return (
+    <div className="seg wide" role="radiogroup" aria-label={label} style={{ '--n': options.length } as CSSProperties}>
+      {!hidePill && <span className="pill" style={{ transform: `translateX(${index * 100}%)` }} />}
+      {options.map((o) => (
+        <button key={String(o.value)} className={value === o.value ? 'on' : ''} role="radio" aria-checked={value === o.value}
+          onClick={() => onSelect(o.value)}>{o.label}</button>
+      ))}
+    </div>
+  );
+}
+
 function Volume({ id, label, value, onCommit }: { id: string; label: string; value: number; onCommit: (v: number) => void }) {
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
@@ -343,7 +373,6 @@ function PadControls({ pad, defaults, onChange }: {
   }, [capturing]);
 
   const stick = pad.stick ?? 'left';
-  const stickIndex = Math.max(0, stickChoices.findIndex((c) => c.value === stick));
   return (
     <>
       <div className="srow">
@@ -381,13 +410,7 @@ function PadControls({ pad, defaults, onChange }: {
       ))}
       <div className="srow">
         <div className="slabel"><b>Analog stick</b><span>Stick used to move the character.</span></div>
-        <div className="seg wide" role="radiogroup" aria-label="Analog stick" style={{ '--n': stickChoices.length } as CSSProperties}>
-          <span className="pill" style={{ transform: `translateX(${stickIndex * 100}%)` }} />
-          {stickChoices.map((choice) => (
-            <button key={choice.value} className={stick === choice.value ? 'on' : ''} role="radio" aria-checked={stick === choice.value}
-              onClick={() => onChange({ pad: { ...pad, stick: choice.value } })}>{choice.label}</button>
-          ))}
-        </div>
+        <Segmented label="Analog stick" value={stick} options={stickChoices} onSelect={(v) => onChange({ pad: { ...pad, stick: v } })} />
       </div>
     </>
   );
@@ -401,17 +424,12 @@ function Controls({ keys, pad, keyDefaults, padDefaults, onChange }: {
   onChange: (s: Partial<Settings>) => void;
 }) {
   const [device, setDevice] = useState<'keyboard' | 'controller'>('keyboard');
-  const options = [['keyboard', 'Keyboard'], ['controller', 'Controller']] as const;
+  const options = [{ value: 'keyboard', label: 'Keyboard' }, { value: 'controller', label: 'Controller' }] as const;
   return (
     <>
       <div className="srow">
         <div className="slabel"><b>Edit the controls of</b><span>Keyboard and controller can be used at the same time.</span></div>
-        <div className="seg wide" role="radiogroup" aria-label="Device" style={{ '--n': options.length } as CSSProperties}>
-          <span className="pill" style={{ transform: `translateX(${device === 'keyboard' ? 0 : 100}%)` }} />
-          {options.map(([id, label]) => (
-            <button key={id} className={device === id ? 'on' : ''} role="radio" aria-checked={device === id} onClick={() => setDevice(id)}>{label}</button>
-          ))}
-        </div>
+        <Segmented label="Device" value={device} options={options} onSelect={setDevice} />
       </div>
       {device === 'keyboard'
         ? <KeyboardControls keys={keys} defaults={keyDefaults} onChange={onChange} />
@@ -491,10 +509,12 @@ export function SettingsPage({ state, onChange, onPseudonym, onCopyCode, friendC
 
       <motion.div className="glass section" {...rise(0.1)}>
         <h3>Storage</h3>
-        <div className="srow">
-          <div className="slabel"><b>Keep a copy of my disc image</b><span>Stores a copy of the disc image in MHForever's folder when a game is added. Requires about 1 GB.</span></div>
-          <Toggle on={s.copyImage} onToggle={() => onChange({ copyImage: !s.copyImage })} label="Keep a copy of my disc image" />
-        </div>
+        <ToggleRow
+          label="Keep a copy of my disc image"
+          help="Stores a copy of the disc image in MHForever's folder when a game is added. Requires about 1 GB."
+          on={s.copyImage}
+          onToggle={() => onChange({ copyImage: !s.copyImage })}
+        />
         <div className="srow">
           <div className="slabel">
             <b>Saves folder</b>
@@ -526,13 +546,13 @@ export function SettingsPage({ state, onChange, onPseudonym, onCopyCode, friendC
             )}
           </div>
         </div>
-        <div className="srow">
-          <div className="slabel">
-            <b>Check for updates</b>
-            <span className="prose">Checks GitHub for a new release at startup. No other data is sent.</span>
-          </div>
-          <Toggle on={s.checkUpdates ?? true} onToggle={() => onChange({ checkUpdates: !(s.checkUpdates ?? true) })} label="Check for updates" />
-        </div>
+        <ToggleRow
+          label="Check for updates"
+          help="Checks GitHub for a new release at startup. No other data is sent."
+          prose
+          on={s.checkUpdates ?? true}
+          onToggle={() => onChange({ checkUpdates: !(s.checkUpdates ?? true) })}
+        />
       </motion.div>
     </section>
   );
@@ -562,43 +582,37 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
             <b>Graphics backend</b>
             <span>{(s.graphicsBackend ?? 'opengl') === 'vulkan' ? 'Vulkan 1.3+ (experimental).' : (s.graphicsBackend ?? 'opengl') === 'software' ? 'CPU software renderer.' : 'OpenGL 3.3 (default).'}</span>
           </div>
-          <div className="seg wide" role="radiogroup" aria-label="Graphics backend" style={{ '--n': 3 } as CSSProperties}>
-            <span className="pill" style={{ transform: `translateX(${Math.max(0, ['opengl', 'vulkan', 'software'].indexOf(s.graphicsBackend ?? 'opengl')) * 100}%)` }} />
-            {([['opengl', 'OpenGL'], ['vulkan', 'Vulkan'], ['software', 'Software']] as const).map(([id, label]) => (
-              <button key={id} className={(s.graphicsBackend ?? 'opengl') === id ? 'on' : ''} role="radio" aria-checked={(s.graphicsBackend ?? 'opengl') === id} onClick={() => onChange({ graphicsBackend: id })}>{label}</button>
-            ))}
-          </div>
+          <Segmented
+            label="Graphics backend"
+            value={s.graphicsBackend ?? 'opengl'}
+            options={[{ value: 'opengl', label: 'OpenGL' }, { value: 'vulkan', label: 'Vulkan' }, { value: 'software', label: 'Software' }]}
+            onSelect={(graphicsBackend) => onChange({ graphicsBackend })}
+          />
         </div>
         <div className="srow">
           <div className="slabel"><b>Internal resolution</b><span>{resolutions[s.scale - 1]}{s.scale === 4 ? ' (recommended)' : ''}</span></div>
-          <div className="seg wide" role="radiogroup" aria-label="Internal resolution" style={{ '--n': resolutions.length } as CSSProperties}>
-            <span className="pill" style={{ transform: `translateX(${(s.scale - 1) * 100}%)` }} />
-            {resolutions.map((_, i) => i + 1).map((n) => (
-              <button key={n} className={s.scale === n ? 'on' : ''} role="radio" aria-checked={s.scale === n} onClick={() => onChange({ scale: n })}>{n}×</button>
-            ))}
-          </div>
+          <Segmented
+            label="Internal resolution"
+            value={s.scale}
+            options={resolutions.map((_, i) => ({ value: i + 1, label: `${i + 1}×` }))}
+            onSelect={(scale) => onChange({ scale })}
+          />
         </div>
         <div className="srow">
           <div className="slabel"><b>Frame rate</b><span>{s.fps === 30 ? 'Original frame rate.' : `${s.fps} fps with interpolated frames. Experimental.`}</span></div>
-          <div className="seg wide" role="radiogroup" aria-label="Frame rate" style={{ '--n': frameRates.length } as CSSProperties}>
-            <span className="pill" style={{ transform: `translateX(${Math.max(0, frameRates.indexOf(s.fps)) * 100}%)` }} />
-            {frameRates.map((n) => (
-              <button key={n} className={s.fps === n ? 'on' : ''} role="radio" aria-checked={s.fps === n} onClick={() => onChange({ fps: n })}>{n}</button>
-            ))}
-          </div>
+          <Segmented
+            label="Frame rate"
+            value={s.fps}
+            options={frameRates.map((n) => ({ value: n, label: String(n) }))}
+            onSelect={(fps) => onChange({ fps })}
+          />
         </div>
-        <div className="srow">
-          <div className="slabel"><b>Fullscreen</b><span>Starts the game in fullscreen. Press F11 or Alt+Enter to switch while playing.</span></div>
-          <Toggle on={s.fullscreen} onToggle={() => onChange({ fullscreen: !s.fullscreen })} label="Fullscreen" />
-        </div>
-        {enhanced && <div className="srow">
-          <div className="slabel"><b>Widescreen</b><span>Fills wide windows and screens with a wider view.</span></div>
-          <Toggle on={!!s.widescreen} onToggle={() => onChange({ widescreen: !s.widescreen })} label="Widescreen" />
-        </div>}
-        <div className="srow">
-          <div className="slabel"><b>Smooth texture filtering</b><span>Applies bilinear filtering to the game's textures.</span></div>
-          <Toggle on={s.smoothTextures} onToggle={() => onChange({ smoothTextures: !s.smoothTextures })} label="Smooth texture filtering" />
-        </div>
+        <ToggleRow label="Fullscreen" help="Starts the game in fullscreen. Press F11 or Alt+Enter to switch while playing."
+          on={s.fullscreen} onToggle={() => onChange({ fullscreen: !s.fullscreen })} />
+        {enhanced && <ToggleRow label="Widescreen" help="Fills wide windows and screens with a wider view."
+          on={!!s.widescreen} onToggle={() => onChange({ widescreen: !s.widescreen })} />}
+        <ToggleRow label="Smooth texture filtering" help="Applies bilinear filtering to the game's textures."
+          on={s.smoothTextures} onToggle={() => onChange({ smoothTextures: !s.smoothTextures })} />
         <div className="srow">
           <div className="slabel">
             <b>Text font</b>
@@ -618,20 +632,22 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
             <b>HUD scale</b>
             <span>{(s.hudSize ?? 100) === 100 ? 'Original size.' : `Quest HUD at ${s.hudSize}% of its original size.`}</span>
           </div>
-          <div className="seg wide" role="radiogroup" aria-label="HUD scale" style={{ '--n': hudSizes.length } as CSSProperties}>
-            <span className="pill" style={{ transform: `translateX(${Math.max(0, hudSizes.indexOf(s.hudSize ?? 100)) * 100}%)` }} />
-            {hudSizes.map((n) => (
-              <button key={n} className={(s.hudSize ?? 100) === n ? 'on' : ''} role="radio" aria-checked={(s.hudSize ?? 100) === n} onClick={() => onChange({ hudSize: n })}>{n}%</button>
-            ))}
-          </div>
+          <Segmented
+            label="HUD scale"
+            value={s.hudSize ?? 100}
+            options={hudSizes.map((n) => ({ value: n, label: `${n}%` }))}
+            onSelect={(hudSize) => onChange({ hudSize })}
+          />
         </div>}
       </motion.div>
       {(s.graphicsBackend ?? 'opengl') === 'vulkan' && <motion.div className="glass section" {...rise(0.062)}>
         <h3>Vulkan Rendering</h3>
-        <div className="srow">
-          <div className="slabel"><b>Enhanced lighting</b><span>Enables modern Vulkan lighting, shadows, and visual effects. Can also be adjusted live in-game from the Esc menu.</span></div>
-          <Toggle on={!!s.enhancedLighting} onToggle={() => onChange({ enhancedLighting: !s.enhancedLighting })} label="Enhanced lighting" />
-        </div>
+        <ToggleRow
+          label="Enhanced lighting"
+          help="Enables modern Vulkan lighting, shadows, and visual effects. Can also be adjusted live in-game from the Esc menu."
+          on={!!s.enhancedLighting}
+          onToggle={() => onChange({ enhancedLighting: !s.enhancedLighting })}
+        />
         {s.enhancedLighting && (
           <>
             {([
@@ -646,10 +662,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
               ['vkVignette', 'Moody vignette', 'Subtle edge framing in caves, swamps, volcanoes, and sieges.'],
               ['vkKillcamDof', 'Killcam depth of field', 'Peripheral bokeh blur during the monster killcam.'],
             ] as const).map(([key, label, help]) => (
-              <div className="srow" key={key}>
-                <div className="slabel"><b>{label}</b><span>{help}</span></div>
-                <Toggle on={s[key] ?? true} onToggle={() => onChange({ [key]: !(s[key] ?? true) })} label={label} />
-              </div>
+              <ToggleRow key={key} label={label} help={help} on={s[key] ?? true} onToggle={() => onChange({ [key]: !(s[key] ?? true) })} />
             ))}
           </>
         )}
@@ -657,124 +670,69 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
 
       {enhanced && <motion.div className="glass section" {...rise(0.065)}>
         <h3>Gameplay QoL</h3>
-        <div className="srow">
-          <div className="slabel"><b>Show true weapon values</b><span>{fucomplete
+        <ToggleRow
+          label="Show true weapon values"
+          help={fucomplete
             ? "Uses FUComplete's true raw display for attack, element and status."
-            : "Displays attack and element without the game's display multipliers."}</span></div>
-          <Toggle on={s.trueWeaponValues} onToggle={() => onChange({ trueWeaponValues: !s.trueWeaponValues })} label="Show true weapon values" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Fast supply box</b><span>Shortens the delay between items taken from the supply box.</span></div>
-          <Toggle on={s.fastSupplyBox ?? false} onToggle={() => onChange({ fastSupplyBox: !(s.fastSupplyBox ?? false) })} label="Fast supply box" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Dynamic Guild quest scaling</b><span>Scales large-monster HP and part stagger in Guild quests to the active hunter count (1–4 players).</span></div>
-          <Toggle on={s.guildQuestScaling ?? false} onToggle={() => onChange({ guildQuestScaling: !(s.guildQuestScaling ?? false) })} label="Dynamic Guild quest scaling" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Quest auto-clear</b><span>Hold L + R + Select for 2 seconds during a quest to complete it.</span></div>
-          <Toggle on={s.questAutoclear ?? false} onToggle={() => onChange({ questAutoclear: !(s.questAutoclear ?? false) })} label="Quest auto-clear" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Smithy: browse with panels open</b><span>Keeps the smithy list scrollable while the materials or Info panel is open.</span></div>
-          <Toggle on={s.smithyBrowse ?? false} onToggle={() => onChange({ smithyBrowse: !(s.smithyBrowse ?? false) })} label="Smithy: browse with panels open" />
-        </div>
+            : "Displays attack and element without the game's display multipliers."}
+          on={s.trueWeaponValues}
+          onToggle={() => onChange({ trueWeaponValues: !s.trueWeaponValues })}
+        />
+        <ToggleRow label="Fast supply box" help="Shortens the delay between items taken from the supply box."
+          on={s.fastSupplyBox ?? false} onToggle={() => onChange({ fastSupplyBox: !(s.fastSupplyBox ?? false) })} />
+        <ToggleRow label="Dynamic Guild quest scaling" help="Scales large-monster HP and part stagger in Guild quests to the active hunter count (1–4 players)."
+          on={s.guildQuestScaling ?? false} onToggle={() => onChange({ guildQuestScaling: !(s.guildQuestScaling ?? false) })} />
+        <ToggleRow label="Quest auto-clear" help="Hold L + R + Select for 2 seconds during a quest to complete it."
+          on={s.questAutoclear ?? false} onToggle={() => onChange({ questAutoclear: !(s.questAutoclear ?? false) })} />
+        <ToggleRow label="Smithy: browse with panels open" help="Keeps the smithy list scrollable while the materials or Info panel is open."
+          on={s.smithyBrowse ?? false} onToggle={() => onChange({ smithyBrowse: !(s.smithyBrowse ?? false) })} />
         {s.smithyBrowse && (
-          <div className="srow">
-            <div className="slabel"><b>Smithy: improved layout</b><span>Shows the Info panel beside the item list and its materials.</span></div>
-            <Toggle on={s.smithyLayout ?? false} onToggle={() => onChange({ smithyLayout: !(s.smithyLayout ?? false) })} label="Smithy: improved layout" />
-          </div>
+          <ToggleRow label="Smithy: improved layout" help="Shows the Info panel beside the item list and its materials."
+            on={s.smithyLayout ?? false} onToggle={() => onChange({ smithyLayout: !(s.smithyLayout ?? false) })} />
         )}
-        <div className="srow">
-          <div className="slabel"><b>Analog camera</b><span>The right stick turns and tilts the camera in proportion to how far it is pushed.</span></div>
-          <Toggle on={s.analogCamera ?? false} onToggle={() => onChange({ analogCamera: !(s.analogCamera ?? false) })} label="Analog camera" />
-        </div>
+        <ToggleRow label="Analog camera" help="The right stick turns and tilts the camera in proportion to how far it is pushed."
+          on={s.analogCamera ?? false} onToggle={() => onChange({ analogCamera: !(s.analogCamera ?? false) })} />
         {s.analogCamera && (
           <>
             <PercentSlider id="camera-turn-speed" label="Analog camera turn speed" help="Turn speed at full stick deflection. 100% matches the D-pad." min={50} max={200} step={10} value={s.analogCameraTurnSpeed ?? 100} onCommit={(v) => onChange({ analogCameraTurnSpeed: v })} />
             <PercentSlider id="camera-tilt-speed" label="Analog camera tilt speed" help="Tilt speed at full stick deflection." min={50} max={200} step={10} value={s.analogCameraTiltSpeed ?? 100} onCommit={(v) => onChange({ analogCameraTiltSpeed: v })} />
-            <div className="srow">
-              <div className="slabel"><b>Mouse camera</b><span>The mouse controls the camera and bow and bowgun aiming. Press Esc to release the mouse.</span></div>
-              <Toggle on={s.mouseCamera ?? false} onToggle={() => onChange({ mouseCamera: !(s.mouseCamera ?? false) })} label="Mouse camera" />
-            </div>
+            <ToggleRow label="Mouse camera" help="The mouse controls the camera and bow and bowgun aiming. Press Esc to release the mouse."
+              on={s.mouseCamera ?? false} onToggle={() => onChange({ mouseCamera: !(s.mouseCamera ?? false) })} />
             {s.mouseCamera && (
               <PercentSlider id="mouse-camera-speed" label="Mouse sensitivity" help="Camera sensitivity to mouse movement." min={25} max={300} step={25} value={s.mouseCameraSpeed ?? 100} onCommit={(v) => onChange({ mouseCameraSpeed: v })} />
             )}
           </>
         )}
-        <div className="srow">
-          <div className="slabel"><b>Gathering assistance</b><span>Shows nearby gathering, fishing, and carving targets; Circle selects a usable pickaxe, bug net, or bait.</span></div>
-          <Toggle on={s.gatheringAssistance ?? false} onToggle={() => onChange({ gatheringAssistance: !(s.gatheringAssistance ?? false) })} label="Gathering assistance" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Infinite gathering tools</b><span>Mine, catch bugs, and fish without carrying pickaxes, bug nets, or bait (uses a temporary high-tier tool and removes it afterward).</span></div>
-          <Toggle on={s.infiniteGatheringTools ?? false} onToggle={() => onChange({ infiniteGatheringTools: !(s.infiniteGatheringTools ?? false) })} label="Infinite gathering tools" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Quest camp box icons</b><span>Shows contextual gathering-style icons near the camp Blue Supply Box and Red Delivery Box (red X when carrying nothing to deliver).</span></div>
-          <Toggle on={s.questBoxIcons ?? false} onToggle={() => onChange({ questBoxIcons: !(s.questBoxIcons ?? false) })} label="Quest camp box icons" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Modern carving</b><span>Hold Circle to repeat gathering, carving, mining, and bug-catching at the same spot.</span></div>
-          <Toggle on={s.modernCarving ?? false} onToggle={() => onChange({ modernCarving: !(s.modernCarving ?? false) })} label="Modern carving" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Invulnerable post-quest carving</b><span>Ignores hits, roars and wind while carving after Quest Clear; normal vulnerability resumes right away.</span></div>
-          <Toggle on={s.invulnerableCarveQuest ?? false} onToggle={() => onChange({ invulnerableCarveQuest: !(s.invulnerableCarveQuest ?? false) })} label="Invulnerable post-quest carving" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Show key quest markers</b><span>Marks Village and Guild Hall key quests with a gold key, including completed quests.</span></div>
-          <Toggle on={s.keyQuestMarkers ?? false} onToggle={() => onChange({ keyQuestMarkers: !(s.keyQuestMarkers ?? false) })} label="Show key quest markers" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Better sharpness gauge</b><span>Shows how much of each sharpness tier is left during a quest.</span></div>
-          <Toggle on={s.betterSharpness ?? false} onToggle={() => onChange({ betterSharpness: !(s.betterSharpness ?? false) })} label="Better sharpness gauge" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Floating damage numbers</b><span>Displays World/Rise/Wilds-style floating damage numbers when hitting monsters.</span></div>
-          <Toggle on={s.damageNumbers ?? false} onToggle={() => onChange({ damageNumbers: !(s.damageNumbers ?? false) })} label="Floating damage numbers" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Capturable monster indicator</b><span>Turns a capturable large monster's minimap dot cyan instead of pink.</span></div>
-          <Toggle on={s.capturableIndicator ?? false} onToggle={() => onChange({ capturableIndicator: !(s.capturableIndicator ?? false) })} label="Capturable monster indicator" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Quest-start monster tracker (60s)</b><span>Reveals large monsters on the map for the first minute of each quest, then expires naturally.</span></div>
-          <Toggle on={s.questStartTracker ?? false} onToggle={() => onChange({ questStartTracker: !(s.questStartTracker ?? false) })} label="Quest-start monster tracker (60s)" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Skip post-quest countdown</b><span>Hold Select after Quest Clear to fast-forward the 60-second return countdown.</span></div>
-          <Toggle on={s.skipQuestClearTimer ?? false} onToggle={() => onChange({ skipQuestClearTimer: !(s.skipQuestClearTimer ?? false) })} label="Skip post-quest countdown" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Infinite whetstone</b><span>Sharpen without consuming Whetstones (supplies a temporary Whetstone if none carried).</span></div>
-          <Toggle on={s.infiniteWhetstone ?? false} onToggle={() => onChange({ infiniteWhetstone: !(s.infiniteWhetstone ?? false) })} label="Infinite whetstone" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Infinite paintballs</b><span>Throw Paintballs without consuming them (supplies a temporary Paintball if none carried).</span></div>
-          <Toggle on={s.infinitePaintballs ?? false} onToggle={() => onChange({ infinitePaintballs: !(s.infinitePaintballs ?? false) })} label="Infinite paintballs" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Combo books from item box</b><span>Guarantees 100% combine rate once you own all 5 Books of Combos (in Item Box or Pouch).</span></div>
-          <Toggle on={s.comboBooksFromBox ?? false} onToggle={() => onChange({ comboBooksFromBox: !(s.comboBooksFromBox ?? false) })} label="Combo books from item box" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Hunter loadouts (Item &amp; Armor sets)</b><span>Press Select in your House or Guild Hall Item Box to save and load up to 5 Item &amp; Armor Sets.</span></div>
-          <Toggle on={s.itemPouchLoadouts ?? false} onToggle={() => onChange({ itemPouchLoadouts: !(s.itemPouchLoadouts ?? false) })} label="Hunter loadouts (Item & Armor sets)" />
-        </div>
-        <div className="srow">
-          <div className="slabel"><b>Show hunting horn songs</b><span>Displays the hunting horn's songs, the song being played and active effects during quests.</span></div>
-          <Toggle on={s.hornSongs ?? false} onToggle={() => onChange({ hornSongs: !(s.hornSongs ?? false) })} label="Show hunting horn songs" />
-        </div>
+        {([
+          ['gatheringAssistance', 'Gathering assistance', 'Shows nearby gathering, fishing, and carving targets; Circle selects a usable pickaxe, bug net, or bait.'],
+          ['infiniteGatheringTools', 'Infinite gathering tools', 'Mine, catch bugs, and fish without carrying pickaxes, bug nets, or bait (uses a temporary high-tier tool and removes it afterward).'],
+          ['questBoxIcons', 'Quest camp box icons', 'Shows contextual gathering-style icons near the camp Blue Supply Box and Red Delivery Box (red X when carrying nothing to deliver).'],
+          ['modernCarving', 'Modern carving', 'Hold Circle to repeat gathering, carving, mining, and bug-catching at the same spot.'],
+          ['invulnerableCarveQuest', 'Invulnerable post-quest carving', 'Ignores hits, roars and wind while carving after Quest Clear; normal vulnerability resumes right away.'],
+          ['keyQuestMarkers', 'Show key quest markers', 'Marks Village and Guild Hall key quests with a gold key, including completed quests.'],
+          ['betterSharpness', 'Better sharpness gauge', 'Shows how much of each sharpness tier is left during a quest.'],
+          ['damageNumbers', 'Floating damage numbers', 'Displays World/Rise/Wilds-style floating damage numbers when hitting monsters.'],
+          ['capturableIndicator', 'Capturable monster indicator', "Turns a capturable large monster's minimap dot cyan instead of pink."],
+          ['questStartTracker', 'Quest-start monster tracker (60s)', 'Reveals large monsters on the map for the first minute of each quest, then expires naturally.'],
+          ['skipQuestClearTimer', 'Skip post-quest countdown', 'Hold Select after Quest Clear to fast-forward the 60-second return countdown.'],
+          ['infiniteWhetstone', 'Infinite whetstone', 'Sharpen without consuming Whetstones (supplies a temporary Whetstone if none carried).'],
+          ['infinitePaintballs', 'Infinite paintballs', 'Throw Paintballs without consuming them (supplies a temporary Paintball if none carried).'],
+          ['comboBooksFromBox', 'Combo books from item box', 'Guarantees 100% combine rate once you own all 5 Books of Combos (in Item Box or Pouch).'],
+          ['itemPouchLoadouts', 'Hunter loadouts (Item & Armor sets)', 'Press Select in your House or Guild Hall Item Box to save and load up to 5 Item & Armor Sets.'],
+          ['hornSongs', 'Show hunting horn songs', "Displays the hunting horn's songs, the song being played and active effects during quests."],
+        ] as const).map(([key, label, help]) => (
+          <ToggleRow key={key} label={label} help={help} on={s[key] ?? false} onToggle={() => onChange({ [key]: !(s[key] ?? false) })} />
+        ))}
         {s.hornSongs && (
           <div className="srow">
             <div className="slabel"><b>Hunting horn songs position</b><span>{(s.hornSongsPlace ?? '').startsWith('custom:') ? 'Custom position set in game.' : 'Position of the song list. It can also be moved in game from Esc > QoL.'}</span></div>
-            <div className="seg wide" role="radiogroup" aria-label="Hunting horn songs position" style={{ '--n': songPlaces.length } as CSSProperties}>
-              {!(s.hornSongsPlace ?? '').startsWith('custom:') && <span className="pill" style={{ transform: `translateX(${Math.max(0, songPlaces.findIndex((p) => p.id === (s.hornSongsPlace ?? 'next-to-sheet'))) * 100}%)` }} />}
-              {songPlaces.map((p) => (
-                <button key={p.id} className={(s.hornSongsPlace ?? 'next-to-sheet') === p.id ? 'on' : ''} role="radio" aria-checked={(s.hornSongsPlace ?? 'next-to-sheet') === p.id} onClick={() => onChange({ hornSongsPlace: p.id })}>{p.label}</button>
-              ))}
-            </div>
+            <Segmented
+              label="Hunting horn songs position"
+              value={s.hornSongsPlace ?? 'next-to-sheet'}
+              options={songPlaces.map((p) => ({ value: p.id, label: p.label }))}
+              onSelect={(hornSongsPlace) => onChange({ hornSongsPlace })}
+              hidePill={(s.hornSongsPlace ?? '').startsWith('custom:')}
+            />
           </div>
         )}
       </motion.div>}
@@ -783,18 +741,16 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
         <TexturePackSection state={state} onState={onState} say={say} toggle={(p) => <Toggle {...p} />} />
         {s.texturePack && s.texturePackEnabled && (
           <>
-            <div className="srow">
-              <div className="slabel"><b>Mipmaps</b><span>Smooths distant textures and reduces shimmering.</span></div>
-              <Toggle on={s.packMipmaps ?? false} onToggle={() => onChange({ packMipmaps: !(s.packMipmaps ?? false) })} label="Mipmaps" />
-            </div>
+            <ToggleRow label="Mipmaps" help="Smooths distant textures and reduces shimmering."
+              on={s.packMipmaps ?? false} onToggle={() => onChange({ packMipmaps: !(s.packMipmaps ?? false) })} />
             <div className="srow">
               <div className="slabel"><b>Anisotropic filtering</b><span>Sharpens textures viewed at an angle.</span></div>
-              <div className="seg wide" role="radiogroup" aria-label="Anisotropic filtering" style={{ '--n': anisotropyLevels.length } as CSSProperties}>
-                <span className="pill" style={{ transform: `translateX(${Math.max(0, anisotropyLevels.indexOf(s.anisotropy ?? 16)) * 100}%)` }} />
-                {anisotropyLevels.map((n) => (
-                  <button key={n} className={(s.anisotropy ?? 16) === n ? 'on' : ''} role="radio" aria-checked={(s.anisotropy ?? 16) === n} onClick={() => onChange({ anisotropy: n })}>{n === 1 ? 'Off' : `${n}×`}</button>
-                ))}
-              </div>
+              <Segmented
+                label="Anisotropic filtering"
+                value={s.anisotropy ?? 16}
+                options={anisotropyLevels.map((n) => ({ value: n, label: n === 1 ? 'Off' : `${n}×` }))}
+                onSelect={(anisotropy) => onChange({ anisotropy })}
+              />
             </div>
           </>
         )}
@@ -831,13 +787,12 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
                 : `The game starts in ${languageNames[s.language] ?? s.language}.`}
             </span>
           </div>
-          <div className="seg wide" role="radiogroup" aria-label="Language" style={{ '--n': languages.length } as CSSProperties}>
-            <span className="pill" style={{ transform: `translateX(${Math.max(0, languages.findIndex(([id]) => id === s.language)) * 100}%)` }} />
-            {languages.map(([id, label]) => (
-              <button key={id} className={s.language === id ? 'on' : ''} role="radio" aria-checked={s.language === id}
-                onClick={() => onChange({ language: id })}>{label}</button>
-            ))}
-          </div>
+          <Segmented
+            label="Language"
+            value={s.language}
+            options={languages.map(([id, label]) => ({ value: id, label }))}
+            onSelect={(language) => onChange({ language })}
+          />
         </div>
       </motion.div>}
       <motion.div className="glass section" {...rise(0.08)}>

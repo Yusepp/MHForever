@@ -356,6 +356,19 @@ Launcher::SavesFolderChange Launcher::set_saves_folder(const fs::path &folder) {
 
 namespace {
 
+std::string local_timestamp(const char *fmt) {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    char text[32];
+    std::strftime(text, sizeof text, fmt, &tm);
+    return std::string(text);
+}
+
 // The settings a copy keeps for itself (launcher.json "gameSettings"), started from the launcher's "settings" as
 // apply_settings() starts them.
 Json &own_settings(Json &data, const std::string &disc_id) {
@@ -574,9 +587,7 @@ bool Launcher::install_texture_pack(const std::string &disc_id, const fs::path &
         error = "Not enough free space: the pack needs " + std::to_string(total >> 20) + " MB.";
         return false;
     }
-    char stamp[32];
-    const std::time_t now = std::time(nullptr);
-    std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+    const std::string stamp = local_timestamp("%Y-%m-%d_%H-%M-%S");
     const fs::path incomplete = textures / (std::string(".incomplete-") + disc_id + "-" + stamp);
     std::uintmax_t done = 0;
     for (const auto &[file, size] : files) {
@@ -737,18 +748,7 @@ Launcher::SaveImport Launcher::import_saves(const std::string &disc_id, const st
         result.error = "Cannot create the saves folder: " + ec.message();
         return result;
     }
-    const auto stamp = [] {
-        const std::time_t now = std::time(nullptr);
-        std::tm tm{};
-#if defined(_WIN32)
-        localtime_s(&tm, &now);
-#else
-        localtime_r(&now, &tm);
-#endif
-        char text[32];
-        std::strftime(text, sizeof text, "%Y%m%d-%H%M%S", &tm);
-        return std::string(text);
-    };
+    const auto stamp = [] { return local_timestamp("%Y%m%d-%H%M%S"); };
     for (const SaveCandidate &c : chosen) {
         const fs::path source = c.path;
         const std::string name = platform::to_utf8(fs::path(c.folder).filename());
@@ -1030,9 +1030,10 @@ Json Launcher::state() {
     s["blocked"] = data_["blocked"].is_array() ? data_["blocked"] : Json(Json::Array{});
     const CatalogEntry *shown = nullptr;
     chosen_copy(data_, kAnyGame, &shown);
+    const Json defaults = default_settings();
     s["settings"] = settings_for(data_, shown != nullptr ? shown->disc_id : "");
-    s["keyDefaults"] = default_settings()["keys"]; // what "Restore defaults" puts back
-    s["padDefaults"] = default_settings()["pad"];
+    s["keyDefaults"] = defaults["keys"]; // what "Restore defaults" puts back
+    s["padDefaults"] = defaults["pad"];
     s["stats"] = data_["stats"];
     s["savesFolder"] = platform::to_utf8(saves_dir_);
     s["savesFolderCustom"] = !data_["savesFolder"].as_string().empty();
@@ -1041,7 +1042,6 @@ Json Launcher::state() {
     s["texturePackInstalled"] = shown != nullptr && !pack.empty() && platform::from_utf8(pack) == installed_texture_pack(shown->disc_id);
     s["fdxData"] = shown != nullptr && has_fdx_data(shown->disc_id); // Freedom DX's folder in the shown copy's saves
     Json games(Json::Array{});
-    const CatalogEntry *playable = nullptr;
     for (const auto &g : data_["games"].as_array()) {
         const CatalogEntry *e = entry_for(g["discId"].as_string());
         if (e == nullptr) continue;
@@ -1059,12 +1059,11 @@ Json Launcher::state() {
     }
     s["games"] = games;
     // Home, Settings and Play work on one copy of the game: the one the player chose, else the first playable.
-    chosen_copy(data_, kAnyGame, &playable);
-    s["selectedDisc"] = playable != nullptr ? std::string(playable->disc_id) : std::string();
+    s["selectedDisc"] = shown != nullptr ? std::string(shown->disc_id) : std::string();
     Json exe;
-    const fs::path found = playable ? find_executable(*playable) : fs::path{};
+    const fs::path found = shown ? find_executable(*shown) : fs::path{};
     exe["path"] = platform::to_utf8(found);
-    exe["found"] = !found.empty() || playable == nullptr;
+    exe["found"] = !found.empty() || shown == nullptr;
     s["executable"] = exe;
     return s;
 }
@@ -1172,19 +1171,7 @@ std::string room_code(const std::string &text) {
 void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     Json &launcher_settings = data_["settings"];
     // The copy's settings start as what the launcher.json "settings" hold, so nobody loses what they had set.
-    Json *own = nullptr;
-    if (!disc_id.empty()) {
-        Json &all = data_["gameSettings"];
-        if (!all[disc_id].is_object()) {
-            Json seed = launcher_settings;
-            for (const auto &[k, v] : launcher_settings.as_object()) {
-                if (is_launcher_setting(k)) seed.object().erase(k);
-            }
-            all[disc_id] = seed;
-        }
-        own = &all[disc_id];
-    }
-    Json &s = own != nullptr ? *own : launcher_settings;
+    Json &s = !disc_id.empty() ? own_settings(data_, disc_id) : launcher_settings;
     const auto num = [&](const char *key, double lo, double hi) {
         if (partial[key].is_number()) s[key] = std::clamp(std::round(partial[key].as_number()), lo, hi);
     };
@@ -1649,27 +1636,30 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
         plan.args.push_back("--mouse-camera-speed");
         plan.args.push_back(num("mouseCameraSpeed"));
     }
-    if (std::string_view(entry->game) == "mhfu" && s["gatheringAssistance"].as_bool()) {
-        plan.args.push_back("--gathering-indicators");
-        plan.args.push_back("--auto-gathering-tools");
-    }
-    if (std::string_view(entry->game) == "mhfu" && s["infiniteGatheringTools"].as_bool())
-        plan.args.push_back("--infinite-gathering-tools");
-    if (std::string_view(entry->game) == "mhfu" && s["questBoxIcons"].as_bool())
-        plan.args.push_back("--quest-box-icons");
-    if (std::string_view(entry->game) == "mhfu" && s["modernCarving"].as_bool()) plan.args.push_back("--modern-carving");
-    if (std::string_view(entry->game) == "mhfu" && s["invulnerableCarveQuest"].as_bool()) plan.args.push_back("--invulnerable-carve-quest");
-    if (std::string_view(entry->game) == "mhfu" && s["keyQuestMarkers"].as_bool()) plan.args.push_back("--key-quest-markers");
-    if (std::string_view(entry->game) == "mhfu" && s["betterSharpness"].as_bool()) plan.args.push_back("--better-sharpness");
     if (std::string_view(entry->game) == "mhfu") {
-        if (s["skipQuestClearTimer"].as_bool()) plan.args.push_back("--skip-quest-clear-timer");
-        if (s["itemPouchLoadouts"].as_bool()) plan.args.push_back("--item-pouch-loadouts");
-        if (s["capturableIndicator"].as_bool()) plan.args.push_back("--capturable-indicator");
-        if (s["questStartTracker"].as_bool()) plan.args.push_back("--quest-start-tracker");
-        if (s["infiniteWhetstone"].as_bool()) plan.args.push_back("--infinite-whetstone");
-        if (s["damageNumbers"].as_bool()) plan.args.push_back("--damage-numbers");
-        if (s["comboBooksFromBox"].as_bool()) plan.args.push_back("--combo-books-from-box");
-        if (s["infinitePaintballs"].as_bool()) plan.args.push_back("--infinite-paintballs");
+        if (s["gatheringAssistance"].as_bool()) {
+            plan.args.push_back("--gathering-indicators");
+            plan.args.push_back("--auto-gathering-tools");
+        }
+        static constexpr std::pair<const char *, const char *> kMhfuBoolFlags[] = {
+            {"infiniteGatheringTools", "--infinite-gathering-tools"},
+            {"questBoxIcons", "--quest-box-icons"},
+            {"modernCarving", "--modern-carving"},
+            {"invulnerableCarveQuest", "--invulnerable-carve-quest"},
+            {"keyQuestMarkers", "--key-quest-markers"},
+            {"betterSharpness", "--better-sharpness"},
+            {"skipQuestClearTimer", "--skip-quest-clear-timer"},
+            {"itemPouchLoadouts", "--item-pouch-loadouts"},
+            {"capturableIndicator", "--capturable-indicator"},
+            {"questStartTracker", "--quest-start-tracker"},
+            {"infiniteWhetstone", "--infinite-whetstone"},
+            {"damageNumbers", "--damage-numbers"},
+            {"comboBooksFromBox", "--combo-books-from-box"},
+            {"infinitePaintballs", "--infinite-paintballs"},
+        };
+        for (const auto &[key, flag] : kMhfuBoolFlags) {
+            if (s[key].as_bool()) plan.args.push_back(flag);
+        }
     }
     if (s["hornSongs"].as_bool()) plan.args.push_back("--horn-songs");
     if (s["hornSongsPlace"].is_string()) { // even with the songs off: the in-game menu can turn them on while playing
