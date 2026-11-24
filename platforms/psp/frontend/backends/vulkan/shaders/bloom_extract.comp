@@ -59,8 +59,8 @@ float karis_weight(vec3 c) {
 }
 
 vec3 sample_scene(LightingParams p, vec2 uv) {
-    return texture(sampler2D(u_textures[nonuniformEXT(p.tex_slots.x)],
-                             u_samplers[nonuniformEXT(p.aux_slots.y)]),
+    return texture(sampler2D(u_textures[p.tex_slots.x],
+                             u_samplers[p.aux_slots.y]),
                    clamp(uv, vec2(0.001), vec2(0.999))).rgb;
 }
 

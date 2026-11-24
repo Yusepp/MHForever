@@ -67,17 +67,17 @@ void main() {
     ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
     if (ip.x >= int(p.vz_and_size.z) || ip.y >= int(p.vz_and_size.w)) return;
 
-    vec4 scene = texelFetch(u_textures[nonuniformEXT(p.tex_slots.x)], ip, 0);
+    vec4 scene = texelFetch(u_textures[p.tex_slots.x], ip, 0);
     vec3 col = scene.rgb;
     vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
 
     uint dslot = p.tex_slots.y;
-    float d_here = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
+    float d_here = texelFetch(u_textures[dslot], ip, 0).r;
     bool is_sky = (d_here >= 0.99992 || d_here <= 0.00001);
 
     // 1. Depth-aware bilateral upsample of denoised half-res GTAO, Contact Shadows & view-space normal.
     if (!is_sky && p.tex_slots.z != 0u) {
-        ivec2 gsize = textureSize(u_textures[nonuniformEXT(p.tex_slots.z)], 0);
+        ivec2 gsize = textureSize(u_textures[p.tex_slots.z], 0);
         ivec2 gmax = gsize - ivec2(1);
         ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
         vec2 gpos = vec2(ip) * 0.5 - 0.25;
@@ -92,9 +92,9 @@ void main() {
             for (int dx = 0; dx <= 1; ++dx) {
                 ivec2 gc = clamp(base + ivec2(dx, dy), ivec2(0), gmax);
                 ivec2 fc = clamp(gc * 2, ivec2(0), full_max);
-                float ds = texelFetch(u_textures[nonuniformEXT(dslot)], fc, 0).r;
+                float ds = texelFetch(u_textures[dslot], fc, 0).r;
                 float valid = (ds < 0.99992 && ds > 0.00001) ? 1.0 : 0.0;
-                vec4 g = texelFetch(u_textures[nonuniformEXT(p.tex_slots.z)], gc, 0);
+                vec4 g = texelFetch(u_textures[p.tex_slots.z], gc, 0);
                 float bw = (dx == 1 ? f.x : 1.0 - f.x) * (dy == 1 ? f.y : 1.0 - f.y);
                 float dw = exp(-abs(ds - d_here) * 3500.0) * valid;
                 float w = bw * dw + 1e-4;
@@ -152,14 +152,14 @@ void main() {
 
         // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash (explosions/fireballs/lightning).
         if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
-            vec3 ssgi = texture(sampler2D(u_textures[nonuniformEXT(p.ext_slots.x)],
-                                          u_samplers[nonuniformEXT(p.aux_slots.y)]),
+            vec3 ssgi = texture(sampler2D(u_textures[p.ext_slots.x],
+                                          u_samplers[p.aux_slots.y]),
                                 uv).rgb;
             col += ssgi * (0.35 + 0.65 * col) * (p.world_up_view.w * (0.45 + 0.55 * ao));
         }
         if (p.ext_slots.y != 0u) {
-            vec3 flash = texture(sampler2D(u_textures[nonuniformEXT(p.ext_slots.y)],
-                                           u_samplers[nonuniformEXT(p.aux_slots.y)]),
+            vec3 flash = texture(sampler2D(u_textures[p.ext_slots.y],
+                                           u_samplers[p.aux_slots.y]),
                                  uv).rgb;
             // Subtle room-wide colored illumination during bright explosions, fireballs & thunderbolts.
             col += flash * (0.25 + 0.75 * col) * (0.32 * (0.45 + 0.55 * ao));
@@ -168,24 +168,24 @@ void main() {
 
     // 5. Smooth bilinear upsample of quarter-res volumetric fog & sun shafts.
     if (p.tex_slots.w != 0u) {
-        vec4 vol = texture(sampler2D(u_textures[nonuniformEXT(p.tex_slots.w)],
-                                     u_samplers[nonuniformEXT(p.aux_slots.y)]),
+        vec4 vol = texture(sampler2D(u_textures[p.tex_slots.w],
+                                     u_samplers[p.aux_slots.y]),
                            uv);
         col = col * vol.a + vol.rgb;
     }
 
     // 6. Selective emissive bloom + subtle rising heat-shimmer on warm fire/lava halos (100% race-free).
     if (p.aux_slots.x != 0u && p.bloom_rim.y > 0.001) {
-        vec3 bloom = texture(sampler2D(u_textures[nonuniformEXT(p.aux_slots.x)],
-                                       u_samplers[nonuniformEXT(p.aux_slots.y)]),
+        vec3 bloom = texture(sampler2D(u_textures[p.aux_slots.x],
+                                       u_samplers[p.aux_slots.y]),
                              uv).rgb;
         float warm_fire = clamp((bloom.r - bloom.b * 1.35) * 3.0, 0.0, 1.0);
         if (warm_fire > 0.05) {
             float phase = p.sun_screen.w * 0.22;
             vec2 heat_off = vec2(sin(uv.y * 55.0 + phase) * 0.0014,
                                  -abs(cos(uv.x * 42.0 - phase * 0.8)) * 0.0018) * warm_fire;
-            vec3 bloom_haze = texture(sampler2D(u_textures[nonuniformEXT(p.aux_slots.x)],
-                                                u_samplers[nonuniformEXT(p.aux_slots.y)]),
+            vec3 bloom_haze = texture(sampler2D(u_textures[p.aux_slots.x],
+                                                u_samplers[p.aux_slots.y]),
                                       clamp(uv + heat_off, vec2(0.001), vec2(0.999))).rgb;
             bloom = mix(bloom, bloom_haze, 0.55);
         }

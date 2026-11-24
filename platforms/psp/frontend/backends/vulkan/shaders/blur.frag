@@ -17,8 +17,8 @@ layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 o_color;
 
 vec3 tap(vec2 uv) {
-    return texture(sampler2D(u_textures[nonuniformEXT(pc.tex_idx)],
-                             u_samplers[nonuniformEXT(pc.sampler_idx)]), uv).rgb;
+    return texture(sampler2D(u_textures[pc.tex_idx],
+                             u_samplers[pc.sampler_idx]), uv).rgb;
 }
 
 void main() {

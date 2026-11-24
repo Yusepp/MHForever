@@ -38,8 +38,8 @@ layout(push_constant) uniform LightingPush {
 } pc;
 
 vec3 tap(uint slot, uint samp, vec2 uv) {
-    return texture(sampler2D(u_textures[nonuniformEXT(slot)],
-                             u_samplers[nonuniformEXT(samp)]),
+    return texture(sampler2D(u_textures[slot],
+                             u_samplers[samp]),
                    clamp(uv, vec2(0.001), vec2(0.999))).rgb;
 }
 

@@ -65,7 +65,7 @@ void main() {
     ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
     ivec2 ip = clamp(gid * 2, ivec2(0), full_max);
     uint dslot = p.tex_slots.y;
-    float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
+    float d0 = texelFetch(u_textures[dslot], ip, 0).r;
 
     // Skybox / empty depth: full visibility, no AO, no contact shadow.
     if (d0 >= 0.99992 || d0 <= 0.00001) {
@@ -82,10 +82,10 @@ void main() {
     ivec2 ipU = clamp(ip - ivec2(0, 2), ivec2(0), full_max);
     ivec2 ipD = clamp(ip + ivec2(0, 2), ivec2(0), full_max);
 
-    float dL = texelFetch(u_textures[nonuniformEXT(dslot)], ipL, 0).r;
-    float dR = texelFetch(u_textures[nonuniformEXT(dslot)], ipR, 0).r;
-    float dU = texelFetch(u_textures[nonuniformEXT(dslot)], ipU, 0).r;
-    float dD = texelFetch(u_textures[nonuniformEXT(dslot)], ipD, 0).r;
+    float dL = texelFetch(u_textures[dslot], ipL, 0).r;
+    float dR = texelFetch(u_textures[dslot], ipR, 0).r;
+    float dU = texelFetch(u_textures[dslot], ipU, 0).r;
+    float dD = texelFetch(u_textures[dslot], ipD, 0).r;
 
     vec3 PL = view_pos_at(p, ipL, dL);
     vec3 PR = view_pos_at(p, ipR, dR);
@@ -122,7 +122,7 @@ void main() {
                 vec2 off = dir * (frac * radius_px);
 
                 ivec2 q1 = clamp(ip + ivec2(off), ivec2(0), full_max);
-                float ds1 = texelFetch(u_textures[nonuniformEXT(dslot)], q1, 0).r;
+                float ds1 = texelFetch(u_textures[dslot], q1, 0).r;
                 if (ds1 < 0.99992) {
                     vec3 S1 = view_pos_at(p, q1, ds1) - P;
                     float len2 = dot(S1, S1);
@@ -134,7 +134,7 @@ void main() {
                 }
 
                 ivec2 q2 = clamp(ip - ivec2(off), ivec2(0), full_max);
-                float ds2 = texelFetch(u_textures[nonuniformEXT(dslot)], q2, 0).r;
+                float ds2 = texelFetch(u_textures[dslot], q2, 0).r;
                 if (ds2 < 0.99992) {
                     vec3 S2 = view_pos_at(p, q2, ds2) - P;
                     float len2 = dot(S2, S2);
@@ -186,7 +186,7 @@ void main() {
                 if (quv.x < 0.0 || quv.x > 1.0 || quv.y < 0.0 || quv.y > 1.0) break;
 
                 ivec2 qip = clamp(ivec2(quv * p.vz_and_size.zw), ivec2(0), full_max);
-                float qd = texelFetch(u_textures[nonuniformEXT(dslot)], qip, 0).r;
+                float qd = texelFetch(u_textures[dslot], qip, 0).r;
                 if (qd >= 0.99992 || qd <= 0.00001) continue;
 
                 float buf_z = linear_eye_z(p, qd);
@@ -221,7 +221,7 @@ void main() {
                     if (quv.x < 0.0 || quv.x > 1.0 || quv.y < 0.0 || quv.y > 1.0) break;
 
                     ivec2 qip = clamp(ivec2(quv * p.vz_and_size.zw), ivec2(0), full_max);
-                    float qd = texelFetch(u_textures[nonuniformEXT(dslot)], qip, 0).r;
+                    float qd = texelFetch(u_textures[dslot], qip, 0).r;
                     if (qd >= 0.99992 || qd <= 0.00001) continue;
 
                     float buf_z = linear_eye_z(p, qd);

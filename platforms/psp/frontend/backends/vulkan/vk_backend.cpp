@@ -1135,6 +1135,7 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     pkey.spec_clear = clear ? 1u : 0u;
     pkey.spec_textured = textured ? 1u : 0u;
     pkey.spec_alpha_test = alpha_test ? 1u : 0u;
+    pkey.spec_zrange = zrange ? 1u : 0u;
 
     VkBool32 blend_en = VK_FALSE;
     VkColorBlendEquationEXT blend_eq{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,

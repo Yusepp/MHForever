@@ -48,9 +48,9 @@ void main() {
     uint dslot = p.tex_slots.y;
     uint gslot = p.ext_slots.y;
 
-    vec4 center = texelFetch(u_textures[nonuniformEXT(gslot)], gid, 0);
+    vec4 center = texelFetch(u_textures[gslot], gid, 0);
     ivec2 ip0 = clamp(gid * 2, ivec2(0), full_max);
-    float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip0, 0).r;
+    float d0 = texelFetch(u_textures[dslot], ip0, 0).r;
     if (d0 >= 0.99992 || d0 <= 0.00001) {
         imageStore(u_gtao_blur_out, gid, vec4(1.0, 0.5, 0.5, 1.0));
         return;
@@ -74,11 +74,11 @@ void main() {
     for (int i = 0; i < 8; ++i) {
         ivec2 ng = clamp(gid + kOffs[i], ivec2(0), gmax);
         ivec2 nip = clamp(ng * 2, ivec2(0), full_max);
-        float dn = texelFetch(u_textures[nonuniformEXT(dslot)], nip, 0).r;
+        float dn = texelFetch(u_textures[dslot], nip, 0).r;
         if (dn >= 0.99992 || dn <= 0.00001) continue;
         float dw = exp(-abs(dn - d0) * 3200.0);
         float w = kWeights[i] * dw;
-        vec4 s = texelFetch(u_textures[nonuniformEXT(gslot)], ng, 0);
+        vec4 s = texelFetch(u_textures[gslot], ng, 0);
         ao_sum += s.r * w;
         cs_sum += s.a * w;
         w_sum += w;

@@ -64,7 +64,7 @@ void main() {
     ivec2 full_max = full_size - ivec2(1);
     ivec2 ip = clamp(gid * 4 + ivec2(2), ivec2(0), full_max);
     uint dslot = p.tex_slots.y;
-    float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
+    float d0 = texelFetch(u_textures[dslot], ip, 0).r;
 
     vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
     vec2 ndc = uv * 2.0 - 1.0;
@@ -105,7 +105,7 @@ void main() {
             vec2 suv = uv + step_uv * (float(s) + jitter);
             if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) break;
             ivec2 sip = clamp(ivec2(suv * p.vz_and_size.zw), ivec2(0), full_max);
-            float sd = texelFetch(u_textures[nonuniformEXT(dslot)], sip, 0).r;
+            float sd = texelFetch(u_textures[dslot], sip, 0).r;
             float w = 1.0 - t * 0.65;
             // Sky gaps and far background let sunlight stream through; foreground rock/trees occlude shafts.
             float unoccluded = smoothstep(0.996, 0.99985, sd);
@@ -128,7 +128,7 @@ void main() {
             vec2 off = vec2(cos(ang), sin(ang) * 1.77) * 0.045;
             vec2 suv = clamp(uv + off, vec2(0.002), vec2(0.998));
             ivec2 sip = clamp(ivec2(suv * p.vz_and_size.zw), ivec2(0), full_max);
-            float sd = texelFetch(u_textures[nonuniformEXT(dslot)], sip, 0).r;
+            float sd = texelFetch(u_textures[dslot], sip, 0).r;
             float is_opening = smoothstep(0.9985, 0.9999, sd);
             open_sum += is_opening;
             w_sum += 1.0;

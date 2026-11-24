@@ -54,8 +54,8 @@ void main() {
     for (int y = 0; y < kN; ++y) {
         for (int x = 0; x < kN; ++x) {
             vec2 uv = cell_min + ((vec2(x, y) + 0.5) / float(kN)) * cell_size;
-            vec3 c = texture(sampler2D(u_textures[nonuniformEXT(src)],
-                                       u_samplers[nonuniformEXT(samp)]),
+            vec3 c = texture(sampler2D(u_textures[src],
+                                       u_samplers[samp]),
                              clamp(uv, vec2(0.002), vec2(0.998))).rgb;
             // Weight strongly toward chromatic emissive bursts (fire, explosions, lightning).
             float cmax = max(c.r, max(c.g, c.b));

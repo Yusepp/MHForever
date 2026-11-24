@@ -67,7 +67,7 @@ void main() {
     uint cslot = p.tex_slots.x;
     uint lsamp = p.aux_slots.y;
 
-    float d0 = texelFetch(u_textures[nonuniformEXT(dslot)], ip, 0).r;
+    float d0 = texelFetch(u_textures[dslot], ip, 0).r;
     if (d0 >= 0.99992 || d0 <= 0.00001) {
         imageStore(u_ssgi_out, gid, vec4(0.0));
         return;
@@ -90,7 +90,7 @@ void main() {
         float rad = max_rad * (0.28 + 0.72 * (float(i & 3) + 0.5) * 0.25);
         vec2 suv = clamp(uv0 + vec2(cos(ang), sin(ang) * 1.77) * rad, vec2(0.002), vec2(0.998));
         ivec2 sip = clamp(ivec2(suv * p.vz_and_size.zw), ivec2(0), full_max);
-        float sd = texelFetch(u_textures[nonuniformEXT(dslot)], sip, 0).r;
+        float sd = texelFetch(u_textures[dslot], sip, 0).r;
         if (sd >= 0.99992 || sd <= 0.00001) continue;
 
         float zs = linear_eye_z(p, sd);
@@ -99,8 +99,8 @@ void main() {
         float depth_w = exp(-z_diff * 4.2);
         if (depth_w < 0.03) continue;
 
-        vec3 sc = texture(sampler2D(u_textures[nonuniformEXT(cslot)],
-                                    u_samplers[nonuniformEXT(lsamp)]), suv).rgb;
+        vec3 sc = texture(sampler2D(u_textures[cslot],
+                                    u_samplers[lsamp]), suv).rgb;
         float luma = dot(sc, vec3(0.2126, 0.7152, 0.0722));
         // Strongly favor saturated emissive sources (fireplaces, torches, lava, fireballs, lightning)
         // while keeping matte white snow clean.

@@ -140,11 +140,12 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
     const std::uint64_t h = key.hash();
     if (const auto it = ge_pipes.find(h); it != ge_pipes.end()) return it->second;
 
-    const std::uint32_t spec_data[3] = {key.spec_clear, key.spec_textured, key.spec_alpha_test};
-    const std::array<VkSpecializationMapEntry, 3> spec_entries = {{
+    const std::uint32_t spec_data[4] = {key.spec_clear, key.spec_textured, key.spec_alpha_test, key.spec_zrange};
+    const std::array<VkSpecializationMapEntry, 4> spec_entries = {{
         {0, 0, sizeof(std::uint32_t)},
         {1, sizeof(std::uint32_t), sizeof(std::uint32_t)},
         {2, 2 * sizeof(std::uint32_t), sizeof(std::uint32_t)},
+        {3, 3 * sizeof(std::uint32_t), sizeof(std::uint32_t)},
     }};
     VkSpecializationInfo spec{static_cast<std::uint32_t>(spec_entries.size()), spec_entries.data(),
                               sizeof(spec_data), spec_data};

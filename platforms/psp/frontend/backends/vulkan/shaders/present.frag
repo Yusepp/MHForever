@@ -15,7 +15,7 @@ layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec3 rgb = texture(sampler2D(u_textures[nonuniformEXT(pc.tex_idx)],
-                                 u_samplers[nonuniformEXT(pc.sampler_idx)]), v_uv).rgb;
+    vec3 rgb = texture(sampler2D(u_textures[pc.tex_idx],
+                                 u_samplers[pc.sampler_idx]), v_uv).rgb;
     o_color = vec4(rgb, 1.0);
 }

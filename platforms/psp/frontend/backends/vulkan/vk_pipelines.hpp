@@ -46,11 +46,12 @@ struct DrawPush {
     std::uint32_t draw_idx{0};
 };
 
-// Key for GE pipeline lookup. With EDS3 enabled, blend/mask fields are zeroed so at most ~6 pipelines exist total.
+// Key for GE pipeline lookup. With EDS3 enabled, blend/mask fields are zeroed so at most ~12 pipelines exist total.
 struct GePipelineKey {
     std::uint8_t spec_clear{0};
     std::uint8_t spec_textured{1};
     std::uint8_t spec_alpha_test{1};
+    std::uint8_t spec_zrange{0};
     std::uint8_t blend_enable{0};
     std::uint8_t color_op{0};
     std::uint8_t src_factor{1};
@@ -59,10 +60,13 @@ struct GePipelineKey {
 
     bool operator==(const GePipelineKey &) const = default;
     [[nodiscard]] std::uint64_t hash() const noexcept {
-        return static_cast<std::uint64_t>(spec_clear) | (static_cast<std::uint64_t>(spec_textured) << 8u) |
-               (static_cast<std::uint64_t>(spec_alpha_test) << 16u) | (static_cast<std::uint64_t>(blend_enable) << 24u) |
-               (static_cast<std::uint64_t>(color_op) << 32u) | (static_cast<std::uint64_t>(src_factor) << 40u) |
-               (static_cast<std::uint64_t>(dst_factor) << 48u) | (static_cast<std::uint64_t>(color_mask) << 56u);
+        const std::uint64_t spec_bits = (static_cast<std::uint64_t>(spec_clear & 1u)) |
+                                        (static_cast<std::uint64_t>(spec_textured & 1u) << 1u) |
+                                        (static_cast<std::uint64_t>(spec_alpha_test & 1u) << 2u) |
+                                        (static_cast<std::uint64_t>(spec_zrange & 1u) << 3u);
+        return spec_bits | (static_cast<std::uint64_t>(blend_enable) << 8u) |
+               (static_cast<std::uint64_t>(color_op) << 16u) | (static_cast<std::uint64_t>(src_factor) << 24u) |
+               (static_cast<std::uint64_t>(dst_factor) << 32u) | (static_cast<std::uint64_t>(color_mask) << 40u);
     }
 };
 
