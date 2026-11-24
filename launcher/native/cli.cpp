@@ -44,7 +44,8 @@ void usage() {
                  "        anisotropy 1 (off), 2, 4, 8 or 16 (texture packs), shadowQuality 0-2, shadowDarkness 0-100\n"
                  "  --font <font file> | default [--disc <id>]    a copy's text font (.ttf or .otf), or the default\n"
                  "  --play [<disc id>]                            start the game and wait until it ends\n"
-                 "  --update                                      update MHForever\n"
+                 "  --check-update                                check GitHub releases for a newer version\n"
+                 "  --update [--check]                            update MHForever (keeps saves, paths and settings)\n"
                  "  --version\n\n"
                  "The copy used is the one chosen in the launcher, else the first one that can be played; a disc id such as\n"
                  "ULES01213 (Europe), ULUS10391 (North America), ULJM05500 (Japan) or ULJM05500-FUC (FUComplete) for\n"
@@ -94,8 +95,16 @@ int install(const std::vector<std::string> &args) {
     return 0;
 }
 
-// `--update`: the same update as the launcher's "Update now", without the window.
-int update() {
+// `--check-update` and `--update [--check]`: check GitHub releases and optionally apply the update in place.
+int update(const std::vector<std::string> &args, bool check_only) {
+    for (std::size_t i = 2; i < args.size(); ++i) {
+        if (args[i] == "--check") {
+            check_only = true;
+        } else {
+            std::fprintf(stderr, "unknown option: %s\n", args[i].c_str());
+            return 2;
+        }
+    }
     Launcher launcher(platform::executable_dir());
     const fs::path work = launcher.data_dir() / "update";
     update::remove_old(platform::executable_dir());
@@ -106,7 +115,20 @@ int update() {
             std::fprintf(stderr, "error: %s\n", error.c_str());
             return 1;
         }
-        std::printf("MHForever %s is the latest version.\n", MHF_VERSION_STRING);
+        std::printf("MHForever %s is up to date.\n", MHF_VERSION_STRING);
+        return 0;
+    }
+    if (check_only) {
+        const unsigned long long mb = (release->archive_size + 524288ull) / 1048576ull;
+        if (mb > 0) {
+            std::printf("Update available: MHForever %s -> %s (%llu MB)\n",
+                        MHF_VERSION_STRING, release->version.c_str(), mb);
+        } else {
+            std::printf("Update available: MHForever %s -> %s\n",
+                        MHF_VERSION_STRING, release->version.c_str());
+        }
+        if (!release->page.empty()) std::printf("Release: %s\n", release->page.c_str());
+        std::printf("Run with --update to install (your saves, paths and settings are kept).\n");
         return 0;
     }
     std::printf("Updating MHForever %s to %s (%s)\n", MHF_VERSION_STRING, release->version.c_str(), release->archive.c_str());
@@ -118,7 +140,7 @@ int update() {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
-    std::printf("%s is installed. Start MHForever again.\n", release->version.c_str());
+    std::printf("MHForever %s is installed. Your saves, paths and settings were kept.\n", release->version.c_str());
     return 0;
 }
 
@@ -304,9 +326,10 @@ int play(const std::vector<std::string> &args) {
 } // namespace
 
 bool handles(const std::string &first_argument) {
-    return first_argument == "--install" || first_argument == "--update" || first_argument == "--list" ||
-           first_argument == "--set" || first_argument == "--font" || first_argument == "--play" || first_argument == "--version" ||
-           first_argument == "--help" || first_argument == "-h";
+    return first_argument == "--install" || first_argument == "--check-update" || first_argument == "--update" ||
+           first_argument == "--list" || first_argument == "--set" || first_argument == "--font" ||
+           first_argument == "--play" || first_argument == "--version" || first_argument == "--help" ||
+           first_argument == "-h";
 }
 
 int run(const std::vector<std::string> &args) {
@@ -316,7 +339,8 @@ int run(const std::vector<std::string> &args) {
     }
     const std::string &mode = args[1];
     if (mode == "--install") return install(args);
-    if (mode == "--update") return update();
+    if (mode == "--check-update") return update(args, true);
+    if (mode == "--update") return update(args, false);
     if (mode == "--list") return list();
     if (mode == "--set") return set(args);
     if (mode == "--font") return font(args);

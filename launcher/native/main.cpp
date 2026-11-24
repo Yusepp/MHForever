@@ -591,7 +591,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             std::vector<std::string> args;
             for (int i = 0; i < wargc; ++i) args.push_back(platform::to_utf8(fs::path(wargv[i])));
             LocalFree(wargv);
-            if (args.size() > 1 && (args[1] == "--install" || args[1] == "--update")) {
+            if (args.size() > 1 && mhf::launcher::cli::handles(args[1])) {
                 attach_parent_console();
                 return mhf::launcher::cli::run(args);
             }

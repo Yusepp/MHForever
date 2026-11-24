@@ -1,7 +1,7 @@
 #pragma once
 
-// The launcher's command-line modes: `--install`, `--list`, `--set`, `--play`, `--update`, `--version`. They run without a
-// window, so the window program (MHForever) hands `--install` and `--update` to them, and MHForever-cli, a program that
+// The launcher's command-line modes: `--install`, `--list`, `--set`, `--play`, `--check-update`, `--update`, `--version`.
+// They run without a window, so the window program (MHForever) hands them to CLI mode, and MHForever-cli, a program that
 // links no web view (and, on Linux, no GTK), offers all of them. The Steam Deck's SteamOS has no WebKitGTK: there the
 // launcher's window cannot even start, and this program installs a copy, sets it up and starts the game.
 
