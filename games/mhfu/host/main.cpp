@@ -286,9 +286,13 @@ constexpr bool kQuestAutoclearMapped =
     region::mh_quest_manager.has_value() && region::mh_game_sys.has_value() && region::mh_horn_songs.has_value();
 std::atomic<bool> g_quest_autoclear{false};
 
-bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
+bool overlay_ends_with(const Runtime &rt, std::uint32_t address, std::string_view suffix) {
     const mhf::psp::Program *overlay = rt.active_overlay_at(address);
-    return overlay != nullptr && std::string_view(overlay->name).ends_with("_ovl_game_task");
+    return overlay != nullptr && std::string_view(overlay->name).ends_with(suffix);
+}
+
+bool quest_overlay_at(const Runtime &rt, std::uint32_t address) {
+    return overlay_ends_with(rt, address, "_ovl_game_task");
 }
 
 #if defined(MHF_HAS_FRONTEND)
@@ -401,8 +405,7 @@ SmithyInfoState g_smithy_create_info, g_smithy_improve_info;
 
 // The hooked smithy functions start functions in other overlays too: only the village overlay's are the smithy's.
 bool village_overlay_at(const Runtime &rt, std::uint32_t address) {
-    const mhf::psp::Program *overlay = rt.active_overlay_at(address);
-    return overlay != nullptr && std::string_view(overlay->name).ends_with("_ovl_lobby_task");
+    return overlay_ends_with(rt, address, "_ovl_lobby_task");
 }
 
 // When Info is open and the cursor has moved since the panel was built, build it again with the game's own function
@@ -1270,8 +1273,9 @@ int main(int argc, char **argv) {
     if (options.adhoc_server.empty()) {
         if (const char *server = std::getenv("MHF_ADHOC_SERVER")) options.adhoc_server = server; // until the launcher sets it
     }
+    const std::string product_code = disc_product_code(options.disc_image);
     options.adhoc_nickname = adhoc_nick.empty() ? options.osk_default_text : adhoc_nick;
-    if (!options.adhoc_server.empty()) options.adhoc_product_code = disc_product_code(options.disc_image);
+    if (!options.adhoc_server.empty()) options.adhoc_product_code = product_code;
     // The halls' names start with these (docs/14-rooms-and-friends.md section 1): Freedom Unite's two modes, and the
     // Japanese release's "集会所" in Shift-JIS. Any other prefix the game uses is learnt when it joins a hall.
     options.adhoc_hall_prefixes = {"MHP2Q0", "MHP2A0", "\x8F\x57\x89\xEF\x8F\x8A"};
@@ -1300,7 +1304,7 @@ int main(int argc, char **argv) {
         g_quest_autoclear = quest_autoclear;
         runtime.register_hook("mh_supply_box_update", &on_supply_box_update);
         g_gathering.language = language_pick ? options.system_language
-                               : kFucomplete ? 1 : disc_product_code(options.disc_image) == "ULJM05500" ? 0 : options.system_language;
+                               : kFucomplete ? 1 : product_code == "ULJM05500" ? 0 : options.system_language;
         bool gathering_icons_loaded = false;
         const auto load_gathering_icons = [&] {
             if (gathering_icons_loaded) return;
@@ -1310,10 +1314,9 @@ int main(int argc, char **argv) {
             if (region::mh_gathering_hud_file && region::mh_gathering_items_file) {
                 std::unique_ptr<mhf::psp::textures::Pack> pack;
                 if (!texture_pack.empty()) {
-                    const auto game_id = disc_product_code(options.disc_image);
-                    const auto folder = mhf::psp::textures::Pack::locate(texture_pack, game_id);
+                    const auto folder = mhf::psp::textures::Pack::locate(texture_pack, product_code);
                     std::string error;
-                    if (!folder.empty()) pack = mhf::psp::textures::Pack::open(folder, game_id, error);
+                    if (!folder.empty()) pack = mhf::psp::textures::Pack::open(folder, product_code, error);
                 }
                 if (auto art = mhf::mhfu::load_game_gathering_art(options.disc_image, exe,
                         *region::mh_gathering_hud_file, *region::mh_gathering_items_file, pack.get(), &gathering_pack_atlases)) {
@@ -1500,7 +1503,7 @@ int main(int argc, char **argv) {
         if (window && frontend.open(window_title(options.disc_image).c_str(), false, 2, !software, render_scale, fullscreen, smooth_textures, target_fps, keyboard, controller)) {
             frontend.set_controls_file(controls_file);
             frontend.set_friends_files(friends_file, friend_actions_file);
-            if (!texture_pack.empty()) frontend.set_texture_pack(texture_pack, disc_product_code(options.disc_image), pack_mipmaps, anisotropy);
+            if (!texture_pack.empty()) frontend.set_texture_pack(texture_pack, product_code, pack_mipmaps, anisotropy);
             frontend.set_shadow_textures({std::begin(kShadowAirTextures), std::end(kShadowAirTextures)},
                                          {std::begin(kShadowSolidTextures), std::end(kShadowSolidTextures)},
                                          {}); // caves go by the zones below

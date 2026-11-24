@@ -129,28 +129,23 @@ std::size_t count_non_empty_armor(const ArmorLoadoutPreset &p) noexcept {
     return n;
 }
 
+void draw_rect_border(mhf::overlay::Painter &painter, float x, float y, float w, float h, float thickness,
+                      mhf::overlay::Color color, float alpha) {
+    painter.rect(x, y, w, thickness, color, alpha);
+    painter.rect(x, y + h - thickness, w, thickness, color, alpha);
+    painter.rect(x, y, thickness, h, color, alpha);
+    painter.rect(x + w - thickness, y, thickness, h, color, alpha);
+}
+
 // Draws MHFU's signature translucent charcoal window with notched antique-brass borders and 4 corner clasps.
 void draw_mh_window(mhf::overlay::Painter &painter, float x, float y, float w, float h, float bg_alpha = 0.80f) {
     // Smoked translucent interior
     painter.rect(x + 2.0f, y + 2.0f, w - 4.0f, h - 4.0f, kMhPanelBg, bg_alpha);
 
-    // Outer dark ink outline
-    painter.rect(x, y, w, 1.0f, kMhFrameInk, 0.96f);
-    painter.rect(x, y + h - 1.0f, w, 1.0f, kMhFrameInk, 0.96f);
-    painter.rect(x, y, 1.0f, h, kMhFrameInk, 0.96f);
-    painter.rect(x + w - 1.0f, y, 1.0f, h, kMhFrameInk, 0.96f);
-
-    // Antique-brass rails (2px thick)
-    painter.rect(x + 1.0f, y + 1.0f, w - 2.0f, 2.0f, kMhBrassLight, 0.96f);
-    painter.rect(x + 1.0f, y + h - 3.0f, w - 2.0f, 2.0f, kMhBrassLight, 0.96f);
-    painter.rect(x + 1.0f, y + 1.0f, 2.0f, h - 2.0f, kMhBrassLight, 0.96f);
-    painter.rect(x + w - 3.0f, y + 1.0f, 2.0f, h - 2.0f, kMhBrassLight, 0.96f);
-
-    // Inner dark hairline
-    painter.rect(x + 3.0f, y + 3.0f, w - 6.0f, 0.75f, kMhFrameInk, 0.92f);
-    painter.rect(x + 3.0f, y + h - 3.75f, w - 6.0f, 0.75f, kMhFrameInk, 0.92f);
-    painter.rect(x + 3.0f, y + 3.0f, 0.75f, h - 6.0f, kMhFrameInk, 0.92f);
-    painter.rect(x + w - 3.75f, y + 3.0f, 0.75f, h - 6.0f, kMhFrameInk, 0.92f);
+    // Outer dark ink outline, antique-brass rails, and inner dark hairline.
+    draw_rect_border(painter, x, y, w, h, 1.0f, kMhFrameInk, 0.96f);
+    draw_rect_border(painter, x + 1.0f, y + 1.0f, w - 2.0f, h - 2.0f, 2.0f, kMhBrassLight, 0.96f);
+    draw_rect_border(painter, x + 3.0f, y + 3.0f, w - 6.0f, h - 6.0f, 0.75f, kMhFrameInk, 0.92f);
 
     // Repeating dark square notches along all 4 rails (iconic MHFU riveted border)
     constexpr float kStep = 6.5f;
@@ -996,11 +991,7 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
         } else if ((pressed & kSquare) != 0u) {
             if (!rename_buf_.empty()) rename_buf_.pop_back();
         } else if ((pressed & kStart) != 0u) {
-            const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
-            toast_ = res.message;
-            toast_ok_ = res.ok;
-            toast_until_us_ = now_us + 2'200'000u;
-            renaming_ = false;
+            commit_rename(now_us);
         } else if ((pressed & (kCross | kSelect)) != 0u) {
             renaming_ = false;
         } else if ((pressed & kCircle) != 0u) {
@@ -1012,13 +1003,7 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
                 if (osk_col_ == 0 && rename_buf_.size() < kMaxLoadoutNameLen) rename_buf_.push_back(' ');
                 else if (osk_col_ == 1 && !rename_buf_.empty()) rename_buf_.pop_back();
                 else if (osk_col_ == 2) rename_buf_.clear();
-                else if (osk_col_ == 3) {
-                    const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
-                    toast_ = res.message;
-                    toast_ok_ = res.ok;
-                    toast_until_us_ = now_us + 2'200'000u;
-                    renaming_ = false;
-                }
+                else if (osk_col_ == 3) commit_rename(now_us);
             }
         }
         return;
@@ -1031,15 +1016,9 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
     } else if ((pressed & kDown) != 0u) {
         selected_ = (selected_ + 1u) % kItemLoadoutCount;
     } else if ((pressed & kCircle) != 0u) {
-        const auto res = tab_ == Tab::Items ? apply_preset(memory, selected_) : apply_armor_preset(memory, selected_);
-        toast_ = res.message;
-        toast_ok_ = res.ok;
-        toast_until_us_ = now_us + 2'200'000u;
+        set_toast(tab_ == Tab::Items ? apply_preset(memory, selected_) : apply_armor_preset(memory, selected_), now_us);
     } else if ((pressed & kTriangle) != 0u) {
-        const auto res = tab_ == Tab::Items ? save_preset(memory, selected_) : save_armor_preset(memory, selected_);
-        toast_ = res.message;
-        toast_ok_ = res.ok;
-        toast_until_us_ = now_us + 2'200'000u;
+        set_toast(tab_ == Tab::Items ? save_preset(memory, selected_) : save_armor_preset(memory, selected_), now_us);
     } else if ((pressed & kSquare) != 0u) {
         renaming_ = true;
         rename_buf_ = tab_ == Tab::Items ? presets_[selected_].name : armor_presets_[selected_].name;
@@ -1047,14 +1026,23 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
         osk_col_ = 0;
         osk_page_ = 0;
     } else if ((pressed & kSelect) != 0u) {
-        const auto res = tab_ == Tab::Items ? clear_preset(selected_) : clear_armor_preset(selected_);
-        toast_ = res.message;
-        toast_ok_ = res.ok;
-        toast_until_us_ = now_us + 2'200'000u;
+        set_toast(tab_ == Tab::Items ? clear_preset(selected_) : clear_armor_preset(selected_), now_us);
     } else if ((pressed & (kCross | kStart)) != 0u) {
         panel_open_ = false;
         release_guard_ = true;
     }
+}
+
+void ItemLoadouts::set_toast(const LoadoutResult &res, std::uint64_t now_us) {
+    toast_ = res.message;
+    toast_ok_ = res.ok;
+    toast_until_us_ = now_us + 2'200'000u;
+}
+
+void ItemLoadouts::commit_rename(std::uint64_t now_us) {
+    const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
+    set_toast(res, now_us);
+    renaming_ = false;
 }
 
 void ItemLoadouts::handle_text_input(std::string_view text) {
@@ -1073,11 +1061,7 @@ void ItemLoadouts::handle_text_backspace() {
 
 void ItemLoadouts::handle_text_confirm(std::uint64_t now_us) {
     if (!renaming_) return;
-    const auto res = tab_ == Tab::Items ? rename_preset(selected_, rename_buf_) : rename_armor_preset(selected_, rename_buf_);
-    toast_ = res.message;
-    toast_ok_ = res.ok;
-    toast_until_us_ = now_us + 2'200'000u;
-    renaming_ = false;
+    commit_rename(now_us);
 }
 
 void ItemLoadouts::handle_text_cancel() {

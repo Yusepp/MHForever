@@ -113,6 +113,9 @@ public:
 private:
     [[nodiscard]] std::string armor_storage_path() const;
 
+    void set_toast(const LoadoutResult &res, std::uint64_t now_us);
+    void commit_rename(std::uint64_t now_us);
+
     ItemLoadoutsSymbols symbols_;
     std::string storage_path_;
     std::vector<std::uint8_t> text_archive_;
