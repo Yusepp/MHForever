@@ -822,11 +822,13 @@ void Launcher::load() {
             fs::copy_file(old, file_, fs::copy_options::skip_existing, ec);
         }
     }
-    std::ifstream in(file_, std::ios::binary);
-    if (in) {
-        std::stringstream ss;
-        ss << in.rdbuf();
-        if (auto parsed = Json::parse(ss.str()); parsed && parsed->is_object()) data_ = std::move(*parsed);
+    {
+        std::ifstream in(file_, std::ios::binary);
+        if (in) {
+            std::stringstream ss;
+            ss << in.rdbuf();
+            if (auto parsed = Json::parse(ss.str()); parsed && parsed->is_object()) data_ = std::move(*parsed);
+        }
     }
     if (!data_.is_object()) data_ = Json(Json::Object{});
     bool changed = false;
