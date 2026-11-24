@@ -89,7 +89,7 @@ struct Pipelines {
     VkShaderModule ge_vert = VK_NULL_HANDLE;
     VkShaderModule ge_frag = VK_NULL_HANDLE;
     VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
-    VkFormat hdr_color_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkFormat hdr_color_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     VkFormat gbuf_format = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
 

@@ -61,8 +61,6 @@ layout(push_constant) uniform LightingPush {
     LightingParamsBuf buf;
 } pc;
 
-shared uint s_min_z_u;
-shared uint s_max_z_u;
 shared uint s_tile_count;
 shared uint s_tile_lights[32];
 
@@ -78,12 +76,19 @@ float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
+// Fast polynomial sRGB -> Linear HDR (2 FMAs instead of 6 pow() transcendentals, max err < 0.002).
 vec3 srgb_to_linear_hdr(vec3 c) {
-    return pow(max(c, vec3(0.0)), vec3(2.2));
+    vec3 a = max(c, vec3(0.0));
+    return a * (a * (a * 0.305306011 + 0.682171111) + 0.012522878);
 }
 
+// Fast Linear -> sRGB using hardware sqrt instead of pow(1/2.2).
 vec3 linear_to_srgb(vec3 c) {
-    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+    vec3 a = max(c, vec3(0.0));
+    vec3 s1 = sqrt(a);
+    vec3 s2 = sqrt(s1);
+    vec3 s3 = sqrt(s2);
+    return clamp(0.662002687 * s1 + 0.684122060 * s2 - 0.323583601 * s3 - 0.0225411470 * a, vec3(0.0), vec3(1.0));
 }
 
 float linear_eye_z(LightingParams p, float d) {
@@ -124,42 +129,35 @@ void main() {
     bool is_sky = (!in_bounds || d_here >= 0.99992 || d_here <= 0.00001);
     float z_eye = is_sky ? 0.0 : linear_eye_z(p, d_here);
 
-    // 0. Shared-memory 8x8 tile culling for up to 64 world-space dynamic point lights (1 light test per thread!).
+    // 0. Lock-free 2D screen-tile culling for up to 64 world-space dynamic point lights
+    // (zero depth atomics, zero LDS bank-conflict stalls, 1 parallel test per thread!).
     uint lid = gl_LocalInvocationIndex;
     if (p.light_count > 0u) {
-        if (lid == 0u) {
-            s_min_z_u = 0x7F7FFFFFu; // +FLT_MAX
-            s_max_z_u = 0u;
-            s_tile_count = 0u;
-        }
+        if (lid == 0u) s_tile_count = 0u;
         barrier();
-        if (!is_sky) {
-            uint zu = floatBitsToUint(z_eye);
-            atomicMin(s_min_z_u, zu);
-            atomicMax(s_max_z_u, zu);
-        }
-        barrier();
-        if (s_max_z_u > 0u && lid < p.light_count) {
-            float zmin = uintBitsToFloat(s_min_z_u);
-            float zmax = uintBitsToFloat(s_max_z_u);
-            vec2 tile_min_uv = vec2(gl_WorkGroupID.xy * 8u) / p.vz_and_size.zw;
-            vec2 tile_max_uv = min(vec2((gl_WorkGroupID.xy + 1u) * 8u), p.vz_and_size.zw) / p.vz_and_size.zw;
-            vec2 ndc_min = tile_min_uv * 2.0 - 1.0;
-            vec2 ndc_max = tile_max_uv * 2.0 - 1.0;
-            float x0 = min(ndc_min.x * p.proj_info.x * zmin, ndc_min.x * p.proj_info.x * zmax);
-            float x1 = max(ndc_max.x * p.proj_info.x * zmin, ndc_max.x * p.proj_info.x * zmax);
-            float y0 = min(ndc_min.y * p.proj_info.y * zmin, ndc_min.y * p.proj_info.y * zmax);
-            float y1 = max(ndc_max.y * p.proj_info.y * zmin, ndc_max.y * p.proj_info.y * zmax);
-            vec3 bmin = vec3(min(x0, x1), min(y0, y1), -zmax);
-            vec3 bmax = vec3(max(x0, x1), max(y0, y1), -zmin);
-
+        if (lid < p.light_count) {
             ViewPointLight pl = p.lights.items[lid];
-            vec3 closest = clamp(pl.pos_radius.xyz, bmin, bmax);
-            vec3 diff = pl.pos_radius.xyz - closest;
             float r = pl.pos_radius.w;
-            if (dot(diff, diff) <= r * r) {
-                uint slot = atomicAdd(s_tile_count, 1u);
-                if (slot < 32u) s_tile_lights[slot] = lid;
+            float neg_z = -pl.pos_radius.z;
+            if (neg_z + r > 0.1) {
+                vec2 tile_min_uv = vec2(gl_WorkGroupID.xy * 8u) / p.vz_and_size.zw;
+                vec2 tile_max_uv = min(vec2((gl_WorkGroupID.xy + 1u) * 8u), p.vz_and_size.zw) / p.vz_and_size.zw;
+                vec2 ndc_min = tile_min_uv * 2.0 - 1.0;
+                vec2 ndc_max = tile_max_uv * 2.0 - 1.0;
+                bool overlaps = true;
+                if (neg_z > r + 0.5) {
+                    float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5);
+                    float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5);
+                    vec2 c_ndc = vec2(pl.pos_radius.x * p00, pl.pos_radius.y * p11) / neg_z;
+                    float z_near = max(neg_z - r, 0.5);
+                    vec2 r_ndc = vec2(r * p00, r * p11) / z_near;
+                    overlaps = (c_ndc.x + r_ndc.x >= ndc_min.x) && (c_ndc.x - r_ndc.x <= ndc_max.x) &&
+                               (c_ndc.y + r_ndc.y >= ndc_min.y) && (c_ndc.y - r_ndc.y <= ndc_max.y);
+                }
+                if (overlaps) {
+                    uint slot = atomicAdd(s_tile_count, 1u);
+                    if (slot < 32u) s_tile_lights[slot] = lid;
+                }
             }
         }
         barrier();

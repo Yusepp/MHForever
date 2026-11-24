@@ -832,7 +832,7 @@ bool VkBackend::ensure_hdr_gbuf_targets(std::uint32_t pw, std::uint32_t ph, bool
     if (pw == 0 || ph == 0) return false;
     if (hdr_color_.image == VK_NULL_HANDLE || hdr_color_.width != pw || hdr_color_.height != ph) {
         retire_image(hdr_color_);
-        if (!hdr_color_.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_R16G16B16A16_SFLOAT,
+        if (!hdr_color_.create(ctx_, &descriptors_, pw, ph, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                                VK_IMAGE_ASPECT_COLOR_BIT)) {
             return false;
@@ -850,7 +850,7 @@ bool VkBackend::ensure_hdr_gbuf_targets(std::uint32_t pw, std::uint32_t ph, bool
         if (!ensure_msaa_targets(pw, ph)) return false;
         if (msaa_hdr_color_.image == VK_NULL_HANDLE || msaa_hdr_color_.width != pw || msaa_hdr_color_.height != ph) {
             retire_image(msaa_hdr_color_);
-            if (!msaa_hdr_color_.create(ctx_, nullptr, pw, ph, VK_FORMAT_R16G16B16A16_SFLOAT,
+            if (!msaa_hdr_color_.create(ctx_, nullptr, pw, ph, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 1,
                                         VK_SAMPLE_COUNT_4_BIT)) {
                 return false;
