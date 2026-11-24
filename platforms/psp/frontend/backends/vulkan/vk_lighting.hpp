@@ -95,11 +95,15 @@ public:
 
     // Runs enabled lighting/atmosphere compute passes on `scene_color` using `kParamSlotsPerDispatch`
     // contiguous `LightingComputeParams` slots starting at `params_cpu_ptr` / `params_bda`.
-    void dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
+    // Returns true if passes were dispatched (leaving `scene_color` in VK_IMAGE_LAYOUT_GENERAL).
+    bool dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                   VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                   const LightingFrameInput &in,
                   void *params_cpu_ptr, VkDeviceAddress params_bda);
+
+    // Invalidates cached VkImageView -> VkDescriptorSet entries whenever a scene render target is retired.
+    void invalidate_scene_views() noexcept { scene_set_views_.fill(VK_NULL_HANDLE); }
 
     // Number of LightingComputeParams structs needed per dispatch
     // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa).

@@ -534,12 +534,12 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.ext_slots[2] = static_cast<std::uint32_t>(active_biome_);
 }
 
-void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
+bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda) {
-    if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return;
-    if (!ensure_targets(ctx, desc, scene_w, scene_h)) return;
+    if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
+    if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
     // Cache VkImageView -> VkDescriptorSet so steady-state subframes do zero vkUpdateDescriptorSets calls,
     // while cycling through kSceneSetCount slots whenever a new render target view appears.
@@ -722,6 +722,7 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         flush_barriers();
         run_pass(comp_inplace_pipe_, scene_set, scene_w, scene_h, kPassComposite);
     }
+    return true;
 }
 
 } // namespace mhf::psp::vk

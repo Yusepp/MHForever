@@ -35,11 +35,23 @@ bool PackStreamer::init(const Context &ctx, const std::string &pack_folder, cons
     return true;
 }
 
+void PackStreamer::touch(std::uint32_t bindless_slot, std::uint64_t frame_num) noexcept {
+    if (const auto it = slot_map_.find(bindless_slot); it != slot_map_.end() && it->second != nullptr) {
+        it->second->last_used = frame_num;
+    }
+}
+
 void PackStreamer::collect_staging(const Context &ctx, std::uint64_t completed_timeline) {
     while (!retired_staging_.empty() && retired_staging_.front().retire_value <= completed_timeline) {
         const auto &s = retired_staging_.front();
         if (s.buffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator, s.buffer, s.alloc);
         retired_staging_.pop_front();
+    }
+    while (!retired_images_.empty() && retired_images_.front().retire_value <= completed_timeline) {
+        const auto &r = retired_images_.front();
+        if (r.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, r.view, nullptr);
+        if (r.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, r.image, r.alloc);
+        retired_images_.pop_front();
     }
 }
 
@@ -48,6 +60,7 @@ void PackStreamer::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     pack_.reset();
     builtin_pack_.reset();
     collect_staging(ctx, UINT64_MAX);
+    slot_map_.clear();
     for (auto &[id, img] : uploaded_) {
         if (img.bindless_slot != 0) desc.free_texture(img.bindless_slot, 0);
         if (img.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, img.view, nullptr);
@@ -85,6 +98,27 @@ bool PackStreamer::upload_image_async(const Context &ctx, BindlessDescriptors &d
     vaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (vmaCreateImage(ctx.allocator, &ici, &vaci, &out.image, &out.alloc, nullptr) != VK_SUCCESS) return false;
 
+    // Create view and allocate bindless slot BEFORE recording anything onto `cmd`, so error paths
+    // can cleanly destroy `out` without leaving dangling references in the active command buffer.
+    VkImageViewCreateInfo ivci{};
+    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivci.image = out.image;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = vk_fmt;
+    ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, 1};
+    if (vkCreateImageView(ctx.device, &ivci, nullptr, &out.view) != VK_SUCCESS) {
+        vmaDestroyImage(ctx.allocator, out.image, out.alloc);
+        out = PackGpuImage{};
+        return false;
+    }
+    out.bindless_slot = desc.allocate_texture(ctx, out.view);
+    if (out.bindless_slot == 0) {
+        vkDestroyImageView(ctx.device, out.view, nullptr);
+        vmaDestroyImage(ctx.allocator, out.image, out.alloc);
+        out = PackGpuImage{};
+        return false;
+    }
+
     std::size_t staging_bytes = 0;
     for (const auto &lvl : img.levels) staging_bytes += lvl.size();
 
@@ -97,8 +131,10 @@ bool PackStreamer::upload_image_async(const Context &ctx, BindlessDescriptors &d
     VmaAllocation staging_alloc = VK_NULL_HANDLE;
     VmaAllocationInfo sinfo{};
     if (vmaCreateBuffer(ctx.allocator, &bci, &sb_aci, &staging, &staging_alloc, &sinfo) != VK_SUCCESS) {
+        desc.free_texture(out.bindless_slot, retire_timeline);
+        vkDestroyImageView(ctx.device, out.view, nullptr);
         vmaDestroyImage(ctx.allocator, out.image, out.alloc);
-        out.image = VK_NULL_HANDLE;
+        out = PackGpuImage{};
         return false;
     }
 
@@ -168,22 +204,9 @@ bool PackStreamer::upload_image_async(const Context &ctx, BindlessDescriptors &d
 
     // Retire staging buffer asynchronously once this frame's GPU submission completes.
     retired_staging_.push_back({staging, staging_alloc, retire_timeline});
-
-    VkImageViewCreateInfo ivci{};
-    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    ivci.image = out.image;
-    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = vk_fmt;
-    ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, 1};
-    if (vkCreateImageView(ctx.device, &ivci, nullptr, &out.view) != VK_SUCCESS) {
-        vmaDestroyImage(ctx.allocator, out.image, out.alloc);
-        out.image = VK_NULL_HANDLE;
-        return false;
-    }
     out.mip_levels = mip_levels;
     out.vram_bytes = gen_mips ? (static_cast<std::size_t>(img.width) * img.height * 4u * 4u / 3u) : staging_bytes;
-    out.bindless_slot = desc.allocate_texture(ctx, out.view);
-    return out.bindless_slot != 0;
+    return true;
 }
 
 std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescriptors &desc,
@@ -245,7 +268,8 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
             total_vram_bytes_ += gpu_img.vram_bytes;
             has_mips = gpu_img.mip_levels > 1u;
             const std::uint32_t slot = gpu_img.bindless_slot;
-            uploaded_.emplace(id, gpu_img);
+            auto [it, inserted] = uploaded_.emplace(id, gpu_img);
+            if (inserted) slot_map_[slot] = &it->second;
             loader_->forget(id);
             return slot;
         }
@@ -256,7 +280,8 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
     return 0;
 }
 
-bool PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline) {
+bool PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline,
+                             std::uint64_t current_frame) {
     if (uploaded_.empty()) return false;
     std::size_t budget = 1536ull << 20; // 1.5 GB fallback budget
     if (ctx.caps.memory_budget) {
@@ -273,22 +298,27 @@ bool PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std:
         if (device_budget > (256ull << 20)) budget = device_budget * 7u / 10u;
     }
     if (total_vram_bytes_ <= budget) return false;
-    // Wait for all in-flight GPU work before destroying evicted pack images so no command buffer
-    // or frame-gen snapshot can sample an unmapped GPUVM page!
-    ctx.wait_idle();
     // Sort entries once by last_used (O(N log N)) instead of repeated O(N) full-map scans.
     std::vector<std::pair<std::uint64_t, std::string>> order;
     order.reserve(uploaded_.size());
-    for (const auto &[id, img] : uploaded_) order.emplace_back(img.last_used, id);
+    for (const auto &[id, img] : uploaded_) {
+        // Never evict textures still active in the current/previous frame (including frame-gen snapshots).
+        if (img.last_used + 2u >= current_frame) continue;
+        order.emplace_back(img.last_used, id);
+    }
     std::sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
     bool evicted = false;
     for (const auto &[used, id] : order) {
         if (total_vram_bytes_ <= budget) break;
         const auto it = uploaded_.find(id);
         if (it == uploaded_.end()) continue;
-        if (it->second.bindless_slot != 0) desc.free_texture(it->second.bindless_slot, retire_timeline);
-        if (it->second.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, it->second.view, nullptr);
-        if (it->second.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, it->second.image, it->second.alloc);
+        if (it->second.bindless_slot != 0) {
+            slot_map_.erase(it->second.bindless_slot);
+            desc.free_texture(it->second.bindless_slot, retire_timeline);
+        }
+        if (it->second.image != VK_NULL_HANDLE || it->second.view != VK_NULL_HANDLE) {
+            retired_images_.push_back({it->second.image, it->second.alloc, it->second.view, retire_timeline});
+        }
         total_vram_bytes_ = total_vram_bytes_ > it->second.vram_bytes ? (total_vram_bytes_ - it->second.vram_bytes) : 0;
         uploaded_.erase(it);
         evicted = true;

@@ -49,17 +49,27 @@ public:
                                                 textures::Filter &filter_out,
                                                 bool &pending_out);
 
-    // Frees staging buffers whose upload submissions have completed on the GPU timeline.
+    // Updates LRU timestamp for a pack texture hit via an external slot cache.
+    void touch(std::uint32_t bindless_slot, std::uint64_t frame_num) noexcept;
+
+    // Frees staging buffers and evicted pack images whose GPU submissions have completed.
     void collect_staging(const Context &ctx, std::uint64_t completed_timeline);
 
     // Checks VMA heap budgets (VK_EXT_memory_budget when available) and evicts LRU pack images under pressure.
     // Returns true if any pack textures were evicted (so callers can invalidate cached slot lookups).
-    bool trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline);
+    bool trim_vram(const Context &ctx, BindlessDescriptors &desc, std::uint64_t retire_timeline,
+                   std::uint64_t current_frame);
 
 private:
     struct RetiredStaging {
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation alloc = VK_NULL_HANDLE;
+        std::uint64_t retire_value = 0;
+    };
+    struct RetiredImage {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
         std::uint64_t retire_value = 0;
     };
 
@@ -74,8 +84,10 @@ private:
     std::uint64_t last_upload_frame_ = UINT64_MAX;
     std::uint32_t uploads_this_frame_ = 0;
     std::deque<RetiredStaging> retired_staging_;
+    std::deque<RetiredImage> retired_images_;
 
     std::unordered_map<std::string, PackGpuImage> uploaded_;
+    std::unordered_map<std::uint32_t, PackGpuImage *> slot_map_;
     std::size_t total_vram_bytes_ = 0;
 };
 

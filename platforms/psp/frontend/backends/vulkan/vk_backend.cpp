@@ -675,6 +675,7 @@ void VkBackend::shutdown() {
 
 void VkBackend::retire_image(VkImageResource &res) {
     if (res.image == VK_NULL_HANDLE && res.view == VK_NULL_HANDLE) return;
+    if (res.view != VK_NULL_HANDLE) lighting_.invalidate_scene_views();
     // Frame-gen snapshots (blend_older_ / blend_newer_) hold bindless texture slots across up to
     // 2 full 30 Hz frames (2 * subframes_ submissions), so keep retired images alive past that horizon.
     const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
@@ -1070,6 +1071,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                     }
                     if (pit != pack_cache_.end() && pit->second.slot != 0) {
                         pack_slot = pit->second.slot;
+                        if (!need_query) pack_streamer_.touch(pack_slot, frame_number_);
                         setup_.tex_slot = pack_slot;
                         setup_.texture_mips = pit->second.has_mips;
                         setup_.linear_override = pit->second.linear_override;
@@ -1571,6 +1573,9 @@ void VkBackend::block_transfer(std::uint32_t src, std::uint32_t /*src_stride*/, 
                                std::uint32_t dst, std::uint32_t dst_stride, std::uint32_t dx, std::uint32_t dy,
                                std::uint32_t width, std::uint32_t height, std::uint32_t bytes_per_pixel) {
     draw_batch();
+    frame_tex_cache_.clear();
+    have_state_ = false;
+    last_state_gen_ = 0;
     if (subframes_ > 1) cur_snap_.unblendable = true;
     const std::uint32_t src_vram = src & 0x1FFFFFFFu;
     const std::uint32_t dst_vram = dst & 0x1FFFFFFFu;
@@ -2090,6 +2095,7 @@ std::uint32_t VkBackend::match_killcam_hires(std::uint32_t tex_addr, std::uint32
 
 void VkBackend::flush() {
     draw_batch();
+    frame_tex_cache_.clear();
     static const bool readback = [] {
         const char *v = std::getenv("MHF_VK_READBACK");
         return v != nullptr && v[0] == '1';
@@ -2546,7 +2552,8 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
 void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFrameInput &in) {
     if (!lighting_.ready() || !live_->enhanced_lighting.load(std::memory_order_relaxed)) return;
     if ((live_->vulkan_effects_mask.load(std::memory_order_relaxed) & LiveSettings::kVkEffectComputeMask) == 0u) return;
-    if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE || rt.depth.bindless_slot == 0) return;
+    if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE ||
+        rt.color.bindless_slot == 0 || rt.depth.bindless_slot == 0) return;
     ScopedTimer prof_scope(prof_.enabled, prof_.light_ns);
 
     const std::uint32_t w = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
@@ -2567,9 +2574,10 @@ void VkBackend::apply_enhanced_lighting(RenderTarget &rt, const vk::LightingFram
 
     vk::LightingFrameInput fin = in;
     fin.frame_index = frame_number_;
-    lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
-                       rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address);
-    rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
+    if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
+                           rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address)) {
+        rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
 }
 
 void VkBackend::prepare_interp_draws() {
@@ -3117,7 +3125,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     frame_tex_cache_.clear();
     if ((frame_number_ % 60u) == 0u) {
         const std::uint64_t margin = static_cast<std::uint64_t>(std::max(subframes_, 1)) * 3u + 4u;
-        if (pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + margin)) {
+        if (pack_streamer_.trim_vram(ctx_, descriptors_, ctx_.graphics_timeline_value + margin, frame_number_)) {
             pack_cache_.clear();
         }
     }
