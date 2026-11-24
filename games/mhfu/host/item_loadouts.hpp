@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gathering_game_art.hpp"
 #include "mhf/psp/host.hpp"
 #include "overlay/painter.hpp"
 #include "psprecomp/guest_memory.hpp"
@@ -7,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -62,6 +64,7 @@ public:
 
     void set_storage_path(std::string path);
     void set_text_archive(std::vector<std::uint8_t> archive);
+    void set_icons(LoadoutIcons icons);
     void load_from_disk();
     void save_to_disk() const;
 
@@ -98,6 +101,7 @@ private:
     ItemLoadoutsSymbols symbols_;
     std::string storage_path_;
     std::vector<std::uint8_t> text_archive_;
+    LoadoutIcons icons_{};
     std::array<ItemLoadoutPreset, kItemLoadoutCount> presets_{};
     std::array<ArmorLoadoutPreset, kItemLoadoutCount> armor_presets_{};
     std::uint64_t box_seen_us_{0};

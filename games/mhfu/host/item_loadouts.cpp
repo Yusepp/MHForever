@@ -323,6 +323,10 @@ void ItemLoadouts::set_text_archive(std::vector<std::uint8_t> archive) {
     text_archive_ = std::move(archive);
 }
 
+void ItemLoadouts::set_icons(LoadoutIcons icons) {
+    icons_ = std::move(icons);
+}
+
 void ItemLoadouts::load_from_disk() {
     presets_.fill({});
     armor_presets_.fill({});

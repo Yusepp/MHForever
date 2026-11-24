@@ -1311,6 +1311,10 @@ int main(int argc, char **argv) {
                     g_gathering.set_icons(std::move(*art));
                     gathering_icons = gathering_pack_atlases ? "selected texture pack" : "original game textures";
                 }
+                if (auto loadout_icons = mhf::mhfu::load_game_loadout_icons(options.disc_image, exe,
+                        *region::mh_gathering_items_file, pack.get())) {
+                    g_item_loadouts.set_icons(std::move(*loadout_icons));
+                }
             }
             std::fprintf(stderr, "[gathering] icons: %s (%u/2 pack atlases, originals for the rest)\n",
                          gathering_icons, gathering_pack_atlases);

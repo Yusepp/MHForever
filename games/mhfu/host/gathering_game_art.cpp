@@ -187,4 +187,58 @@ std::vector<std::uint8_t> load_game_text_archive(const std::filesystem::path &is
         return {};
     }
 }
+
+std::optional<LoadoutIcons> decode_game_loadout_icons(Bytes items, const psp::textures::Pack *pack) {
+    const auto actions = atlas(items, 0);
+    if (!actions) return {};
+    const auto item_image = replacement(*actions, pack);
+    const auto pick = [&](unsigned x, unsigned y) -> LoadoutSprite {
+        auto img = item_image ? crop(*item_image, x, y, 24) : crop(*actions, x, y, 24);
+        return {img.size, std::move(img.pixels)};
+    };
+    return LoadoutIcons{
+        .pouch = pick(96, 96),
+        .chest = pick(168, 0),
+        .potion = pick(24, 72),
+        .book = pick(120, 96),
+        .bomb = pick(48, 48),
+        .trap = pick(48, 24),
+        .whetstone = pick(0, 24),
+        .pickaxe = pick(24, 48),
+        .paintball = pick(0, 72),
+        .ammo = pick(72, 72),
+        .weapon_blade = pick(24, 120),
+        .weapon_gun = pick(120, 120),
+        .head = pick(0, 144),
+        .chest_armor = pick(24, 144),
+        .arms = pick(72, 144),
+        .waist = pick(48, 144),
+        .legs = pick(96, 144),
+    };
+}
+
+std::optional<LoadoutIcons> load_game_loadout_icons(const std::filesystem::path &iso_path,
+                                                    const std::filesystem::path &executable, std::uint32_t items_file,
+                                                    const psp::textures::Pack *pack) {
+    try {
+        std::ifstream file(executable, std::ios::binary | std::ios::ate);
+        if (!file || file.tellg() <= 0 || file.tellg() > 16 * 1024 * 1024) return {};
+        std::vector<std::uint8_t> exe(static_cast<std::size_t>(file.tellg()));
+        file.seekg(0);
+        if (!file.read(reinterpret_cast<char *>(exe.data()), static_cast<std::streamsize>(exe.size()))) return {};
+        psp::IsoImage iso(iso_path);
+        const auto entry = iso.find("/PSP_GAME/USRDIR/DATA.BIN");
+        if (!entry) return {};
+        const auto data = DataBin::open(
+            [&](std::uint64_t offset, std::size_t size) {
+                if (size > 1024 * 1024) throw std::runtime_error("icon archive read exceeds limit");
+                return iso.read_file(*entry, offset, size);
+            },
+            entry->size, find_substitution_table_candidates(exe));
+        if (!data || items_file >= data->files().size() || data->files()[items_file].size > 1024 * 1024) return {};
+        return decode_game_loadout_icons(data->read(items_file), pack);
+    } catch (const std::exception &) {
+        return {};
+    }
+}
 } // namespace mhf::mhfu
