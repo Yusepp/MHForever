@@ -1663,9 +1663,28 @@ int main(int argc, char **argv) {
             extra = [&frontend, rt = &runtime, qol_painter, previous = std::move(extra),
                      shown = std::optional<mhf::mhfu::QuestMarker>{},
                      image = std::shared_ptr<const std::vector<std::uint32_t>>{},
+                     qol_pool = std::array<std::shared_ptr<std::vector<std::uint32_t>>, 2>{},
                      qol_overlay_active = false,
                      hud_drawn_at = std::uint64_t{0}]() mutable {
                 if (previous) previous();
+                // Acquire a reusable ping-pong overlay buffer (zero steady-state multi-MB heap churn).
+                auto acquire_buf = [&](std::size_t pixels, bool zero_now) {
+                    std::shared_ptr<std::vector<std::uint32_t>> chosen;
+                    for (auto &slot : qol_pool) {
+                        if (!slot) {
+                            slot = std::make_shared<std::vector<std::uint32_t>>();
+                            chosen = slot;
+                            break;
+                        }
+                        if (slot.use_count() == 1) {
+                            chosen = slot;
+                            break;
+                        }
+                    }
+                    if (!chosen) chosen = std::make_shared<std::vector<std::uint32_t>>();
+                    if (zero_now) chosen->assign(pixels, 0u);
+                    return chosen;
+                };
                 const std::uint64_t now = rt->now_us();
                 const bool show_skip = g_skip_quest_clear_timer.load(std::memory_order_relaxed) && g_quest_timer_skip.can_skip();
                 if (g_monster_tracker.in_active_quest() || show_skip) {
@@ -1680,16 +1699,15 @@ int main(int argc, char **argv) {
                         hud_drawn_at = now;
                         if (show_skip && !show_dmg) {
                             const auto [ow, oh] = frontend.overlay_size();
-                            auto buf = std::make_shared<std::vector<std::uint32_t>>(
-                                static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
+                            auto buf = acquire_buf(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), false);
                             qol_painter->begin(*buf, ow, oh, static_cast<float>(ow) / 480.0f);
                             g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
                             qol_painter->end();
-                            image = std::move(buf);
+                            image = buf;
                             qol_overlay_active = true;
                             frontend.set_game_overlay(image, ow, oh);
                         } else {
-                            auto buf = std::make_shared<std::vector<std::uint32_t>>(480u * 272u, 0u);
+                            auto buf = acquire_buf(480u * 272u, !show_skip);
                             if (show_skip) {
                                 qol_painter->begin(*buf, 480, 272, 1.0f);
                                 g_quest_timer_skip.render_card(*qol_painter, g_gathering.language);
@@ -1704,7 +1722,7 @@ int main(int argc, char **argv) {
                                 };
                                 g_damage_numbers.render(*buf, cam, now);
                             }
-                            image = std::move(buf);
+                            image = buf;
                             qol_overlay_active = true;
                             frontend.set_game_overlay(image, 480, 272);
                         }
@@ -1716,13 +1734,12 @@ int main(int argc, char **argv) {
                     if (now - hud_drawn_at >= 33'000u) {
                         hud_drawn_at = now;
                         const auto [ow, oh] = frontend.overlay_size();
-                        auto buf = std::make_shared<std::vector<std::uint32_t>>(
-                            static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), 0u);
+                        auto buf = acquire_buf(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), false);
                         qol_painter->begin(*buf, ow, oh, static_cast<float>(ow) / 480.0f);
                         const bool drew = g_item_loadouts.render_box_ui(*qol_painter, rt->memory(), now);
                         qol_painter->end();
                         if (drew) {
-                            image = std::move(buf);
+                            image = buf;
                             qol_overlay_active = true;
                             frontend.set_game_overlay(image, ow, oh);
                         }

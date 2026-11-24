@@ -6,10 +6,9 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <string>
-#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 struct stbtt_fontinfo;
@@ -72,6 +71,7 @@ public:
 private:
     struct Glyph {
         int x0, y0, w, h;
+        float advance;
         std::vector<unsigned char> bitmap;
     };
     // The font, glyph and scale that draw `cp` at `pixel_size`: the main font, else the Japanese one, else '?'.
@@ -90,7 +90,7 @@ private:
     bool font_ok_ = false;
     std::vector<unsigned char> japanese_data_;
     std::unique_ptr<stbtt_fontinfo> japanese_; // null when the file is missing
-    std::map<std::tuple<std::uint32_t, int, int>, Glyph> glyphs_; // codepoint, pixel size * 4, subpixel quarter
+    std::unordered_map<std::uint64_t, Glyph> glyphs_; // packed (codepoint, pixel size * 4, subpixel quarter)
 
     std::vector<std::uint32_t> *px_ = nullptr;
     int width_ = 0, height_ = 0;

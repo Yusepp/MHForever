@@ -153,10 +153,15 @@ Painter::Source Painter::source(std::uint32_t cp, float pixel_size) const {
 const Painter::Glyph &Painter::glyph(std::uint32_t cp, float pixel_size, float subx) {
     const int size_key = static_cast<int>(pixel_size * 4.0f + 0.5f);
     const int sub_key = static_cast<int>(subx * 4.0f) & 3;
-    const auto key = std::make_tuple(cp, size_key, sub_key);
+    const std::uint64_t key = (static_cast<std::uint64_t>(cp) << 24u) |
+                              (static_cast<std::uint64_t>(static_cast<std::uint32_t>(size_key) & 0x3FFFFFu) << 2u) |
+                              static_cast<std::uint64_t>(sub_key);
     if (auto it = glyphs_.find(key); it != glyphs_.end()) return it->second;
     Glyph g{};
     const auto [font, gi, scale] = source(cp, static_cast<float>(size_key) / 4.0f);
+    int adv = 0, lsb = 0;
+    stbtt_GetGlyphHMetrics(font, gi, &adv, &lsb);
+    g.advance = static_cast<float>(adv) * scale;
     int x0, y0, x1, y1;
     stbtt_GetGlyphBitmapBoxSubpixel(font, gi, scale, scale, static_cast<float>(sub_key) / 4.0f, 0.0f, &x0, &y0,
                                     &x1, &y1);
@@ -243,23 +248,39 @@ float Painter::text(float x, float baseline, const std::string &str, float size,
     const float s = scale_;
     const float pixel_size = size * s;
     const int passes = bold ? 2 : 1;
+    const std::uint32_t cr = byte(c.r), cg = byte(c.g), cb = byte(c.b);
+    const float base = baseline * s;
+    const int base_y = static_cast<int>(std::lround(base));
+    const float track_px = tracking * s;
+    const float start_pen = x * s;
+    float final_pen = start_pen;
     for (int pass = 0; pass < passes; ++pass) {
-        float pen = x * s + static_cast<float>(pass) * 0.4f * s;
-        const float base = baseline * s;
+        float pen = start_pen + static_cast<float>(pass) * 0.4f * s;
         for (std::size_t i = 0; i < str.size();) {
             const std::uint32_t cp = next_codepoint(str, i);
             const float fl = std::floor(pen);
             const Glyph &g = glyph(cp, pixel_size, pen - fl);
-            const int ox = static_cast<int>(fl) + g.x0, oy = static_cast<int>(std::lround(base)) + g.y0;
-            for (int gy = 0; gy < g.h; ++gy)
-                for (int gx = 0; gx < g.w; ++gx) {
-                    const unsigned char v = g.bitmap[static_cast<std::size_t>(gy * g.w + gx)];
-                    if (v != 0) blend(ox + gx, oy + gy, c, alpha * static_cast<float>(v) * (1.0f / 255.0f));
+            const int ox = static_cast<int>(fl) + g.x0, oy = base_y + g.y0;
+            const int gy0 = std::max(0, clip_y0_ - oy);
+            const int gy1 = std::min(g.h, clip_y1_ - oy);
+            const int gx0 = std::max(0, -ox);
+            const int gx1 = std::min(g.w, width_ - ox);
+            for (int gy = gy0; gy < gy1; ++gy) {
+                std::uint32_t *row = px_->data() + static_cast<std::size_t>(oy + gy) * static_cast<std::size_t>(width_);
+                const unsigned char *bm = g.bitmap.data() + static_cast<std::size_t>(gy * g.w);
+                for (int gx = gx0; gx < gx1; ++gx) {
+                    const unsigned char v = bm[gx];
+                    if (v != 0) {
+                        const std::uint32_t a = byte(alpha * static_cast<float>(v) * (1.0f / 255.0f));
+                        if (a != 0) blend_px(row[ox + gx], cr, cg, cb, a);
+                    }
                 }
-            pen += advance(cp, pixel_size) + tracking * s;
+            }
+            pen += g.advance + track_px;
         }
+        if (pass == 0) final_pen = pen;
     }
-    return measure(str, size, bold, tracking);
+    return (final_pen - start_pen) / s + (bold ? 0.4f : 0.0f);
 }
 
 std::string Painter::fit(const std::string &str, float size, float max_width) const {

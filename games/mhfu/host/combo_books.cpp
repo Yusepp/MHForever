@@ -2,6 +2,8 @@
 
 #include "quest_player.hpp"
 
+#include <cstring>
+
 namespace mhf::mhfu {
 namespace {
 
@@ -16,7 +18,19 @@ constexpr std::uint32_t kSlotSize = 4u;
 constexpr std::uint8_t kAllFiveBooksMask = 0x1Fu; // bits 0..4 for item IDs 1..5
 
 void scan_slots(const psprecomp::GuestMemory &memory, std::uint32_t base, std::size_t count, std::uint8_t &mask) noexcept {
-    if (!memory.contains(base, static_cast<std::uint32_t>(count) * kSlotSize)) return;
+    const std::uint32_t bytes = static_cast<std::uint32_t>(count) * kSlotSize;
+    if (const std::uint8_t *raw = memory.raw_pointer(base, bytes)) {
+        for (std::size_t i = 0; i < count && mask != kAllFiveBooksMask; ++i) {
+            std::uint16_t id = 0, qty = 0;
+            std::memcpy(&id, raw + i * kSlotSize, 2);
+            if (id >= kComboBookFirstId && id <= kComboBookLastId) {
+                std::memcpy(&qty, raw + i * kSlotSize + 2u, 2);
+                if (qty > 0u) mask |= static_cast<std::uint8_t>(1u << (id - kComboBookFirstId));
+            }
+        }
+        return;
+    }
+    if (!memory.contains(base, bytes)) return;
     for (std::size_t i = 0; i < count && mask != kAllFiveBooksMask; ++i) {
         const std::uint32_t addr = base + static_cast<std::uint32_t>(i) * kSlotSize;
         const std::uint16_t id = memory.load16(addr);
