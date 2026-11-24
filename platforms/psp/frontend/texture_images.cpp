@@ -68,7 +68,12 @@ bool decode_ktx2(const std::vector<std::uint8_t> &data, Image &image, std::strin
         error = "cannot start transcoding";
         return false;
     }
-    const bool use_bc7 = prefer_bc7 &&
+    const std::uint32_t levels = std::max(1u, tr.get_levels());
+    // Only transcode to BC7 when the KTX2 already contains a mipmap chain (or is 1x1).
+    // GPUs cannot blit-generate mipmaps into block-compressed BC7 images, so single-level
+    // KTX2 textures must decode to RGBA8 to get full GPU-generated mipmaps (preventing
+    // minification shimmering/aliasing on HD grass, ground, and foliage).
+    const bool use_bc7 = prefer_bc7 && (levels > 1u || (w <= 1u && h <= 1u)) &&
                          basist::basis_is_format_supported(
                              basist::transcoder_texture_format::cTFBC7_RGBA,
                              tr.is_uastc() ? basist::basis_tex_format::cUASTC_LDR_4x4 : basist::basis_tex_format::cETC1S);
@@ -76,7 +81,6 @@ bool decode_ktx2(const std::vector<std::uint8_t> &data, Image &image, std::strin
     image.height = h;
     image.format = use_bc7 ? Image::Format::Bc7 : Image::Format::Rgba8;
     image.levels.clear();
-    const std::uint32_t levels = std::max(1u, tr.get_levels());
     for (std::uint32_t level = 0; level < levels; ++level) {
         basist::ktx2_image_level_info info;
         if (!tr.get_image_level_info(info, level, 0, 0)) break;
