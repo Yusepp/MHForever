@@ -278,17 +278,19 @@ void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) c
     if (!can_skip_ || triggered_) return;
 
     const float cx = 240.0f;
+    // Anchor cleanly below MHFU's top Health & Stamina bars (y = 14..28) so there is zero HUD overlap.
+    const float y0 = 33.0f;
 
     // 1. Top-center "Timer" heading (MHFU Header Yellow, matching reference layout)
     const std::string timer_hdr = (language == 0) ? "残り時間" : "Timer";
     const float hdr_w = painter.font_ok() ? painter.measure(timer_hdr, 7.6f, true, 0.2f) : 24.0f;
-    painter.text(cx - hdr_w * 0.5f + 0.7f, 12.7f, timer_hdr, 7.6f, kMhFrameInk, 0.90f, true, 0.2f);
-    painter.text(cx - hdr_w * 0.5f, 12.0f, timer_hdr, 7.6f, kMhHeaderYellow, 0.98f, true, 0.2f);
+    painter.text(cx - hdr_w * 0.5f + 0.7f, y0 + 7.7f, timer_hdr, 7.6f, kMhFrameInk, 0.90f, true, 0.2f);
+    painter.text(cx - hdr_w * 0.5f, y0 + 7.0f, timer_hdr, 7.6f, kMhHeaderYellow, 0.98f, true, 0.2f);
 
     // 2. Animated 5-second MHFU Hourglass centered below "Timer"
     const float hg_size = 19.0f;
     const auto hg_px = build_hourglass_sprite(remaining_frames_);
-    painter.image(cx - hg_size * 0.5f, 13.5f, hg_size, hg_px.data(), 64, 1.0f);
+    painter.image(cx - hg_size * 0.5f, y0 + 8.5f, hg_size, hg_px.data(), 64, 1.0f);
 
     // 3. Real remaining countdown seconds (e.g. 60, 59, ..., 20, ..., 1)
     const std::uint32_t secs = remaining_seconds();
@@ -296,8 +298,8 @@ void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) c
     const float sec_size = 9.4f;
     const float sec_w = painter.font_ok() ? painter.measure(sec_txt, sec_size, true) : 14.0f;
     const mhf::overlay::Color sec_col = secs <= 10u ? mhf::overlay::Color{0.96f, 0.42f, 0.34f} : kMhWhite;
-    painter.text(cx - sec_w * 0.5f + 0.8f, 41.3f, sec_txt, sec_size, kMhFrameInk, 0.92f, true);
-    painter.text(cx - sec_w * 0.5f, 40.5f, sec_txt, sec_size, sec_col, 0.98f, true);
+    painter.text(cx - sec_w * 0.5f + 0.8f, y0 + 36.3f, sec_txt, sec_size, kMhFrameInk, 0.92f, true);
+    painter.text(cx - sec_w * 0.5f, y0 + 35.5f, sec_txt, sec_size, sec_col, 0.98f, true);
 
     // 4. Tapered MHFU dark forest-green & antique-brass center banner ("End Quest Immediately")
     const std::string text = label(language);
@@ -306,7 +308,7 @@ void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) c
     const float ban_w = std::clamp(text_w + 56.0f, 138.0f, 220.0f);
     const float ban_h = 16.5f;
     const float ban_x = cx - ban_w * 0.5f;
-    const float ban_y = 55.5f;
+    const float ban_y = y0 + 54.5f;
 
     constexpr int kBands = 24;
     const float bw = ban_w / static_cast<float>(kBands);
@@ -323,13 +325,13 @@ void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) c
     painter.rect(cx - 1.4f, ban_y + ban_h - 1.2f, 2.8f, 2.4f, kMhBrassLight, 0.98f);
 
     // Centered localized action text
-    painter.text(cx - text_w * 0.5f + 0.7f, ban_y + 11.4f, text, text_size, kMhFrameInk, 0.90f, false, 0.3f);
-    painter.text(cx - text_w * 0.5f, ban_y + 10.7f, text, text_size, holding_ ? kMhHeaderYellow : kMhWhite, 0.98f, false, 0.3f);
+    painter.text(cx - text_w * 0.5f + 0.7f, ban_y + 11.6f, text, text_size, kMhFrameInk, 0.90f, false, 0.3f);
+    painter.text(cx - text_w * 0.5f, ban_y + 10.9f, text, text_size, holding_ ? kMhHeaderYellow : kMhWhite, 0.98f, false, 0.3f);
 
-    // 5. Circular MHFU radial hold-to-fill medallion centered directly above the banner (straddling the top rail)
+    // 5. Circular MHFU radial hold-to-fill medallion centered directly above the banner
     const float med_size = 20.0f;
     const float med_x = cx - med_size * 0.5f;
-    const float med_y = 43.0f;
+    const float med_y = y0 + 38.0f;
     const auto medallion = build_radial_medallion(hold_progress_, holding_);
     painter.image(med_x, med_y, med_size, medallion.data(), 96, 1.0f);
 
