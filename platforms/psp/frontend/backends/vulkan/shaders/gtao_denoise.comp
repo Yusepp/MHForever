@@ -37,20 +37,36 @@ layout(push_constant) uniform LightingPush {
     LightingParamsBuf buf;
 } pc;
 
+shared vec4 s_gtao[10][10];
+shared float s_depth[10][10];
+
 void main() {
     LightingParams p = pc.buf.p;
-    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 gsize = ivec2(p.aux_slots.zw);
-    if (gid.x >= gsize.x || gid.y >= gsize.y) return;
-
     ivec2 gmax = gsize - ivec2(1);
     ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
     uint dslot = p.tex_slots.y;
     uint gslot = p.ext_slots.y;
 
-    vec4 center = texelFetch(u_textures[gslot], gid, 0);
-    ivec2 ip0 = clamp(gid * 2, ivec2(0), full_max);
-    float d0 = texelFetch(u_textures[dslot], ip0, 0).r;
+    // Cooperatively populate a 10x10 LDS tile (8x8 workgroup + 1-pixel halo) before the 3x3 bilateral pass.
+    ivec2 base = ivec2(gl_WorkGroupID.xy) * 8 - ivec2(1);
+    uint lid = gl_LocalInvocationIndex;
+    for (uint idx = lid; idx < 100u; idx += 64u) {
+        uint ty = idx / 10u;
+        uint tx = idx % 10u;
+        ivec2 sg = clamp(base + ivec2(int(tx), int(ty)), ivec2(0), gmax);
+        ivec2 sip = clamp(sg * 2, ivec2(0), full_max);
+        s_gtao[ty][tx] = texelFetch(u_textures[gslot], sg, 0);
+        s_depth[ty][tx] = texelFetch(u_textures[dslot], sip, 0).r;
+    }
+    barrier();
+
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= gsize.x || gid.y >= gsize.y) return;
+
+    ivec2 lpos = ivec2(gl_LocalInvocationID.xy) + ivec2(1);
+    vec4 center = s_gtao[lpos.y][lpos.x];
+    float d0 = s_depth[lpos.y][lpos.x];
     if (d0 >= 0.99992 || d0 <= 0.00001) {
         imageStore(u_gtao_blur_out, gid, vec4(1.0, 0.5, 0.5, 1.0));
         return;
@@ -72,13 +88,12 @@ void main() {
     );
 
     for (int i = 0; i < 8; ++i) {
-        ivec2 ng = clamp(gid + kOffs[i], ivec2(0), gmax);
-        ivec2 nip = clamp(ng * 2, ivec2(0), full_max);
-        float dn = texelFetch(u_textures[dslot], nip, 0).r;
+        ivec2 np = lpos + kOffs[i];
+        float dn = s_depth[np.y][np.x];
         if (dn >= 0.99992 || dn <= 0.00001) continue;
         float dw = exp(-abs(dn - d0) * 3200.0);
         float w = kWeights[i] * dw;
-        vec4 s = texelFetch(u_textures[gslot], ng, 0);
+        vec4 s = s_gtao[np.y][np.x];
         ao_sum += s.r * w;
         cs_sum += s.a * w;
         w_sum += w;

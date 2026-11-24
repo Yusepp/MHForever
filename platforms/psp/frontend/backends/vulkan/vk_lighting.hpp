@@ -132,6 +132,7 @@ private:
     VkDescriptorSet flash_set_ = VK_NULL_HANDLE;
     VkDescriptorSet lit_tmp_set_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
+    std::array<VkImageView, kSceneSetCount> scene_set_views_{};
     std::size_t scene_set_cursor_ = 0;
 
     VkPipelineLayout pipe_layout_ = VK_NULL_HANDLE;

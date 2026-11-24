@@ -314,9 +314,22 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
     const std::uint32_t qw = std::max(full_w / 4u, 1u);
     const std::uint32_t qh = std::max(full_h / 4u, 1u);
 
+    auto needs_recreate = [](const Target2D &t, std::uint32_t w, std::uint32_t h) {
+        return t.image == VK_NULL_HANDLE || t.w != w || t.h != h;
+    };
+    const bool any_recreate =
+        needs_recreate(gtao_tex_, hw, hh) || needs_recreate(gtao_blur_tex_, hw, hh) ||
+        needs_recreate(vol_tex_, qw, qh) || needs_recreate(bloom_tex_, qw, qh) ||
+        needs_recreate(bloom_blur_tex_, qw, qh) || needs_recreate(ssgi_tex_, qw, qh) ||
+        needs_recreate(ssgi_blur_tex_, qw, qh) || needs_recreate(flash_tex_, 4u, 2u) ||
+        needs_recreate(lit_tmp_tex_, full_w, full_h);
+    if (!any_recreate) return true;
+
+    ctx.wait_idle();
+    scene_set_views_.fill(VK_NULL_HANDLE);
+
     auto make_target = [&](Target2D &t, std::uint32_t w, std::uint32_t h, VkFormat fmt, VkDescriptorSet dset) -> bool {
         if (t.image != VK_NULL_HANDLE && t.w == w && t.h == h) return true;
-        ctx.wait_idle();
         t.destroy(ctx, desc);
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -521,14 +534,25 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return;
 
-    // Cycle through a ring of storage descriptor sets so we NEVER mutate a descriptor set
-    // referenced by an earlier dispatch in the same command buffer or an in-flight frame!
-    const VkDescriptorSet scene_set = scene_sets_[scene_set_cursor_];
-    scene_set_cursor_ = (scene_set_cursor_ + 1u) % kSceneSetCount;
-    VkDescriptorImageInfo sii{VK_NULL_HANDLE, scene_color_view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set, 0, 0, 1,
-                              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
-    vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
+    // Cache VkImageView -> VkDescriptorSet so steady-state subframes do zero vkUpdateDescriptorSets calls,
+    // while cycling through kSceneSetCount slots whenever a new render target view appears.
+    VkDescriptorSet scene_set = VK_NULL_HANDLE;
+    for (std::size_t i = 0; i < kSceneSetCount; ++i) {
+        if (scene_set_views_[i] == scene_color_view) {
+            scene_set = scene_sets_[i];
+            break;
+        }
+    }
+    if (scene_set == VK_NULL_HANDLE) {
+        const std::size_t slot = scene_set_cursor_;
+        scene_set_cursor_ = (scene_set_cursor_ + 1u) % kSceneSetCount;
+        scene_set = scene_sets_[slot];
+        scene_set_views_[slot] = scene_color_view;
+        VkDescriptorImageInfo sii{VK_NULL_HANDLE, scene_color_view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet swds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, scene_set, 0, 0, 1,
+                                  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
+        vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
+    }
 
     const std::uint32_t mask = live_ ? live_->vulkan_effects_mask.load(std::memory_order_relaxed) : LiveSettings::kVkEffectAll;
     const bool want_ao      = (mask & LiveSettings::kVkEffectAo) != 0u;
@@ -580,40 +604,67 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     slots[kPassComposite]   = base; slots[kPassComposite].ext_slots[1]   = want_ssgi ? flash_tex_.slot : 0u; slots[kPassComposite].aux_slots[2] = scene_w; slots[kPassComposite].aux_slots[3] = scene_h;
     slots[kPassFxaa]        = base; slots[kPassFxaa].aux_slots[0]        = lit_tmp_tex_.slot; slots[kPassFxaa].aux_slots[2]        = scene_w;           slots[kPassFxaa].aux_slots[3]      = scene_h;
 
-    // Transition only the intermediate targets needed for enabled effects -> GENERAL for compute writes.
-    auto to_general = [&](VkImage img) {
-        Context::cmd_transition_image(cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    // Batch image layout transitions into one vkCmdPipelineBarrier2 per stage boundary.
+    std::array<VkImageMemoryBarrier2, 10> barriers{};
+    std::uint32_t barrier_count = 0;
+    auto push_barrier = [&](VkImage img, VkImageLayout old_l, VkImageLayout new_l,
+                            VkAccessFlags2 src_access, VkAccessFlags2 dst_access) {
+        VkImageMemoryBarrier2 &b = barriers[barrier_count++];
+        b = {};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        b.srcAccessMask = src_access;
+        b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        b.dstAccessMask = dst_access;
+        b.oldLayout = old_l;
+        b.newLayout = new_l;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     };
-    auto to_read = [&](VkImage img) {
-        Context::cmd_transition_image(cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    auto queue_to_general = [&](VkImage img) {
+        push_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    };
+    auto queue_to_read = [&](VkImage img) {
+        push_barrier(img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    };
+    auto flush_barriers = [&]() {
+        if (barrier_count == 0) return;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = barrier_count;
+        dep.pImageMemoryBarriers = barriers.data();
+        vkCmdPipelineBarrier2(cmd, &dep);
+        barrier_count = 0;
     };
 
     if (need_gtao_pass) {
-        to_general(gtao_tex_.image);
-        to_general(gtao_blur_tex_.image);
+        queue_to_general(gtao_tex_.image);
+        queue_to_general(gtao_blur_tex_.image);
     }
-    if (want_vol)       to_general(vol_tex_.image);
-    if (need_bloom_src) to_general(bloom_tex_.image);
-    if (want_bloom)     to_general(bloom_blur_tex_.image);
+    if (want_vol)       queue_to_general(vol_tex_.image);
+    if (need_bloom_src) queue_to_general(bloom_tex_.image);
+    if (want_bloom)     queue_to_general(bloom_blur_tex_.image);
     if (want_ssgi) {
-        to_general(ssgi_tex_.image);
-        to_general(ssgi_blur_tex_.image);
-        to_general(flash_tex_.image);
+        queue_to_general(ssgi_tex_.image);
+        queue_to_general(ssgi_blur_tex_.image);
+        queue_to_general(flash_tex_.image);
     }
-    to_general(lit_tmp_tex_.image);
+    queue_to_general(lit_tmp_tex_.image);
+    flush_barriers();
+
+    // Bind global bindless Set 0 once; individual passes only rebind Set 1.
+    const VkDescriptorSet bindless_set = desc.set();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
 
     // Stage 1: Enabled half/quarter-res passes read scene_depth/scene_color in parallel across GPU CUs.
     auto run_pass = [&](VkPipeline pipe, VkDescriptorSet out_set, std::uint32_t w, std::uint32_t h, std::size_t idx) {
-        std::array<VkDescriptorSet, 2> dsets = {desc.set(), out_set};
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 2, dsets.data(), 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1, &out_set, 0, nullptr);
         const VkDeviceAddress addr = params_bda + idx * sizeof(LightingComputeParams);
         vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(addr), &addr);
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
@@ -625,9 +676,10 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_ssgi)      run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, kPassSsgi);
 
     // Stage 2: Bilateral GTAO/ContactShadow denoise + Kawase Bloom/SSGI blur + 4x2 dynamic flash.
-    if (need_gtao_pass) to_read(gtao_tex_.image);
-    if (need_bloom_src) to_read(bloom_tex_.image);
-    if (want_ssgi)      to_read(ssgi_tex_.image);
+    if (need_gtao_pass) queue_to_read(gtao_tex_.image);
+    if (need_bloom_src) queue_to_read(bloom_tex_.image);
+    if (want_ssgi)      queue_to_read(ssgi_tex_.image);
+    flush_barriers();
     if (need_gtao_pass) run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, kPassGtaoDenoise);
     if (want_bloom)     run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, kPassBloomBlur);
     if (want_ssgi) {
@@ -636,23 +688,23 @@ void LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     }
 
     // Barrier batch: transition produced targets -> SHADER_READ_ONLY (scene_color stays SHADER_READ_ONLY).
-    if (need_gtao_pass) to_read(gtao_blur_tex_.image);
-    if (want_vol)       to_read(vol_tex_.image);
-    if (want_bloom)     to_read(bloom_blur_tex_.image);
+    if (need_gtao_pass) queue_to_read(gtao_blur_tex_.image);
+    if (want_vol)       queue_to_read(vol_tex_.image);
+    if (want_bloom)     queue_to_read(bloom_blur_tex_.image);
     if (want_ssgi) {
-        to_read(ssgi_blur_tex_.image);
-        to_read(flash_tex_.image);
+        queue_to_read(ssgi_blur_tex_.image);
+        queue_to_read(flash_tex_.image);
     }
+    flush_barriers();
 
     // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
     run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, kPassComposite);
 
     // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11, or fast pass-through copy when disabled) -> scene_color.
-    to_read(lit_tmp_tex_.image);
-    Context::cmd_transition_image(cmd, scene_color, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    queue_to_read(lit_tmp_tex_.image);
+    push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    flush_barriers();
     run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, kPassFxaa);
 }
 
