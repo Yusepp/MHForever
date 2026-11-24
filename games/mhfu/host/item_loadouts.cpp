@@ -746,6 +746,14 @@ LoadoutResult ItemLoadouts::rename_preset(std::size_t index, std::string name) {
                                                : ("Renamed to " + presets_[index].name)};
 }
 
+LoadoutResult ItemLoadouts::clear_preset(std::size_t index) {
+    if (index >= kItemLoadoutCount) return {false, "Invalid loadout slot."};
+    if (!presets_[index].saved && presets_[index].name.empty()) return {false, "Item Set is already empty."};
+    presets_[index] = {};
+    save_to_disk();
+    return {true, "Cleared Item Set " + std::to_string(index + 1)};
+}
+
 LoadoutResult ItemLoadouts::apply_preset(psprecomp::GuestMemory &memory, std::size_t index) const {
     if (index >= kItemLoadoutCount || !presets_[index].saved) return {false, "Item Set is empty."};
     if (!can_use_loadouts(memory)) return {false, "Only available in Village or Hall."};
@@ -841,6 +849,14 @@ LoadoutResult ItemLoadouts::rename_armor_preset(std::size_t index, std::string n
     save_to_disk();
     return {true, armor_presets_[index].name.empty() ? ("Reset Armor Set " + std::to_string(index + 1) + " name")
                                                      : ("Renamed to " + armor_presets_[index].name)};
+}
+
+LoadoutResult ItemLoadouts::clear_armor_preset(std::size_t index) {
+    if (index >= kItemLoadoutCount) return {false, "Invalid armor set slot."};
+    if (!armor_presets_[index].saved && armor_presets_[index].name.empty()) return {false, "Armor Set is already empty."};
+    armor_presets_[index] = {};
+    save_to_disk();
+    return {true, "Cleared Armor Set " + std::to_string(index + 1)};
 }
 
 LoadoutResult ItemLoadouts::apply_armor_preset(psprecomp::GuestMemory &memory, std::size_t index) const {
@@ -1037,7 +1053,12 @@ void ItemLoadouts::poll_box_ui(psprecomp::GuestMemory &memory, std::uint32_t but
         osk_row_ = 0;
         osk_col_ = 0;
         osk_page_ = 0;
-    } else if ((pressed & (kCross | kSelect | kStart)) != 0u) {
+    } else if ((pressed & kSelect) != 0u) {
+        const auto res = tab_ == Tab::Items ? clear_preset(selected_) : clear_armor_preset(selected_);
+        toast_ = res.message;
+        toast_ok_ = res.ok;
+        toast_until_us_ = now_us + 2'200'000u;
+    } else if ((pressed & (kCross | kStart)) != 0u) {
         panel_open_ = false;
         release_guard_ = true;
     }
@@ -1451,9 +1472,10 @@ bool ItemLoadouts::render_box_ui(mhf::overlay::Painter &painter, const psprecomp
         add_hint("START", 24.0f, kMhWhite, false, "Confirm");
         add_hint("X", 11.0f, kBtnCross, true, "Cancel");
     } else {
-        add_hint("O", 11.0f, kBtnCircle, true, on_items ? "Load Set" : "Equip Set");
+        add_hint("O", 11.0f, kBtnCircle, true, on_items ? "Load" : "Equip");
         add_hint("△", 11.0f, kBtnTriangle, true, "Save");
         add_hint("□", 11.0f, kBtnSquare, true, "Rename");
+        add_hint("SELECT", 26.0f, kMhWhite, false, "Clear");
         add_hint("L1/R1", 23.0f, kMhWhite, false, "Tab");
         add_hint("X", 11.0f, kBtnCross, true, "Close");
     }

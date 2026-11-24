@@ -135,11 +135,11 @@ void test_select_tap_sorts_and_hold_opens() {
     MHF_CHECK(loadouts.suppress_game_input());
     MHF_CHECK(loadouts.game_button_force_mask() == 0u);
 
-    // Closing with SELECT and releasing does not emit an accidental sort pulse.
+    // Closing with Cross and releasing does not emit an accidental sort pulse.
     loadouts.mark_box_open(740'000u);
     loadouts.poll_box_ui(mem, 0u, 740'000u, true);
     loadouts.mark_box_open(760'000u);
-    loadouts.poll_box_ui(mem, kSelect, 760'000u, true);
+    loadouts.poll_box_ui(mem, kCross, 760'000u, true);
     MHF_CHECK(!loadouts.panel_open());
     loadouts.mark_box_open(780'000u);
     loadouts.poll_box_ui(mem, 0u, 780'000u, true);
@@ -178,6 +178,14 @@ void test_rename_loadout_and_osk() {
 
     MHF_CHECK(!loadouts.renaming());
     MHF_CHECK(loadouts.preset(0).name == "AK47");
+
+    // Clear the selected set with SELECT
+    loadouts.mark_box_open(620'000u);
+    loadouts.poll_box_ui(mem, 0u, 620'000u, true);
+    loadouts.mark_box_open(640'000u);
+    loadouts.poll_box_ui(mem, kSelect, 640'000u, true);
+    MHF_CHECK(!loadouts.has_preset(0));
+    MHF_CHECK(loadouts.preset(0).name.empty());
 }
 
 } // namespace

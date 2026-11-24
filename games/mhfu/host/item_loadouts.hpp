@@ -85,11 +85,13 @@ public:
     LoadoutResult save_preset(const psprecomp::GuestMemory &memory, std::size_t index);
     LoadoutResult apply_preset(psprecomp::GuestMemory &memory, std::size_t index) const;
     LoadoutResult rename_preset(std::size_t index, std::string name);
+    LoadoutResult clear_preset(std::size_t index);
 
     // Armor & Weapon Sets (0..4)
     LoadoutResult save_armor_preset(const psprecomp::GuestMemory &memory, std::size_t index);
     LoadoutResult apply_armor_preset(psprecomp::GuestMemory &memory, std::size_t index) const;
     LoadoutResult rename_armor_preset(std::size_t index, std::string name);
+    LoadoutResult clear_armor_preset(std::size_t index);
 
     // House & Guild Hall Item Box integration (driven by mh_item_box_update hook).
     void mark_box_open(std::uint64_t now_us) noexcept;
