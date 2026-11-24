@@ -5,6 +5,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace mhf::psp {
@@ -29,6 +30,9 @@ public:
     // Case-insensitive lookup of a file by absolute path.
     [[nodiscard]] std::optional<Entry> find(std::string_view path) const;
 
+    // Reads `size` bytes starting at byte `offset` directly into `dst` (zero intermediate allocation).
+    void read_into(std::uint64_t offset, std::uint8_t* dst, std::size_t size);
+
     // Reads `size` bytes starting at byte `offset` from the beginning of the image.
     [[nodiscard]] std::vector<std::uint8_t> read_bytes(std::uint64_t offset, std::size_t size);
 
@@ -41,6 +45,7 @@ private:
     std::ifstream file_;
     std::uint64_t image_size_{};
     std::vector<Entry> entries_;
+    std::unordered_map<std::string, std::size_t> index_;
 };
 
 } // namespace mhf::psp

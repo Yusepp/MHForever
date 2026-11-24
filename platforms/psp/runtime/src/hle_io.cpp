@@ -220,6 +220,11 @@ std::int64_t do_read(Runtime &rt, int fd, std::uint32_t address, std::uint32_t s
     if (f->file == nullptr) {
         const std::uint64_t left = f->position < f->image_size ? f->image_size - f->position : 0;
         const auto n = static_cast<std::uint32_t>(std::min<std::uint64_t>(left, size));
+        if (std::uint8_t *dst = rt.memory().raw_pointer(address, n)) {
+            state(rt).disc->read_into(f->image_offset + f->position, dst, n);
+            f->position += n;
+            return n;
+        }
         for (std::uint32_t done = 0; done < n;) {
             const std::uint32_t chunk = std::min(kIoChunk, n - done);
             const auto bytes = state(rt).disc->read_bytes(f->image_offset + f->position, chunk);
@@ -228,6 +233,9 @@ std::int64_t do_read(Runtime &rt, int fd, std::uint32_t address, std::uint32_t s
             done += chunk;
         }
         return n;
+    }
+    if (std::uint8_t *dst = rt.memory().raw_pointer(address, size)) {
+        return static_cast<std::int64_t>(std::fread(dst, 1, size, f->file));
     }
     std::vector<std::uint8_t> buffer(std::min(size, kIoChunk));
     std::uint32_t total = 0;
@@ -256,6 +264,11 @@ std::int64_t do_write(Runtime &rt, int fd, std::uint32_t address, std::uint32_t 
     if (size == 0) return 0;
     if (!rt.memory().contains(address, size)) {
         throw std::runtime_error("sceIoWrite: buffer outside guest memory");
+    }
+    if (const std::uint8_t *src = rt.memory().raw_pointer(address, size)) {
+        const std::size_t n = std::fwrite(src, 1, size, out);
+        if (f == nullptr) std::fflush(out);
+        return static_cast<std::int64_t>(n);
     }
     std::vector<std::uint8_t> buffer(std::min(size, kIoChunk));
     std::uint32_t total = 0;

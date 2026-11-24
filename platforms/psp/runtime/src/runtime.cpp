@@ -132,6 +132,7 @@ bool Runtime::activate_overlay(std::int32_t overlay_id) {
         if (it->second->code_start >= region.start && it->second->code_start < region.end) {
             region.active = it->second;
             ++overlay_activations_;
+            clear_call_cache();
             return true;
         }
     }
@@ -150,7 +151,7 @@ const Program *Runtime::active_overlay_at(std::uint32_t address) const noexcept 
 void Runtime::register_hook(std::string name, HookFunction function) { hooks_[std::move(name)] = function; }
 
 HookFunction Runtime::find_hook(std::string_view name) const {
-    const auto it = hooks_.find(std::string(name));
+    const auto it = hooks_.find(name);
     return it != hooks_.end() ? it->second : nullptr;
 }
 
@@ -179,7 +180,7 @@ HookFunction Runtime::call_patch_hook(std::uint32_t pc) const {
 void Runtime::register_call_filter(std::string name, CallFilter filter) { call_filters_[std::move(name)] = filter; }
 
 CallFilter Runtime::find_call_filter(std::string_view name) const {
-    const auto it = call_filters_.find(std::string(name));
+    const auto it = call_filters_.find(name);
     return it != call_filters_.end() ? it->second : nullptr;
 }
 
@@ -198,7 +199,7 @@ CallFilter Runtime::instruction_patch_filter(std::uint32_t pc) const {
 
 void Runtime::enable_patch(std::string name) { patches_[std::move(name)] = true; }
 
-bool Runtime::patch_enabled(std::string_view name) const { return patches_.contains(std::string(name)); }
+bool Runtime::patch_enabled(std::string_view name) const { return patches_.contains(name); }
 
 std::optional<std::uint32_t> Runtime::allocate_kernel_block(const std::string &name, std::uint32_t size) {
     const auto block = kernel_->sysmem().allocate(1, name, SysMem::Placement::High, size);
@@ -324,14 +325,23 @@ GuestFunction find_in(std::span<const FunctionEntry> table, std::uint32_t addres
 } // namespace
 
 GuestFunction Runtime::lookup(std::uint32_t address) const noexcept {
+    const std::size_t slot = (address >> 2u) & (kCallCacheSize - 1u);
+    if (call_cache_[slot].address == address && address != 0u) {
+        return call_cache_[slot].fn;
+    }
+    GuestFunction fn = nullptr;
     if (!overlay_regions_.empty()) {
         for (const auto &region : overlay_regions_) {
             if (address >= region.start && address < region.end) {
-                return region.active != nullptr ? find_in(region.active->functions, address) : nullptr;
+                fn = region.active != nullptr ? find_in(region.active->functions, address) : nullptr;
+                call_cache_[slot] = {address, fn};
+                return fn;
             }
         }
     }
-    return find_in(functions_, address);
+    fn = find_in(functions_, address);
+    call_cache_[slot] = {address, fn};
+    return fn;
 }
 
 void Runtime::call(Context &ctx, std::uint32_t address) {

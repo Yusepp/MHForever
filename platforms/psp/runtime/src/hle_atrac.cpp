@@ -56,6 +56,8 @@ std::int16_t to_pcm(float f) {
 class Track {
 public:
     ~Track() {
+        if (frame_ != nullptr) av_frame_free(&frame_);
+        if (packet_ != nullptr) av_packet_free(&packet_);
         if (at3p_ != nullptr) avcodec_free_context(&at3p_);
         if (at3_ != nullptr) avcodec_free_context(&at3_);
     }
@@ -64,7 +66,7 @@ public:
     std::uint32_t open(psprecomp::GuestMemory &mem, std::uint32_t buffer, std::uint32_t size) {
         if (size < 72) return kErrorSizeTooSmall;
         file_.resize(size);
-        for (std::uint32_t i = 0; i < size; ++i) file_[i] = mem.load8(buffer + i);
+        mem.copy_out(buffer, std::span(file_.data(), size));
         buffer_ = buffer;
         if (read32(file_, 0) != 0x46464952u || read32(file_, 8) != 0x45564157u) return kErrorUnknownFormat; // RIFF, WAVE
         file_size_ = read32(file_, 4) + 8u;
@@ -203,6 +205,7 @@ public:
         const bool looping = loop_num_ != 0 && loop_end_ >= 0;
         const int last = looping ? loop_end_ : end_sample_;
         const int count = std::clamp(last - position_ + 1, 0, samples_per_frame_);
+        std::uint8_t *dst = (out != 0 && count > 0) ? mem.raw_pointer(out, static_cast<std::uint32_t>(count) * 4u) : nullptr;
         for (int i = 0; i < count; ++i) {
             std::int16_t left = 0, right = 0;
             sample(position_ + i + full_offset_, left, right);
@@ -210,7 +213,10 @@ public:
                 left = static_cast<std::int16_t>(left * volume / 100);
                 right = static_cast<std::int16_t>(right * volume / 100);
             }
-            if (out != 0) {
+            if (dst != nullptr) {
+                const std::int16_t lr[2] = {left, right};
+                std::memcpy(dst + static_cast<std::size_t>(i) * 4u, lr, 4);
+            } else if (out != 0) {
                 mem.store16(out + static_cast<std::uint32_t>(i) * 4u, static_cast<std::uint16_t>(left));
                 mem.store16(out + static_cast<std::uint32_t>(i) * 4u + 2u, static_cast<std::uint16_t>(right));
             }
@@ -259,17 +265,17 @@ private:
     bool decode_codec_frame(const std::uint8_t *data, int size, std::int16_t *out) {
         AVCodecContext *decoder = plus_ ? at3p_ : at3_;
         if (decoder == nullptr) return false;
-        AVPacket *packet = av_packet_alloc();
-        AVFrame *frame = av_frame_alloc();
+        if (packet_ == nullptr) packet_ = av_packet_alloc();
+        if (frame_ == nullptr) frame_ = av_frame_alloc();
         bool ok = false;
-        if (packet != nullptr && frame != nullptr && av_new_packet(packet, size) >= 0) {
-            std::memcpy(packet->data, data, size);
-            if (avcodec_send_packet(decoder, packet) >= 0 && avcodec_receive_frame(decoder, frame) == 0 &&
-                frame->format == AV_SAMPLE_FMT_FLTP) {
-                const int count = std::min<int>(frame->nb_samples, samples_per_frame_);
-                if (count > 0 && frame->extended_data[0] != nullptr) {
-                    const auto left = reinterpret_cast<const float *>(frame->extended_data[0]);
-                    const auto right = channels_ == 2 ? reinterpret_cast<const float *>(frame->extended_data[1]) : left;
+        if (packet_ != nullptr && frame_ != nullptr && av_new_packet(packet_, size) >= 0) {
+            std::memcpy(packet_->data, data, size);
+            if (avcodec_send_packet(decoder, packet_) >= 0 && avcodec_receive_frame(decoder, frame_) == 0 &&
+                frame_->format == AV_SAMPLE_FMT_FLTP) {
+                const int count = std::min<int>(frame_->nb_samples, samples_per_frame_);
+                if (count > 0 && frame_->extended_data[0] != nullptr) {
+                    const auto left = reinterpret_cast<const float *>(frame_->extended_data[0]);
+                    const auto right = channels_ == 2 ? reinterpret_cast<const float *>(frame_->extended_data[1]) : left;
                     for (int i = 0; i < count; ++i) {
                         out[static_cast<std::size_t>(i) * 2u] = to_pcm(left[i]);
                         if (channels_ == 2) out[static_cast<std::size_t>(i) * 2u + 1u] = to_pcm(right[i]);
@@ -277,9 +283,9 @@ private:
                 }
                 ok = true;
             }
+            av_frame_unref(frame_);
+            av_packet_unref(packet_);
         }
-        av_frame_free(&frame);
-        av_packet_free(&packet);
         return ok;
     }
 
@@ -304,6 +310,8 @@ private:
     int sample_rate_{44100};
     AVCodecContext *at3p_{};
     AVCodecContext *at3_{};
+    AVPacket *packet_{};
+    AVFrame *frame_{};
     void *at3_extra_data_{};
     std::vector<std::int16_t> pcm_;
     int pcm_start_{-1}, pcm_count_{}, next_frame_{0};

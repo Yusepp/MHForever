@@ -73,6 +73,7 @@ void IsoImage::walk_directory(std::uint32_t lba, std::uint32_t size, const std::
         entry.lba = read_le32(rec + 2);
         entry.size = read_le32(rec + 10);
         entry.is_directory = (rec[25] & 0x02) != 0;
+        index_.emplace(upper(entry.path), entries_.size());
         entries_.push_back(entry);
         if (entry.is_directory) {
             walk_directory(entry.lba, entry.size, entry.path, depth + 1);
@@ -81,26 +82,27 @@ void IsoImage::walk_directory(std::uint32_t lba, std::uint32_t size, const std::
 }
 
 std::optional<IsoImage::Entry> IsoImage::find(std::string_view path) const {
-    const std::string wanted = upper(path);
-    for (const auto& entry : entries_) {
-        if (upper(entry.path) == wanted) {
-            return entry;
-        }
-    }
+    const auto it = index_.find(upper(path));
+    if (it != index_.end()) return entries_[it->second];
     return std::nullopt;
 }
 
-std::vector<std::uint8_t> IsoImage::read_bytes(std::uint64_t offset, std::size_t size) {
+void IsoImage::read_into(std::uint64_t offset, std::uint8_t* dst, std::size_t size) {
     if (offset > image_size_ || size > image_size_ - offset) {
         throw std::runtime_error("read past the end of the image");
     }
-    std::vector<std::uint8_t> buffer(size);
+    if (size == 0) return;
     file_.clear();
     file_.seekg(static_cast<std::streamoff>(offset));
-    file_.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(size));
+    file_.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(size));
     if (!file_) {
         throw std::runtime_error("I/O error while reading the image");
     }
+}
+
+std::vector<std::uint8_t> IsoImage::read_bytes(std::uint64_t offset, std::size_t size) {
+    std::vector<std::uint8_t> buffer(size);
+    read_into(offset, buffer.data(), size);
     return buffer;
 }
 

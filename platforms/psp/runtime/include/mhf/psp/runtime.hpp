@@ -239,12 +239,25 @@ private:
     };
     std::vector<OverlayRegion> overlay_regions_;
     std::unordered_map<std::int32_t, const Program *> overlays_;
+    struct StringHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+        std::size_t operator()(const std::string &s) const noexcept { return std::hash<std::string_view>{}(s); }
+    };
+    struct CallCacheSlot {
+        std::uint32_t address{0};
+        GuestFunction fn{nullptr};
+    };
+    static constexpr std::size_t kCallCacheSize = 4096u;
+    mutable std::array<CallCacheSlot, kCallCacheSize> call_cache_{};
+    void clear_call_cache() noexcept { call_cache_.fill({}); }
+
     [[nodiscard]] const CallPatchEntry *call_patch_entry(std::uint32_t pc) const noexcept;
-    std::unordered_map<std::string, HookFunction> hooks_;
-    std::unordered_map<std::string, CallFilter> call_filters_;
+    std::unordered_map<std::string, HookFunction, StringHash, std::equal_to<>> hooks_;
+    std::unordered_map<std::string, CallFilter, StringHash, std::equal_to<>> call_filters_;
     const Program *main_program_ = nullptr; // the executable (add_program), for its call patches
     bool any_call_patches_ = false;
-    std::unordered_map<std::string, bool> patches_;
+    std::unordered_map<std::string, bool, StringHash, std::equal_to<>> patches_;
     std::unordered_map<std::uint64_t, const HleFunction *> hle_;
     std::unordered_map<std::uint64_t, bool> reported_unimplemented_;
     std::uint64_t overlay_activations_{};
