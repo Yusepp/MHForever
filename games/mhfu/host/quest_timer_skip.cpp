@@ -1,6 +1,8 @@
 #include "quest_timer_skip.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 namespace mhf::mhfu {
 namespace {
@@ -20,16 +22,130 @@ bool readable_word_address(const psprecomp::GuestMemory &memory, std::uint32_t a
     return (address & 3u) == 0u && memory.contains(address, 4u);
 }
 
-// MH-inspired warm dark leather/slate & antique-gold palette.
-constexpr mhf::overlay::Color kMhCardTop{0.125f, 0.106f, 0.086f};
-constexpr mhf::overlay::Color kMhCardBot{0.063f, 0.055f, 0.047f};
-constexpr mhf::overlay::Color kMhGold{0.847f, 0.706f, 0.392f};
-constexpr mhf::overlay::Color kMhGoldBright{0.988f, 0.843f, 0.451f};
-constexpr mhf::overlay::Color kMhGoldDim{0.443f, 0.357f, 0.204f};
-constexpr mhf::overlay::Color kMhParchment{0.969f, 0.937f, 0.855f};
-constexpr mhf::overlay::Color kMhSubtle{0.761f, 0.706f, 0.588f};
-constexpr mhf::overlay::Color kMhPillTop{0.216f, 0.184f, 0.141f};
-constexpr mhf::overlay::Color kMhPillBot{0.118f, 0.098f, 0.075f};
+// Native MHFU HUD palette (matching Pokke House / Smithy green ribbons & antique-brass frames).
+constexpr mhf::overlay::Color kMhRibbonBg{0.114f, 0.251f, 0.078f};
+constexpr mhf::overlay::Color kMhRibbonEdge{0.278f, 0.420f, 0.180f};
+constexpr mhf::overlay::Color kMhRibbonTribal{0.235f, 0.392f, 0.145f};
+constexpr mhf::overlay::Color kMhBrassLight{0.804f, 0.651f, 0.373f};
+constexpr mhf::overlay::Color kMhBrassDark{0.463f, 0.349f, 0.188f};
+constexpr mhf::overlay::Color kMhFrameInk{0.055f, 0.047f, 0.039f};
+constexpr mhf::overlay::Color kMhHeaderYellow{0.925f, 0.871f, 0.341f};
+constexpr mhf::overlay::Color kMhWhite{0.960f, 0.955f, 0.935f};
+constexpr mhf::overlay::Color kBtnCapBg{0.110f, 0.110f, 0.110f};
+constexpr mhf::overlay::Color kBtnCapBorder{0.620f, 0.610f, 0.560f};
+
+std::uint32_t premul_rgba(float r, float g, float b, float a) noexcept {
+    a = std::clamp(a, 0.0f, 1.0f);
+    const auto to_u8 = [&](float c) -> std::uint32_t {
+        return static_cast<std::uint32_t>(std::clamp(c * a * 255.0f + 0.5f, 0.0f, 255.0f));
+    };
+    const auto au8 = static_cast<std::uint32_t>(std::clamp(a * 255.0f + 0.5f, 0.0f, 255.0f));
+    return to_u8(r) | (to_u8(g) << 8u) | (to_u8(b) << 16u) | (au8 << 24u);
+}
+
+std::uint32_t blend_over(std::uint32_t dst, std::uint32_t src) noexcept {
+    const std::uint32_t sa = src >> 24u;
+    if (sa == 0u) return dst;
+    if (sa == 255u || dst == 0u) return src;
+    const std::uint32_t inv = 255u - sa;
+    const auto mix = [&](unsigned shift) -> std::uint32_t {
+        const std::uint32_t sc = (src >> shift) & 0xFFu;
+        const std::uint32_t dc = (dst >> shift) & 0xFFu;
+        return std::min(255u, sc + (dc * inv + 127u) / 255u);
+    };
+    return mix(0u) | (mix(8u) << 8u) | (mix(16u) << 16u) | (mix(24u) << 24u);
+}
+
+// Rasterizes a crisp 96x96 anti-aliased MHFU circular medallion with clockwise radial hold-to-fill arc.
+std::vector<std::uint32_t> build_radial_medallion(float progress, bool holding) {
+    constexpr int kRes = 96;
+    constexpr float kHalf = 48.0f;
+    constexpr float kPi = 3.14159265359f;
+    constexpr float kTwoPi = 2.0f * kPi;
+
+    std::vector<std::uint32_t> px(static_cast<std::size_t>(kRes * kRes), 0u);
+    const float fill_angle = std::clamp(progress, 0.0f, 1.0f) * kTwoPi;
+
+    for (int y = 0; y < kRes; ++y) {
+        for (int x = 0; x < kRes; ++x) {
+            const float dx = (static_cast<float>(x) + 0.5f) - kHalf;
+            const float dy = (static_cast<float>(y) + 0.5f) - kHalf;
+            const float r = std::sqrt(dx * dx + dy * dy);
+            if (r > 47.0f) continue;
+
+            std::uint32_t col = 0u;
+
+            // Soft outer drop-shadow halo
+            if (r < 46.5f) {
+                const float sh = std::clamp((46.5f - r) / 4.5f, 0.0f, 1.0f) * 0.42f;
+                col = premul_rgba(0.0f, 0.0f, 0.0f, sh);
+            }
+
+            // Dark ink outer rim (r = 41.5..44.2)
+            if (r < 44.5f) {
+                const float edge = std::clamp(44.5f - r, 0.0f, 1.0f);
+                col = blend_over(col, premul_rgba(kMhFrameInk.r, kMhFrameInk.g, kMhFrameInk.b, 0.96f * edge));
+            }
+
+            // Antique-brass MHFU outer ring with 8 subtle compass notches (r = 38.2..42.0)
+            if (r >= 37.5f && r <= 42.5f) {
+                const float band = std::clamp(std::min(r - 37.5f, 42.5f - r), 0.0f, 1.0f);
+                float ang = std::atan2(dx, -dy);
+                if (ang < 0.0f) ang += kTwoPi;
+                const float sector = std::fmod(ang + kPi / 16.0f, kPi / 4.0f);
+                const bool notch = sector < 0.075f;
+                const auto &bc = notch ? kMhBrassDark : (holding ? kMhHeaderYellow : kMhBrassLight);
+                col = blend_over(col, premul_rgba(bc.r, bc.g, bc.b, 0.96f * band));
+            }
+
+            // Smoked dark-charcoal interior medallion (r < 38.5)
+            if (r < 38.5f) {
+                const float inner = std::clamp(38.5f - r, 0.0f, 1.0f);
+                col = blend_over(col, premul_rgba(0.065f, 0.060f, 0.052f, 0.92f * inner));
+            }
+
+            // Recessed radial progress track (r = 29.0..37.2)
+            if (r >= 28.5f && r <= 37.5f) {
+                const float track = std::clamp(std::min(r - 28.5f, 37.5f - r), 0.0f, 1.0f);
+                col = blend_over(col, premul_rgba(0.18f, 0.24f, 0.14f, 0.55f * track));
+            }
+
+            // Clockwise radial hold-to-fill arc starting at 12 o'clock (r = 29.5..37.0)
+            if (fill_angle > 0.005f && r >= 29.0f && r <= 37.5f) {
+                float ang = std::atan2(dx, -dy); // 0 at 12 o'clock, increases clockwise
+                if (ang < 0.0f) ang += kTwoPi;
+                const float radial_aa = std::clamp(std::min(r - 29.0f, 37.5f - r), 0.0f, 1.0f);
+                const float aa_ang = 1.2f / std::max(r, 1.0f);
+                const float start_aa = std::clamp(ang / aa_ang, 0.0f, 1.0f);
+                const float end_aa = std::clamp((fill_angle - ang) / aa_ang, 0.0f, 1.0f);
+                const float cov = radial_aa * (progress >= 0.999f ? 1.0f : std::min(start_aa, end_aa));
+                if (cov > 0.001f) {
+                    const float t = std::clamp(ang / kTwoPi, 0.0f, 1.0f);
+                    // Smooth gradient from MHFU emerald-green to bright antique-gold
+                    const float cr = 0.16f + 0.80f * t;
+                    const float cg = 0.82f + 0.10f * t;
+                    const float cb = 0.28f + 0.06f * (1.0f - t);
+                    col = blend_over(col, premul_rgba(cr, cg, cb, 0.98f * cov));
+
+                    // Bright glowing tip at the leading edge
+                    if (progress < 0.995f && std::abs(fill_angle - ang) < 0.14f) {
+                        const float tip = 1.0f - std::abs(fill_angle - ang) / 0.14f;
+                        col = blend_over(col, premul_rgba(1.0f, 0.98f, 0.78f, 0.72f * tip * radial_aa));
+                    }
+                }
+            }
+
+            // Inner brass bezel separating track from center button (r = 27.2..29.2)
+            if (r >= 27.0f && r <= 29.4f) {
+                const float ring = std::clamp(std::min(r - 27.0f, 29.4f - r), 0.0f, 1.0f);
+                col = blend_over(col, premul_rgba(kMhBrassDark.r, kMhBrassDark.g, kMhBrassDark.b, 0.90f * ring));
+            }
+
+            px[static_cast<std::size_t>(y * kRes + x)] = col;
+        }
+    }
+    return px;
+}
 
 } // namespace
 
@@ -70,48 +186,57 @@ void QuestTimerSkip::render_card(mhf::overlay::Painter &painter, int language) c
     if (!can_skip_ || triggered_) return;
 
     const std::string text = label(language);
-    const float text_size = 9.0f;
-    const float text_w = painter.font_ok() ? painter.measure(text, text_size, true) : 84.0f;
+    const float text_size = 8.6f;
+    const float text_w = painter.font_ok() ? painter.measure(text, text_size, false, 0.35f) : 78.0f;
 
-    const float pill_w = 38.0f;
-    const float pill_h = 14.0f;
-    const float pad_x = 8.0f;
-    const float gap = 7.0f;
-    const float card_w = std::clamp(pad_x * 2.0f + pill_w + gap + text_w, 126.0f, 198.0f);
-    const float card_h = 28.0f;
-    const float card_x = 10.0f;
-    const float card_y = 272.0f - card_h - 10.0f;
+    // Left-anchored MHFU dark forest-green ribbon (matching Pokke House / Smithy HUD bars)
+    // paired with a circular clockwise radial hold-to-fill medallion around [SELECT].
+    const float med_size = 30.0f;
+    const float med_x = 10.0f;
+    const float med_y = 272.0f - med_size - 9.0f;
+    const float rib_y = med_y + 4.5f;
+    const float rib_h = 21.0f;
+    const float rib_w = std::clamp(med_x + med_size + 8.0f + text_w + 26.0f, 146.0f, 224.0f);
 
-    // Soft drop shadow + MH leather/slate gradient panel + double antique-gold bevel frame.
-    painter.rrect(card_x + 1.5f, card_y + 2.0f, card_w, card_h, 5.0f, mhf::overlay::kBlack, 0.45f);
-    painter.rrect(card_x, card_y, card_w, card_h, 4.5f, kMhCardTop, 0.90f, 0.0f, &kMhCardBot);
-    painter.rrect(card_x, card_y, card_w, card_h, 4.5f, holding_ ? kMhGoldBright : kMhGold, 0.92f, 1.0f);
-    painter.rrect(card_x + 2.0f, card_y + 2.0f, card_w - 4.0f, card_h - 4.0f, 3.0f, kMhGoldDim, 0.55f, 0.75f);
-
-    // PSP [SELECT] button pill on the left.
-    const float pill_x = card_x + pad_x;
-    const float pill_y = card_y + (card_h - 4.0f - pill_h) * 0.5f;
-    painter.rrect(pill_x, pill_y, pill_w, pill_h, 7.0f, holding_ ? kMhGold : kMhPillTop, 0.95f, 0.0f,
-                  holding_ ? &kMhGoldBright : &kMhPillBot);
-    painter.rrect(pill_x, pill_y, pill_w, pill_h, 7.0f, holding_ ? kMhGoldBright : kMhGold, 0.95f, 1.0f);
-    const float sel_w = painter.font_ok() ? painter.measure("SELECT", 6.8f, true, 0.4f) : 28.0f;
-    painter.text(pill_x + (pill_w - sel_w) * 0.5f, pill_y + 9.5f, "SELECT", 6.8f,
-                 holding_ ? mhf::overlay::kInk : kMhParchment, 0.98f, true, 0.4f);
-
-    // Localized action text in crisp anti-aliased TrueType font.
-    const float tx = pill_x + pill_w + gap;
-    const float ty = pill_y + 10.2f;
-    painter.text(tx + 0.8f, ty + 0.8f, text, text_size, mhf::overlay::kBlack, 0.75f, true);
-    painter.text(tx, ty, text, text_size, holding_ ? kMhGoldBright : kMhParchment, 0.98f, true);
-
-    // Sleek hold-progress bar tucked along the bottom interior of the card.
-    const float bar_x = card_x + 6.0f;
-    const float bar_y = card_y + card_h - 5.5f;
-    const float bar_w = card_w - 12.0f;
-    painter.rrect(bar_x, bar_y, bar_w, 2.5f, 1.25f, kMhSubtle, 0.25f);
-    if (hold_progress_ > 0.01f) {
-        painter.rrect(bar_x, bar_y, std::max(3.0f, bar_w * hold_progress_), 2.5f, 1.25f, kMhGoldBright, 0.98f);
+    // Translucent MHFU forest-green fading ribbon with subtle olive rails and right tribal cap
+    constexpr int kBands = 18;
+    const float bw = rib_w / static_cast<float>(kBands);
+    for (int i = 0; i < kBands; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(kBands - 1);
+        const float fade = t <= 0.72f ? 1.0f : std::max(0.0f, 1.0f - (t - 0.72f) / 0.28f);
+        painter.rect(static_cast<float>(i) * bw, rib_y, bw + 0.35f, rib_h, kMhRibbonBg, 0.86f * fade);
     }
+    painter.rect(0.0f, rib_y, rib_w - 14.0f, 0.85f, kMhRibbonEdge, 0.88f);
+    painter.rect(0.0f, rib_y + rib_h - 0.85f, rib_w - 14.0f, 0.85f, kMhRibbonEdge, 0.88f);
+
+    // Geometric MHFU tribal motif on the right end of the ribbon
+    const float tx_end = rib_w - 22.0f;
+    painter.rect(tx_end, rib_y + 2.0f, 1.2f, rib_h - 4.0f, kMhRibbonTribal, 0.82f);
+    painter.rect(tx_end + 2.8f, rib_y + 3.0f, 7.5f, 1.2f, kMhRibbonTribal, 0.78f);
+    painter.rect(tx_end + 2.8f, rib_y + rib_h - 4.2f, 7.5f, 1.2f, kMhRibbonTribal, 0.78f);
+    painter.rect(tx_end + 5.5f, rib_y + 6.0f, 3.2f, rib_h - 12.0f, kMhRibbonTribal, 0.72f);
+
+    // Circular MHFU radial hold-to-fill medallion
+    const auto medallion = build_radial_medallion(hold_progress_, holding_);
+    painter.image(med_x, med_y, med_size, medallion.data(), 96, 1.0f);
+
+    // Centered PSP [SELECT] keycap inside the radial medallion
+    const float cap_w = 15.5f;
+    const float cap_h = 8.0f;
+    const float cap_x = med_x + (med_size - cap_w) * 0.5f;
+    const float cap_y = med_y + (med_size - cap_h) * 0.5f;
+    painter.rrect(cap_x, cap_y, cap_w, cap_h, 2.0f, kBtnCapBg, 0.96f);
+    painter.rrect(cap_x, cap_y, cap_w, cap_h, 2.0f, holding_ ? kMhHeaderYellow : kBtnCapBorder, 0.95f, 0.75f);
+    const std::string cap_lbl = "SEL";
+    const float cap_tw = painter.font_ok() ? painter.measure(cap_lbl, 5.2f, true, 0.25f) : 10.0f;
+    painter.text(cap_x + (cap_w - cap_tw) * 0.5f, cap_y + 6.0f, cap_lbl, 5.2f,
+                 holding_ ? kMhHeaderYellow : kMhWhite, 0.98f, true, 0.25f);
+
+    // Crisp MHFU action text with dark drop shadow
+    const float text_x = med_x + med_size + 7.0f;
+    const float text_y = rib_y + 13.6f;
+    painter.text(text_x + 0.75f, text_y + 0.75f, text, text_size, kMhFrameInk, 0.88f, false, 0.35f);
+    painter.text(text_x, text_y, text, text_size, holding_ ? kMhHeaderYellow : kMhWhite, 0.98f, false, 0.35f);
 }
 
 bool QuestTimerSkip::poll(psprecomp::GuestMemory &memory, std::uint32_t buttons, std::uint64_t now_us, bool enabled) {
