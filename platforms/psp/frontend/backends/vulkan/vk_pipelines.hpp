@@ -54,8 +54,7 @@ struct GePipelineKey {
     std::uint8_t spec_alpha_test{1};
     std::uint8_t spec_zrange{0};
     std::uint8_t msaa_4x{0};
-    std::uint8_t hdr_gbuf{0};
-    std::uint8_t gbuf_write{1};
+    std::uint8_t hdr_3d{0};
     std::uint8_t blend_enable{0};
     std::uint8_t color_op{0};
     std::uint8_t src_factor{1};
@@ -69,8 +68,7 @@ struct GePipelineKey {
                                         (static_cast<std::uint64_t>(spec_alpha_test & 1u) << 2u) |
                                         (static_cast<std::uint64_t>(spec_zrange & 1u) << 3u) |
                                         (static_cast<std::uint64_t>(msaa_4x & 1u) << 4u) |
-                                        (static_cast<std::uint64_t>(hdr_gbuf & 1u) << 5u) |
-                                        (static_cast<std::uint64_t>(gbuf_write & 1u) << 6u);
+                                        (static_cast<std::uint64_t>(hdr_3d & 1u) << 5u);
         return spec_bits | (static_cast<std::uint64_t>(blend_enable) << 8u) |
                (static_cast<std::uint64_t>(color_op) << 16u) | (static_cast<std::uint64_t>(src_factor) << 24u) |
                (static_cast<std::uint64_t>(dst_factor) << 32u) | (static_cast<std::uint64_t>(color_mask) << 40u);

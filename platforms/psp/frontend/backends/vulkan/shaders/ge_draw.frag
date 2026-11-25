@@ -44,16 +44,6 @@ layout(location = 4) in vec3 v_normal;
 layout(location = 5) in float v_has_normal;
 
 layout(location = 0) out vec4 o_color;
-layout(location = 1) out vec4 o_gbuf;
-
-vec2 encode_oct_unorm(vec3 n) {
-    float l1 = abs(n.x) + abs(n.y) + abs(n.z);
-    vec2 oct = n.xy / max(l1, 1e-5);
-    if (n.z < 0.0) {
-        oct = (1.0 - abs(oct.yx)) * vec2(oct.x >= 0.0 ? 1.0 : -1.0, oct.y >= 0.0 ? 1.0 : -1.0);
-    }
-    return clamp(oct * 0.5 + 0.5, vec2(0.0), vec2(1.0));
-}
 
 bool alpha_compare(uint f, uint a, uint b) {
     if (f == 0u) return false;
@@ -153,16 +143,8 @@ void main() {
         }
     }
     if (kSpecHdr != 0u) {
-        o_color = vec4(clamp(c.rgb, vec3(0.0), vec3(8.0)), clamp(c.a, 0.0, 1.0));
-        if (kSpecClear == 0u && v_has_normal > 0.5) {
-            DrawParams p2 = pc.params.items[pc.draw_idx];
-            float skinned = ((p2.tex_func_bits & 0x800u) != 0u) ? 1.0 : 0.0;
-            o_gbuf = vec4(encode_oct_unorm(normalize(v_normal)), 1.0, skinned);
-        } else {
-            o_gbuf = vec4(0.5, 0.5, 0.0, 0.0);
-        }
+        o_color = vec4(clamp(c.rgb, vec3(0.0), vec3(6.0)), clamp(c.a, 0.0, 1.0));
     } else {
         o_color = clamp(c, 0.0, 1.0);
-        o_gbuf = vec4(0.5, 0.5, 0.0, 0.0);
     }
 }

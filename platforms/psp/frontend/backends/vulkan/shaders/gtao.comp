@@ -97,22 +97,6 @@ void main() {
     vec3 dPdy = (abs(PD.z - P.z) < abs(P.z - PU.z)) ? (PD - P) : (P - PU);
     vec3 N = normalize(cross(dPdy, dPdx));
     if (dot(N, -P) < 0.0) N = -N;
-    // Prefer smooth per-pixel skinned vertex normal from G-buffer when available (eliminates low-poly faceting!).
-    if (p.phase1_slots.x != 0u) {
-        vec4 gb = texelFetch(u_textures[p.phase1_slots.x], ip, 0);
-        if (gb.b > 0.5) {
-            vec2 oct = gb.rg * 2.0 - 1.0;
-            vec3 gn = vec3(oct.x, oct.y, 1.0 - abs(oct.x) - abs(oct.y));
-            float t = max(-gn.z, 0.0);
-            gn.x += (gn.x >= 0.0) ? -t : t;
-            gn.y += (gn.y >= 0.0) ? -t : t;
-            gn = normalize(gn);
-            // Match gtao's +Y-down view-space normal orientation (PSP view space is +Y-up).
-            gn.y = -gn.y;
-            if (dot(gn, -P) < 0.0) gn = -gn;
-            N = gn;
-        }
-    }
     vec3 V = normalize(-P);
 
     // Horizon-based GTAO: 2 directions x 3 steps each side = 12 depth fetches (IGN-dithered).

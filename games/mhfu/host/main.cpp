@@ -636,18 +636,27 @@ std::array<float, 3> equipped_weapon_element_rgb(const psprecomp::GuestMemory &m
             if (wtype == 5u && wid < 1150u) {
                 const std::uint32_t entry = *region::mh_blademaster_weapons + static_cast<std::uint32_t>(wid) * 24u;
                 if (memory.contains(entry, 24u)) {
-                    const std::uint8_t elem_id = memory.load8(entry + 0x0Bu);
-                    const std::uint8_t elem_val = memory.load8(entry + 0x0Cu);
+                    // MHFU 24-byte BlademasterWeapon: +0x0E elem_id (1=Fire..5=Ice), +0x0F elem_val,
+                    // +0x10 status_id (1=Poison, 2=Para, 3=Sleep), +0x11 status_val.
+                    const std::uint8_t elem_id = memory.load8(entry + 0x0Eu);
+                    const std::uint8_t elem_val = memory.load8(entry + 0x0Fu);
                     if (elem_val > 0u) {
                         switch (elem_id) {
-                        case 1u: return {1.00f, 0.45f, 0.12f}; // Fire
-                        case 2u: return {0.22f, 0.72f, 1.00f}; // Water
-                        case 3u: return {0.58f, 0.85f, 1.00f}; // Thunder
-                        case 4u: return {0.92f, 0.16f, 0.38f}; // Dragon
-                        case 5u: return {0.62f, 0.90f, 1.00f}; // Ice
-                        case 6u: return {0.72f, 0.24f, 0.96f}; // Poison
-                        case 7u: return {1.00f, 0.88f, 0.20f}; // Paralysis
-                        case 8u: return {0.45f, 0.82f, 0.92f}; // Sleep
+                        case 1u: return {1.00f, 0.42f, 0.10f}; // Fire
+                        case 2u: return {0.20f, 0.72f, 1.00f}; // Water
+                        case 3u: return {0.45f, 0.85f, 1.00f}; // Thunder
+                        case 4u: return {0.92f, 0.14f, 0.36f}; // Dragon
+                        case 5u: return {0.60f, 0.92f, 1.00f}; // Ice
+                        default: break;
+                        }
+                    }
+                    const std::uint8_t stat_id = memory.load8(entry + 0x10u);
+                    const std::uint8_t stat_val = memory.load8(entry + 0x11u);
+                    if (stat_val > 0u) {
+                        switch (stat_id) {
+                        case 1u: return {0.72f, 0.22f, 0.96f}; // Poison
+                        case 2u: return {1.00f, 0.88f, 0.18f}; // Paralysis
+                        case 3u: return {0.45f, 0.84f, 0.94f}; // Sleep
                         default: break;
                         }
                     }
@@ -685,9 +694,9 @@ void on_enemy_damage_apply(Runtime &rt, Context &ctx) {
                 SemanticHitFlash hf{};
                 hf.world_pos = {wx, wy + 85.0f, wz};
                 hf.color = equipped_weapon_element_rgb(mem);
-                const float strength = std::clamp(static_cast<float>(dmg) / 55.0f, 0.45f, 1.8f);
-                hf.radius = 340.0f + strength * 140.0f;
-                hf.peak_intensity = 1.85f + strength * 1.45f;
+                const float strength = std::clamp(static_cast<float>(dmg) / 60.0f, 0.45f, 1.6f);
+                hf.radius = 280.0f + strength * 110.0f;
+                hf.peak_intensity = 0.95f + strength * 0.75f;
                 hf.birth_us = now;
                 std::lock_guard<std::mutex> lock(g_hit_flash_mutex);
                 if (g_hit_flashes.size() >= 12u) g_hit_flashes.erase(g_hit_flashes.begin());
@@ -1800,21 +1809,21 @@ int main(int argc, char **argv) {
                             switch (m.species_id) {
                             case 46u: // Lunastra
                             case 50u: // Teostra
-                                rgb[0] = 1.00f; rgb[1] = 0.38f; rgb[2] = 0.08f; rad = 540.0f; inten = 1.55f * pulse; break;
+                                rgb[0] = 1.00f; rgb[1] = 0.38f; rgb[2] = 0.08f; rad = 460.0f; inten = 0.95f * pulse; break;
                             case 35u: // Kirin
                             case 15u: // Khezu
                             case 29u: // Red Khezu
-                                rgb[0] = 0.35f; rgb[1] = 0.75f; rgb[2] = 1.00f; rad = 500.0f; inten = 1.45f * pulse; break;
+                                rgb[0] = 0.35f; rgb[1] = 0.78f; rgb[2] = 1.00f; rad = 440.0f; inten = 0.90f * pulse; break;
                             case 16u: // Fatalis
                             case 26u: // Crimson Fatalis
                             case 53u: // Akantor
-                                rgb[0] = 1.00f; rgb[1] = 0.28f; rgb[2] = 0.08f; rad = 620.0f; inten = 1.50f * pulse; break;
+                                rgb[0] = 1.00f; rgb[1] = 0.28f; rgb[2] = 0.08f; rad = 520.0f; inten = 0.95f * pulse; break;
                             case 47u: // White Fatalis
-                                rgb[0] = 0.95f; rgb[1] = 0.20f; rgb[2] = 0.32f; rad = 620.0f; inten = 1.50f * pulse; break;
+                                rgb[0] = 0.95f; rgb[1] = 0.20f; rgb[2] = 0.32f; rad = 520.0f; inten = 0.95f * pulse; break;
                             case 69u: // Ukanlos
-                                rgb[0] = 0.50f; rgb[1] = 0.85f; rgb[2] = 1.00f; rad = 580.0f; inten = 1.25f * pulse; break;
+                                rgb[0] = 0.50f; rgb[1] = 0.85f; rgb[2] = 1.00f; rad = 480.0f; inten = 0.80f * pulse; break;
                             case 45u: // Chameleos
-                                rgb[0] = 0.72f; rgb[1] = 0.24f; rgb[2] = 0.96f; rad = 480.0f; inten = 1.15f * pulse; break;
+                                rgb[0] = 0.72f; rgb[1] = 0.24f; rgb[2] = 0.96f; rad = 420.0f; inten = 0.75f * pulse; break;
                             default:
                                 break;
                             }
