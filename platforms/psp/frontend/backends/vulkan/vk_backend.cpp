@@ -359,6 +359,7 @@ private:
         std::vector<vk::ShadowVertex> shadow_verts;
         std::vector<vk::ShadowBatch> shadow_batches;
         std::vector<vk::RtVertex> rt_static_verts;
+        std::vector<vk::RtStaticBatch> rt_static_batches;
         std::vector<vk::RtVertex> rt_dyn_verts;
         void clear() noexcept {
             shown_addr = 0;
@@ -375,6 +376,7 @@ private:
             shadow_verts.clear();
             shadow_batches.clear();
             rt_static_verts.clear();
+            rt_static_batches.clear();
             rt_dyn_verts.clear();
         }
     };
@@ -409,11 +411,14 @@ private:
     std::vector<vk::ShadowVertex> cur_shadow_verts_;
     std::vector<vk::ShadowBatch> cur_shadow_batches_;
     std::vector<vk::RtVertex> cur_rt_static_verts_;
+    std::vector<vk::RtStaticBatch> cur_rt_static_batches_;
     std::vector<vk::RtVertex> cur_rt_dyn_verts_;
     std::vector<vk::RtVertex> interp_rt_dyn_verts_;
     std::uint32_t cur_shadow_batch_start_ = 0u;
+    std::uint32_t cur_rt_static_batch_start_ = 0u;
     bool setup_is_shadow_caster_ = false;
     bool setup_is_rt_caster_ = false;
+    bool setup_rt_world_identity_ = false;
 
     VkImageResource blur_a_;
     VkImageResource blur_b_;
@@ -1373,6 +1378,16 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
     const bool want_rt = rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) &&
                          !lighting_.active_is_cave();
     setup_is_rt_caster_ = want_rt && opaque_3d;
+    if (setup_is_rt_caster_) {
+        const auto &wm = ge.world_matrix().m;
+        setup_rt_world_identity_ =
+            std::fabs(wm[0] - 1.0f) < 1e-3f && std::fabs(wm[4] - 1.0f) < 1e-3f && std::fabs(wm[8] - 1.0f) < 1e-3f &&
+            std::fabs(wm[1]) < 1e-3f && std::fabs(wm[2]) < 1e-3f && std::fabs(wm[3]) < 1e-3f &&
+            std::fabs(wm[5]) < 1e-3f && std::fabs(wm[6]) < 1e-3f && std::fabs(wm[7]) < 1e-3f &&
+            std::fabs(wm[9]) < 1e-3f && std::fabs(wm[10]) < 1e-3f && std::fabs(wm[11]) < 1e-3f;
+    } else {
+        setup_rt_world_identity_ = false;
+    }
     setup_is_shadow_caster_ = !want_rt && sun_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectSunShadows) &&
                               !lighting_.active_is_cave() && opaque_3d;
 }
@@ -1614,7 +1629,8 @@ void VkBackend::draw_batch() {
                     if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) && !lighting_.active_is_cave()) {
                         ensure_recording();
                         end_render_pass();
-                        rt_shadows_.update_bvh(frames_[frame_slot_].cmd, ctx_, frame_slot_, cur_rt_static_verts_, cur_rt_dyn_verts_);
+                        rt_shadows_.update_bvh(frames_[frame_slot_].cmd, ctx_, frame_slot_, cur_rt_static_verts_,
+                                               cur_rt_static_batches_, cur_rt_dyn_verts_, cur_view_mat_.data());
                         sun_shadows_.invalidate();
                     } else {
                         rt_shadows_.invalidate();
@@ -1766,6 +1782,38 @@ void VkBackend::draw_batch() {
         std::copy_n(setup_.uv_xform, 4, sb.uv_xform);
         cur_shadow_batches_.push_back(sb);
         cur_shadow_batch_start_ = static_cast<std::uint32_t>(cur_shadow_verts_.size());
+    }
+
+    if (cur_rt_static_verts_.size() > cur_rt_static_batch_start_) {
+        const std::uint32_t v_off = cur_rt_static_batch_start_;
+        const std::uint32_t v_cnt = static_cast<std::uint32_t>(cur_rt_static_verts_.size()) - v_off;
+        bool is_moving_prop = false;
+        if (!setup_rt_world_identity_ && v_cnt >= 3u) {
+            float minx = cur_rt_static_verts_[v_off].x, maxx = minx;
+            float miny = cur_rt_static_verts_[v_off].y, maxy = miny;
+            float minz = cur_rt_static_verts_[v_off].z, maxz = minz;
+            for (std::uint32_t i = v_off + 1u; i < v_off + v_cnt; ++i) {
+                const auto &p = cur_rt_static_verts_[i];
+                if (p.x < minx) minx = p.x; else if (p.x > maxx) maxx = p.x;
+                if (p.y < miny) miny = p.y; else if (p.y > maxy) maxy = p.y;
+                if (p.z < minz) minz = p.z; else if (p.z > maxz) maxz = p.z;
+            }
+            const float ext = std::max({maxx - minx, maxy - miny, maxz - minz});
+            if (ext < 220.0f) {
+                // Small non-identity rigid mesh (weapon, shield, prop): route to dynamic BLAS so it never ghosts in zone cache.
+                is_moving_prop = true;
+                if (cur_rt_dyn_verts_.size() + v_cnt <= 150000u) {
+                    cur_rt_dyn_verts_.insert(cur_rt_dyn_verts_.end(),
+                                             cur_rt_static_verts_.begin() + v_off,
+                                             cur_rt_static_verts_.end());
+                }
+                cur_rt_static_verts_.resize(v_off);
+            }
+        }
+        if (!is_moving_prop && v_cnt >= 3u) {
+            cur_rt_static_batches_.push_back({v_off, v_cnt});
+        }
+        cur_rt_static_batch_start_ = static_cast<std::uint32_t>(cur_rt_static_verts_.size());
     }
 
     if (setup_.is_additive_vfx && batch_world_cnt_ >= 12u && is_shown_target(setup_.target) &&
@@ -3473,7 +3521,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 }
                 dyn_ptr = &interp_rt_dyn_verts_;
             }
-            rt_shadows_.update_bvh(f.cmd, ctx_, frame_slot_, blend_older_.rt_static_verts, *dyn_ptr);
+            rt_shadows_.update_bvh(f.cmd, ctx_, frame_slot_, blend_older_.rt_static_verts,
+                                   blend_older_.rt_static_batches, *dyn_ptr, interp_view.data());
             sun_shadows_.invalidate();
         } else if (phase <= 0.0f) {
             rt_shadows_.invalidate();
@@ -3795,12 +3844,15 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         std::swap(cur_snap_.shadow_verts, cur_shadow_verts_);
         std::swap(cur_snap_.shadow_batches, cur_shadow_batches_);
         std::swap(cur_snap_.rt_static_verts, cur_rt_static_verts_);
+        std::swap(cur_snap_.rt_static_batches, cur_rt_static_batches_);
         std::swap(cur_snap_.rt_dyn_verts, cur_rt_dyn_verts_);
         cur_shadow_verts_.clear();
         cur_shadow_batches_.clear();
         cur_rt_static_verts_.clear();
+        cur_rt_static_batches_.clear();
         cur_rt_dyn_verts_.clear();
         cur_shadow_batch_start_ = 0u;
+        cur_rt_static_batch_start_ = 0u;
         if (it != targets_.end()) {
             cur_snap_.width = it->second.width;
             cur_snap_.height = it->second.height;
@@ -3926,8 +3978,10 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     cur_shadow_verts_.clear();
     cur_shadow_batches_.clear();
     cur_rt_static_verts_.clear();
+    cur_rt_static_batches_.clear();
     cur_rt_dyn_verts_.clear();
     cur_shadow_batch_start_ = 0u;
+    cur_rt_static_batch_start_ = 0u;
     has_cur_view_mat_ = false;
     lighting_.end_frame_zone_vote();
     frame_had_3d_ = false;

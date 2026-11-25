@@ -92,6 +92,7 @@ public:
     // The colour (ABGR8888) entry `index` of the palette gives, as the current CLUT format reads it.
     [[nodiscard]] std::uint32_t clut_lookup(std::uint32_t index) const;
     // The current camera, for backends that place vertices again (frame interpolation).
+    [[nodiscard]] const Matrix43 &world_matrix() const noexcept { return world_; }
     [[nodiscard]] const Matrix43 &view_matrix() const noexcept { return view_; }
     [[nodiscard]] const Matrix44 &proj_matrix() const noexcept { return proj_; }
     // Incremented whenever the view or projection matrix, the viewport or the screen offset is written.

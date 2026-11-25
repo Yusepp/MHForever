@@ -43,6 +43,13 @@ float linear_eye_z(RtShadowParams p, float d) {
     return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
 }
 
+vec3 view_pos_at(RtShadowParams p, ivec2 q, ivec2 full_max) {
+    float dq = texelFetch(u_textures[p.out_slots.z], clamp(q, ivec2(0), full_max), 0).r;
+    float zq = linear_eye_z(p, dq);
+    vec2 nq = ((vec2(q) + 0.5) / p.vz_and_size.zw) * 2.0 - 1.0;
+    return vec3(nq.x * p.proj_info.x * zq, -nq.y * p.proj_info.y * zq, -zq);
+}
+
 void main() {
     RtShadowParams p = pc.buf.p;
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -63,6 +70,19 @@ void main() {
     vec3 P_psp = vec3(ndc.x * p.proj_info.x * z, -ndc.y * p.proj_info.y * z, -z);
     vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
 
+    // Fast edge-preserving surface normal from 4 full-res depth neighbors (eliminates character & slope self-shadow flicker!).
+    vec3 pL = view_pos_at(p, ip + ivec2(-1, 0), full_max);
+    vec3 pR = view_pos_at(p, ip + ivec2( 1, 0), full_max);
+    vec3 pU = view_pos_at(p, ip + ivec2( 0,-1), full_max);
+    vec3 pD = view_pos_at(p, ip + ivec2( 0, 1), full_max);
+    vec3 dX = (abs(pR.z - P_psp.z) < abs(P_psp.z - pL.z)) ? (pR - P_psp) : (P_psp - pL);
+    vec3 dY = (abs(pU.z - P_psp.z) < abs(P_psp.z - pD.z)) ? (pU - P_psp) : (P_psp - pD);
+    vec3 N_psp = cross(dX, dY);
+    float nlen = length(N_psp);
+    N_psp = (nlen > 1e-4) ? (N_psp / nlen) : vec3(0.0, 0.0, 1.0);
+    if (dot(N_psp, -P_psp) < 0.0) N_psp = -N_psp;
+    vec3 N_world = normalize(mat3(p.inv_view) * N_psp);
+
     // 4-ray stratified Poisson soft-sun cone with temporally-stable IGN rotation (zero boiling, smooth penumbra!).
     vec3 L = normalize(p.sun_dir_world.xyz);
     vec3 up_ref = (abs(L.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
@@ -76,11 +96,12 @@ void main() {
     );
 
     float lit = 0.0;
+    vec3 base_origin = P_world + N_world * 5.0;
     for (int i = 0; i < 4; ++i) {
         vec2 d = kDisk4[i];
         vec2 rot = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) * p.sun_dir_world.w;
         vec3 ray_dir = normalize(L + T * rot.x + B * rot.y);
-        vec3 origin = P_world + ray_dir * 7.5;
+        vec3 origin = base_origin + ray_dir * 4.5;
 
         rayQueryEXT rq;
         rayQueryInitializeEXT(

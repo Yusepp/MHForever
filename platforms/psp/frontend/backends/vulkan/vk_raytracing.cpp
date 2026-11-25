@@ -9,17 +9,18 @@ namespace mhf::psp::vk {
 
 namespace {
 
-std::uint64_t hash_rt_verts(const std::vector<RtVertex> &verts) noexcept {
-    const std::size_t n = verts.size();
-    std::uint64_t h = static_cast<std::uint64_t>(n) * 0x9E3779B97F4A7C15ull;
-    if (n == 0) return h;
-    const std::size_t step = std::max<std::size_t>(1u, n / 32u);
-    for (std::size_t i = 0; i < n; i += step) {
-        std::uint32_t bits[3];
-        std::memcpy(bits, &verts[i], sizeof(bits));
-        h ^= (static_cast<std::uint64_t>(bits[0]) << 17u) ^
-             (static_cast<std::uint64_t>(bits[1]) << 37u) ^
-             static_cast<std::uint64_t>(bits[2]);
+std::uint64_t hash_rt_batch(const RtVertex *verts, std::uint32_t count) noexcept {
+    std::uint64_t h = static_cast<std::uint64_t>(count) * 0x9E3779B97F4A7C15ull;
+    if (count == 0u) return h;
+    // Sample up to 16 vertices quantized to ~1 cm so identical static map chunks always hash identically.
+    const std::uint32_t step = std::max<std::uint32_t>(1u, count / 16u);
+    for (std::uint32_t i = 0u; i < count; i += step) {
+        const auto qx = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(verts[i].x)));
+        const auto qy = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(verts[i].y)));
+        const auto qz = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(verts[i].z)));
+        h ^= (static_cast<std::uint64_t>(qx) << 21u) ^
+             (static_cast<std::uint64_t>(qy) << 42u) ^
+             static_cast<std::uint64_t>(qz);
         h *= 0xBF58476D1CE4E5B9ull;
     }
     return h;
@@ -57,7 +58,8 @@ void RayTracedShadows::BlasSlot::destroy(const Context &ctx) noexcept {
     as_buf.destroy(ctx);
     vtx_buf.destroy(ctx);
     device_addr = 0;
-    cached_hash = 0;
+    cached_gen = 0;
+    last_used_seq = 0;
     cached_tris = 0;
 }
 
@@ -133,7 +135,7 @@ void RayTracedShadows::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     }
     if (rt_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(ctx.device, rt_set_layout_, nullptr); rt_set_layout_ = VK_NULL_HANDLE; }
     active_static_slot_ = -1;
-    active_static_hash_ = 0;
+    reset_zone_cache();
     if (out_slot_ != 0u) { desc.free_texture(out_slot_, UINT64_MAX); out_slot_ = 0u; }
     if (out_view_ != VK_NULL_HANDLE) { vkDestroyImageView(ctx.device, out_view_, nullptr); out_view_ = VK_NULL_HANDLE; }
     if (out_img_ != VK_NULL_HANDLE) { vmaDestroyImage(ctx.allocator, out_img_, out_alloc_); out_img_ = VK_NULL_HANDLE; out_alloc_ = VK_NULL_HANDLE; }
@@ -142,8 +144,8 @@ void RayTracedShadows::shutdown(const Context &ctx, BindlessDescriptors &desc) {
 }
 
 bool RayTracedShadows::ensure_buf(const Context &ctx, GpuBuf &b, VkDeviceSize needed,
-                                  VkBufferUsageFlags usage, bool host_visible) {
-    if (needed == 0) needed = 256;
+                                  VkBufferUsageFlags usage, bool host_visible, VkDeviceSize min_alloc) {
+    if (needed < min_alloc) needed = min_alloc;
     if (b.buf != VK_NULL_HANDLE && b.size >= needed) return true;
     ctx.wait_idle();
     b.destroy(ctx);
@@ -165,11 +167,13 @@ bool RayTracedShadows::ensure_buf(const Context &ctx, GpuBuf &b, VkDeviceSize ne
 }
 
 bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasSlot &slot, GpuBuf &scratch,
-                                  const std::vector<RtVertex> &verts, VkBuildAccelerationStructureFlagsKHR flags) {
+                                  const std::vector<RtVertex> &verts, VkBuildAccelerationStructureFlagsKHR flags,
+                                  VkDeviceSize min_vtx_alloc, VkDeviceSize min_as_alloc) {
     const std::uint32_t tri_count = static_cast<std::uint32_t>(verts.size() / 3u);
     if (tri_count == 0u) return false;
     const VkDeviceSize vbytes = static_cast<VkDeviceSize>(tri_count) * 3u * sizeof(RtVertex);
-    if (!ensure_buf(ctx, slot.vtx_buf, vbytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true)) {
+    if (!ensure_buf(ctx, slot.vtx_buf, vbytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                    true, min_vtx_alloc)) {
         return false;
     }
     std::memcpy(slot.vtx_buf.mapped, verts.data(), vbytes);
@@ -203,20 +207,22 @@ bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasS
             vkDestroyAccelerationStructureKHR(ctx.device, slot.as, nullptr);
             slot.as = VK_NULL_HANDLE;
         }
-        if (!ensure_buf(ctx, slot.as_buf, sizes.accelerationStructureSize,
-                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false)) {
+        const VkDeviceSize as_alloc = std::max(sizes.accelerationStructureSize, min_as_alloc);
+        if (!ensure_buf(ctx, slot.as_buf, as_alloc,
+                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, as_alloc)) {
             return false;
         }
         VkAccelerationStructureCreateInfoKHR asci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR, nullptr};
         asci.buffer = slot.as_buf.buf;
-        asci.size = sizes.accelerationStructureSize;
+        asci.size = slot.as_buf.size;
         asci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         if (vkCreateAccelerationStructureKHR(ctx.device, &asci, nullptr, &slot.as) != VK_SUCCESS) return false;
         VkAccelerationStructureDeviceAddressInfoKHR adai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, nullptr, slot.as};
         slot.device_addr = vkGetAccelerationStructureDeviceAddressKHR(ctx.device, &adai);
     }
 
-    if (!ensure_buf(ctx, scratch, sizes.buildScratchSize + 256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false)) {
+    if (!ensure_buf(ctx, scratch, sizes.buildScratchSize + 256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
+                    4u * 1024u * 1024u)) {
         return false;
     }
     const VkDeviceAddress aligned_scratch = (scratch.addr + 255u) & ~VkDeviceAddress(255u);
@@ -238,35 +244,115 @@ bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasS
 
 bool RayTracedShadows::update_bvh(VkCommandBuffer cmd, const Context &ctx, int frame_slot,
                                   const std::vector<RtVertex> &static_verts,
-                                  const std::vector<RtVertex> &dyn_verts) {
+                                  const std::vector<RtStaticBatch> &static_batches,
+                                  const std::vector<RtVertex> &dyn_verts,
+                                  const float view_mat[16]) {
     if (!ready()) return false;
     const int fs = ((frame_slot % kRingSlots) + kRingSlots) % kRingSlots;
     last_slot_ = fs;
+    ++use_seq_;
 
-    // 1. Static zone BLAS: rebuild into ring slot `fs` ONLY when static geometry changes (zero CPU/GPU race!).
+    // 0. Detect zone transitions (loading fade or large camera teleport) and accumulate unseen static chunks
+    //    persistently per zone so PSP CPU frustum culling NEVER pops off-screen building/tree shadows!
+    if (view_mat != nullptr) {
+        float inv_v[16]{};
+        invert_rigid_col(view_mat, inv_v);
+        const float cx = inv_v[12], cy = inv_v[13], cz = inv_v[14];
+        if (has_last_cam_) {
+            const float dx = cx - last_cam_world_[0];
+            const float dy = cy - last_cam_world_[1];
+            const float dz = cz - last_cam_world_[2];
+            if (dx * dx + dy * dy + dz * dz > 6000.0f * 6000.0f) {
+                reset_zone_cache();
+            }
+        }
+        last_cam_world_[0] = cx;
+        last_cam_world_[1] = cy;
+        last_cam_world_[2] = cz;
+        has_last_cam_ = true;
+    }
+
+    if (static_verts.size() < 3u) {
+        if (++empty_static_frames_ >= 6u) {
+            reset_zone_cache();
+        }
+    } else {
+        empty_static_frames_ = 0u;
+        constexpr std::size_t kMaxZoneStaticVerts = 300000u;
+        bool added_any = false;
+        if (!static_batches.empty()) {
+            for (const RtStaticBatch &b : static_batches) {
+                if (b.v_count < 3u || b.v_offset + b.v_count > static_verts.size()) continue;
+                const std::uint32_t tri_verts = (b.v_count / 3u) * 3u;
+                const std::uint64_t ch = hash_rt_batch(static_verts.data() + b.v_offset, tri_verts);
+                if (zone_chunks_.find(ch) == zone_chunks_.end()) {
+                    if (zone_static_verts_.size() + tri_verts <= kMaxZoneStaticVerts) {
+                        zone_chunks_.insert(ch);
+                        zone_static_verts_.insert(zone_static_verts_.end(),
+                                                  static_verts.begin() + b.v_offset,
+                                                  static_verts.begin() + b.v_offset + tri_verts);
+                        added_any = true;
+                    }
+                }
+            }
+        } else {
+            const std::uint32_t tri_verts = static_cast<std::uint32_t>((static_verts.size() / 3u) * 3u);
+            const std::uint64_t ch = hash_rt_batch(static_verts.data(), tri_verts);
+            if (zone_chunks_.find(ch) == zone_chunks_.end() &&
+                zone_static_verts_.size() + tri_verts <= kMaxZoneStaticVerts) {
+                zone_chunks_.insert(ch);
+                zone_static_verts_.insert(zone_static_verts_.end(), static_verts.begin(),
+                                          static_verts.begin() + tri_verts);
+                added_any = true;
+            }
+        }
+        if (added_any) ++zone_static_gen_;
+    }
+
+    // 1. Static zone BLAS: rebuild into a guaranteed GPU-idle slot ONLY when a brand-new chunk enters the zone!
     bool have_static = false;
     VkDeviceAddress static_addr = 0;
-    if (static_verts.size() >= 3u) {
-        const std::uint64_t sh = hash_rt_verts(static_verts);
-        if (active_static_slot_ >= 0 && active_static_hash_ == sh &&
+    if (zone_static_verts_.size() >= 3u) {
+        if (active_static_slot_ >= 0 &&
+            static_blas_[active_static_slot_].cached_gen == zone_static_gen_ &&
             static_blas_[active_static_slot_].as != VK_NULL_HANDLE) {
+            static_blas_[active_static_slot_].last_used_seq = use_seq_;
             static_addr = static_blas_[active_static_slot_].device_addr;
             have_static = true;
-        } else if (build_blas(cmd, ctx, static_blas_[fs], scratch_buf_[fs], static_verts,
-                              VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)) {
-            static_blas_[fs].cached_hash = sh;
-            active_static_slot_ = fs;
-            active_static_hash_ = sh;
-            static_addr = static_blas_[fs].device_addr;
-            have_static = true;
+        } else {
+            // Find a slot guaranteed NOT referenced by any in-flight TLAS (use_seq_ - last_used_seq >= kRingSlots).
+            int free_slot = -1;
+            for (int s = 0; s < kRingSlots; ++s) {
+                if (use_seq_ >= static_blas_[s].last_used_seq + static_cast<std::uint64_t>(kRingSlots)) {
+                    free_slot = s;
+                    break;
+                }
+            }
+            if (free_slot >= 0) {
+                if (build_blas(cmd, ctx, static_blas_[free_slot], scratch_buf_[fs], zone_static_verts_,
+                               VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+                               4u * 1024u * 1024u, 8u * 1024u * 1024u)) {
+                    static_blas_[free_slot].cached_gen = zone_static_gen_;
+                    static_blas_[free_slot].last_used_seq = use_seq_;
+                    active_static_slot_ = free_slot;
+                    static_addr = static_blas_[free_slot].device_addr;
+                    have_static = true;
+                }
+            } else if (active_static_slot_ >= 0 && static_blas_[active_static_slot_].as != VK_NULL_HANDLE) {
+                // All slots in-flight this subframe: safely reuse previous static BLAS for 1 subframe.
+                static_blas_[active_static_slot_].last_used_seq = use_seq_;
+                static_addr = static_blas_[active_static_slot_].device_addr;
+                have_static = true;
+            }
         }
     }
 
-    // 2. Dynamic character BLAS (hunter + monsters): built into per-frame-in-flight slot `fs` (zero race!).
+    // 2. Dynamic character BLAS (hunter + monsters + small rigid weapons/props): per-frame-in-flight slot `fs`!
     bool have_dyn = false;
     if (dyn_verts.size() >= 3u) {
         have_dyn = build_blas(cmd, ctx, dyn_blas_[fs], scratch_buf_[fs], dyn_verts,
-                              VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR);
+                              VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR,
+                              1u * 1024u * 1024u, 2u * 1024u * 1024u);
     }
 
     if (!have_static && !have_dyn) {
