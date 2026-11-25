@@ -952,14 +952,22 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         };
         constexpr std::size_t kSlotFroxelInject = 11u;
         constexpr std::size_t kSlotFroxelInteg  = 12u;
+        constexpr std::size_t kSlotFroxelFluid  = 13u;
+        float ground_info[4]{};
         froxel_dispatched = froxel_.dispatch(
             cmd, bindless_set, view_mat, base.inv_view, in.proj, base.sun_dir_view,
             fog_lin, scat_lin, elapsed_sec, base.env_time[2], in.frame_index,
             noise3d_tex_.slot, base.aux_slots[1], base.shadow_info[0], base.shadow_info[1],
             (base.shadow_info[0] != 0u ? shadow_from_view : nullptr), rt_shadow_slot,
             lights_bda, base.light_count,
+            in.fog_actors, in.fog_actor_count,
             &slots[kSlotFroxelInject], params_bda + kSlotFroxelInject * sizeof(LightingComputeParams),
-            &slots[kSlotFroxelInteg],  params_bda + kSlotFroxelInteg  * sizeof(LightingComputeParams));
+            &slots[kSlotFroxelInteg],  params_bda + kSlotFroxelInteg  * sizeof(LightingComputeParams),
+            &slots[kSlotFroxelFluid],  params_bda + kSlotFroxelFluid  * sizeof(LightingComputeParams),
+            ground_info);
+        if (froxel_dispatched) {
+            std::memcpy(slots[kPassComposite].ground_fog_info, ground_info, sizeof(ground_info));
+        }
     }
 
     // Bind global bindless Set 0 once; individual passes only rebind Set 1.

@@ -72,8 +72,9 @@ struct alignas(16) LightingComputeParams {
     std::uint32_t shadow_info[4]{}; // x = shadow_map_slot, y = nearest_sampler, z = rt_shadow_slot, w = noise3d_slot
     float inv_view[16]{};           // column-major: PSP view (+Y up) -> world space (cm)
     float env_time[4]{};            // x = elapsed_sec, y = cam_world_y, z = vapor_strength, w = has_inv_view
+    float ground_fog_info[4]{};     // x = fluid_origin_x, y = ground_floor_y, z = fluid_origin_z, w = fluid_world_size
 };
-static_assert(sizeof(LightingComputeParams) == 416);
+static_assert(sizeof(LightingComputeParams) == 432);
 
 struct alignas(16) TaaComputeParams {
     float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
@@ -101,6 +102,8 @@ struct LightingFrameInput {
     float psp_fog_rgb[3]{0.72f, 0.78f, 0.86f};
     bool has_psp_fog = false;
     std::uint64_t frame_index = 0;
+    FogActor fog_actors[FroxelFog::kMaxActors]{};
+    std::uint32_t fog_actor_count = 0u;
 };
 
 class LightingPipeline {
@@ -168,8 +171,9 @@ public:
     }
 
     // Number of LightingComputeParams structs needed per dispatch
-    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa, exposure, froxel_inject, froxel_integ).
-    static constexpr std::size_t kParamSlotsPerDispatch = 13;
+    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa, exposure,
+    //  froxel_inject, froxel_integ, froxel_fluid).
+    static constexpr std::size_t kParamSlotsPerDispatch = 14;
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);

@@ -561,6 +561,9 @@ private:
     float batch_world_sum_[3]{0.0f, 0.0f, 0.0f};
     float batch_col_sum_[3]{0.0f, 0.0f, 0.0f};
     std::uint32_t batch_world_cnt_ = 0;
+    float batch_skin_min_[3]{1e20f, 1e20f, 1e20f};
+    float batch_skin_max_[3]{-1e20f, -1e20f, -1e20f};
+    std::uint32_t batch_skin_cnt_ = 0;
     VkImageResource vram_rb_img_;
     VkBuffer vram_rb_buf_ = VK_NULL_HANDLE;
     VmaAllocation vram_rb_alloc_ = VK_NULL_HANDLE;
@@ -1887,6 +1890,34 @@ void VkBackend::draw_batch() {
     batch_world_sum_[0] = batch_world_sum_[1] = batch_world_sum_[2] = 0.0f;
     batch_col_sum_[0] = batch_col_sum_[1] = batch_col_sum_[2] = 0.0f;
     batch_world_cnt_ = 0u;
+    if (setup_.is_skinned && batch_skin_cnt_ >= 6u && is_shown_target(setup_.target)) {
+        const float acx = 0.5f * (batch_skin_min_[0] + batch_skin_max_[0]);
+        const float afy = batch_skin_min_[1];
+        const float acz = 0.5f * (batch_skin_min_[2] + batch_skin_max_[2]);
+        const float arad = std::clamp(0.5f * std::max(batch_skin_max_[0] - batch_skin_min_[0],
+                                                      batch_skin_max_[2] - batch_skin_min_[2]) + 35.0f,
+                                      68.0f, 240.0f);
+        bool merged = false;
+        for (std::uint32_t ai = 0u; ai < cur_light_in_.fog_actor_count; ++ai) {
+            auto &ex = cur_light_in_.fog_actors[ai];
+            const float dx = ex.x - acx;
+            const float dz = ex.z - acz;
+            if (dx * dx + dz * dz < 115.0f * 115.0f) {
+                ex.x = 0.5f * (ex.x + acx);
+                ex.z = 0.5f * (ex.z + acz);
+                ex.foot_y = std::min(ex.foot_y, afy);
+                ex.radius = std::max(ex.radius, arad);
+                merged = true;
+                break;
+            }
+        }
+        if (!merged && cur_light_in_.fog_actor_count < vk::FroxelFog::kMaxActors) {
+            cur_light_in_.fog_actors[cur_light_in_.fog_actor_count++] = {acx, afy, acz, arad};
+        }
+    }
+    batch_skin_min_[0] = batch_skin_min_[1] = batch_skin_min_[2] = 1e20f;
+    batch_skin_max_[0] = batch_skin_max_[1] = batch_skin_max_[2] = -1e20f;
+    batch_skin_cnt_ = 0u;
     batch_.clear();
 }
 
@@ -2022,6 +2053,15 @@ void VkBackend::triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Ver
             batch_col_sum_[1] += std::clamp(v.g, 0.0f, 255.0f);
             batch_col_sum_[2] += std::clamp(v.b, 0.0f, 255.0f);
             ++batch_world_cnt_;
+        }
+        if (setup_.is_skinned && v.has_world) {
+            if (v.world[0] < batch_skin_min_[0]) batch_skin_min_[0] = v.world[0];
+            if (v.world[1] < batch_skin_min_[1]) batch_skin_min_[1] = v.world[1];
+            if (v.world[2] < batch_skin_min_[2]) batch_skin_min_[2] = v.world[2];
+            if (v.world[0] > batch_skin_max_[0]) batch_skin_max_[0] = v.world[0];
+            if (v.world[1] > batch_skin_max_[1]) batch_skin_max_[1] = v.world[1];
+            if (v.world[2] > batch_skin_max_[2]) batch_skin_max_[2] = v.world[2];
+            ++batch_skin_cnt_;
         }
         if (setup_is_shadow_caster_ && v.has_world && cur_shadow_verts_.size() < 180000u) {
             cur_shadow_verts_.push_back({v.world[0], v.world[1], v.world[2], v.u, v.v});
