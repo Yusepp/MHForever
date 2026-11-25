@@ -148,8 +148,6 @@ public:
 
     void reset_taa_history() noexcept { taa_hist_valid_ = false; }
     void reset_exposure() noexcept { exposure_reset_ = true; }
-    [[nodiscard]] BiomeKind active_biome() const noexcept { return active_biome_; }
-    [[nodiscard]] bool active_is_cave() const noexcept { return active_is_cave_; }
 
     // Invalidates any cached VkImageView -> VkDescriptorSet entry matching a retired view.
     void invalidate_scene_view(VkImageView view) noexcept {

@@ -52,11 +52,6 @@ void main() {
     float w = 1.0 / a_pos.w;
     // Vulkan clip space: X in [-1, 1], Y in [-1, 1] (top = -1, bottom = +1, matching PSP row 0 at top), Z in [0, 1].
     vec2 ndc = a_pos.xy / p.target_size * 2.0 - 1.0 + p.jitter_and_lod.xy;
-    // VORTEXEL-lite subtle wind sway on static alpha-tested outdoor hunting-field foliage (0.0 in villages/caves).
-    if (abs(p.jitter_and_lod.w) > 0.001) {
-        float sway = sin(p.jitter_and_lod.w + a_pos.x * 0.055 + a_pos.y * 0.035) * 0.38 * clamp(a_pos.w * 260.0, 0.0, 1.0);
-        ndc.x += sway * 2.0 / p.target_size.x;
-    }
     float z = clamp(a_pos.z / 65535.0, 0.0, 1.0);
     gl_Position = vec4(ndc * w, z * w, w);
     v_uv = a_uv * p.uv_xform.xy + p.uv_xform.zw;

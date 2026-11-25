@@ -36,9 +36,6 @@ SHADERS = [
     ("kExposureCompSpv", "exposure.comp"),
     ("kFxaaPrehudCompSpv", "fxaa_prehud.comp"),
     ("kTaaResolveCompSpv", "taa_resolve.comp"),
-    ("kParticlesSimCompSpv", "particles_sim.comp"),
-    ("kParticlesDrawVertSpv", "particles_draw.vert"),
-    ("kParticlesDrawFragSpv", "particles_draw.frag"),
 ]
 
 
