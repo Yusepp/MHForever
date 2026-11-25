@@ -646,7 +646,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda,
                                 bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot,
                                 VkDeviceAddress lights_bda, std::uint32_t light_count,
-                                std::uint32_t shadow_map_slot, const float *shadow_from_view) {
+                                std::uint32_t shadow_map_slot, const float *shadow_from_view,
+                                std::uint32_t rt_shadow_slot) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
@@ -661,9 +662,13 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     const bool want_spec    = (mask & LiveSettings::kVkEffectSpecular) != 0u;
     const bool want_fxaa    = run_fxaa;
     const bool want_vig     = (mask & LiveSettings::kVkEffectVignette) != 0u;
+    const bool want_froxel  = (mask & LiveSettings::kVkEffectFroxelFog) != 0u;
 
-    const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi;
-    const bool need_bloom_src  = want_bloom || want_ssgi;
+    const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi ||
+                                 (mask & LiveSettings::kVkEffectSunShadows) != 0u ||
+                                 (mask & LiveSettings::kVkEffectDynamicLights) != 0u ||
+                                 (mask & LiveSettings::kVkEffectRayTracing) != 0u;
+    const bool need_bloom_src  = want_bloom;
     const bool use_hdr_src     = (hdr_input_slot != 0u);
     const std::uint32_t src_color_slot = use_hdr_src ? hdr_input_slot : scene_color_slot;
 
@@ -680,7 +685,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.spec_contact[0] = 0.0f;
         base.spec_contact[3] = 0.0f;
     }
-    base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u);
+    base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u) |
+                        (want_froxel ? 8u : 0u);
     base.vz_and_size[2] = static_cast<float>(scene_w);
     base.vz_and_size[3] = static_cast<float>(scene_h);
     base.tex_slots[0] = src_color_slot;
@@ -706,6 +712,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.shadow_info[0] = 0u;
         base.shadow_info[1] = 0u;
     }
+    base.shadow_info[2] = (!active_is_cave_) ? rt_shadow_slot : 0u;
+    base.shadow_info[3] = 0u;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;

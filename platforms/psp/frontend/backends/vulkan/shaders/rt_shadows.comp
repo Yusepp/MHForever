@@ -1,0 +1,89 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_ray_query : require
+
+// Ultra-Efficient Half-Resolution Hardware Ray-Traced Sun Shadows (VK_KHR_ray_query).
+// Uses a 2-instance Partitioned TLAS (cached Static zone BLAS + fast-built Dynamic character BLAS),
+// 1 terminate-on-first-hit ray per half-res pixel with IGN-rotated soft sun cone, and outputs
+// R8_UNORM visibility for bilateral upsampling in lighting_composite.comp.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 1, binding = 0) uniform accelerationStructureEXT u_tlas;
+layout(set = 1, binding = 1, r8) uniform writeonly image2D u_rt_shadow_out;
+
+struct RtShadowParams {
+    mat4 inv_view;        // PSP view (+Y up) -> world space (cm)
+    vec4 proj_info;       // x = 1/p00, y = 1/p11, z = p10, w = p14
+    vec4 vz_and_size;     // x = vz_scale, y = vz_center, z = full_w, w = full_h
+    vec4 sun_dir_world;   // xyz = normalized sun dir (world), w = soft_cone_rad
+    uvec4 out_slots;      // x = out_w, y = out_h, z = depth_slot, w = frame_idx
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer RtShadowParamsBuf {
+    RtShadowParams p;
+};
+
+layout(push_constant) uniform RtPush {
+    RtShadowParamsBuf buf;
+} pc;
+
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+float linear_eye_z(RtShadowParams p, float d) {
+    float zn = (d * 65535.0 - p.vz_and_size.y) / max(abs(p.vz_and_size.x), 1e-3);
+    float denom = zn + p.proj_info.z;
+    if (abs(denom) < 1e-5) denom = (denom >= 0.0 ? 1e-5 : -1e-5);
+    return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
+}
+
+void main() {
+    RtShadowParams p = pc.buf.p;
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(p.out_slots.x) || gid.y >= int(p.out_slots.y)) return;
+
+    ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
+    ivec2 ip = clamp(gid * 2, ivec2(0), full_max);
+    float d0 = texelFetch(u_textures[p.out_slots.z], ip, 0).r;
+    if (d0 >= 0.99992 || d0 <= 0.00001) {
+        imageStore(u_rt_shadow_out, gid, vec4(1.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    float z = linear_eye_z(p, d0);
+    vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
+    vec2 ndc = uv * 2.0 - 1.0;
+    // PSP view space (+Y up, -Z forward); note screen ndc.y is +Y down so negate Y.
+    vec3 P_psp = vec3(ndc.x * p.proj_info.x * z, -ndc.y * p.proj_info.y * z, -z);
+    vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
+
+    // Jittered soft-sun ray direction (1 ray per half-res pixel, IGN-rotated for clean spatial denoise).
+    vec3 L = normalize(p.sun_dir_world.xyz);
+    vec3 up_ref = (abs(L.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 T = normalize(cross(up_ref, L));
+    vec3 B = cross(L, T);
+    float h1 = ign(vec2(gid) + vec2(float(p.out_slots.w & 7u) * 5.588238, 0.0));
+    float h2 = ign(vec2(gid) + vec2(0.0, float(p.out_slots.w & 7u) * 7.131591));
+    float ang = h1 * 6.2831853;
+    float rad = sqrt(h2) * p.sun_dir_world.w;
+    vec3 ray_dir = normalize(L + (T * cos(ang) + B * sin(ang)) * rad);
+
+    // Small bias along ray_dir to avoid self-intersection on flat terrain triangles.
+    vec3 origin = P_world + ray_dir * 7.5;
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq, u_tlas,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        0xFF, origin, 0.0, ray_dir, 4500.0);
+    while (rayQueryProceedEXT(rq)) {}
+
+    float vis = (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+    imageStore(u_rt_shadow_out, gid, vec4(vis, 0.0, 0.0, 1.0));
+}

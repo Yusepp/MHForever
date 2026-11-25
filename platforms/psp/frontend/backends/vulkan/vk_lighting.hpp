@@ -130,7 +130,8 @@ public:
                   void *params_cpu_ptr, VkDeviceAddress params_bda, bool run_fxaa = true,
                   std::uint32_t hdr_input_slot = 0, std::uint32_t gbuf_normal_slot = 0,
                   VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0,
-                  std::uint32_t shadow_map_slot = 0, const float *shadow_from_view = nullptr);
+                  std::uint32_t shadow_map_slot = 0, const float *shadow_from_view = nullptr,
+                  std::uint32_t rt_shadow_slot = 0);
 
     // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
     // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.

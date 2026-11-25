@@ -10,7 +10,17 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D u_vol_out;
+
+struct ViewPointLight {
+    vec4 pos_radius;      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    vec4 color_intensity; // rgb = linear HDR color, w = intensity
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightListBuf {
+    ViewPointLight items[];
+};
 
 struct LightingParams {
     vec4 proj_info;     // x = 1/proj00, y = 1/proj11, z = proj10, w = proj14
@@ -26,7 +36,13 @@ struct LightingParams {
     vec4 spec_contact;  // x = spec_strength, y = spec_gloss, z = contact_shadow_str, w = vibrance
     uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
-    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+    uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags (bit3 = froxel)
+    uvec4 phase1_slots; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags, w = 0
+    LightListBuf lights;
+    uint light_count;
+    uint lights_pad;
+    mat4 shadow_from_view;
+    uvec4 shadow_info;  // x = shadow_map_slot, y = nearest_sampler, z = 0, w = 0
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -95,6 +111,69 @@ void main() {
     }
     vec3 fog_scatter = fog_rgb * (1.0 - transmittance);
 
+    // 1b. 3D Froxel Exponential Frustum Ray-March (when kVkEffectFroxelFog is enabled):
+    // True 3D shadow-occluded sun shafts + dynamic point-light scattering through mist/fog!
+    vec3 froxel_scatter = vec3(0.0);
+    if ((p.ext_slots.w & 8u) != 0u) {
+        float march_far = min(max_dist, 1450.0);
+        if (march_far > 60.0) {
+            float jitter_z = ign(vec2(gid) + vec2(p.sun_screen.w * 37.0, p.sun_screen.w * 19.0));
+            const int kSlices = 12;
+            float cos_sun = clamp(dot(ray_dir, normalize(p.sun_dir_view.xyz)), -1.0, 1.0);
+            float sun_phase = clamp(hg_phase(cos_sun, 0.72) * 0.65 + 0.12, 0.0, 1.8);
+            bool has_shadow = (p.sun_dir_view.w < 0.5 && p.shadow_info.x != 0u && p.scatter_color.a > 0.001);
+            uint n_lights = min(p.light_count, 16u);
+            float sigma_t = max(p.fog_color.a * 1.15, 0.00018);
+
+            float prev_z = 55.0;
+            float trans = 1.0;
+            for (int s = 0; s < kSlices; ++s) {
+                float t0 = float(s) / float(kSlices);
+                float t1 = float(s + 1) / float(kSlices);
+                float z0 = 55.0 + (march_far - 55.0) * (t0 * t0);
+                float z1 = 55.0 + (march_far - 55.0) * (t1 * t1);
+                float z_mid = mix(z0, z1, jitter_z);
+                float dz = max(z1 - prev_z, 1.0);
+                prev_z = z1;
+
+                vec3 P_view = ray_dir * z_mid;
+                vec3 slice_in = vec3(0.0);
+
+                // Shadow-occluded 3D sun volumetric scattering (real cliffs/trees/monsters block god-rays!).
+                if (has_shadow && z_mid > 110.0) {
+                    vec3 P_psp = vec3(P_view.x, -P_view.y, P_view.z);
+                    vec4 sc = p.shadow_from_view * vec4(P_psp, 1.0);
+                    vec2 suv = sc.xy * 0.5 + 0.5;
+                    float vis = 1.0;
+                    if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
+                        float sd = texture(sampler2D(u_textures[p.shadow_info.x],
+                                                     u_samplers[p.shadow_info.y]), suv).r;
+                        vis = (sc.z - 0.002 <= sd) ? 1.0 : 0.0;
+                    }
+                    slice_in += p.scatter_color.rgb * (vis * sun_phase * p.scatter_color.a * 0.42);
+                }
+
+                // Dynamic point lights (campfires, fireballs, lightning, hits) glowing softly through 3D mist!
+                for (uint li = 0u; li < n_lights; ++li) {
+                    ViewPointLight pl = p.lights.items[li];
+                    vec3 to_l = pl.pos_radius.xyz - P_view;
+                    float d2 = dot(to_l, to_l);
+                    float rad = pl.pos_radius.w * 1.15;
+                    if (d2 >= rad * rad) continue;
+                    float dn = sqrt(d2) / rad;
+                    float w = (1.0 - dn * dn);
+                    float att = (w * w) / (1.0 + dn * dn * 3.0);
+                    slice_in += pl.color_intensity.rgb * (pl.color_intensity.w * att * 0.24);
+                }
+
+                float step_t = exp(-dz * sigma_t);
+                froxel_scatter += trans * slice_in * (1.0 - step_t);
+                trans *= step_t;
+            }
+            froxel_scatter = min(froxel_scatter, vec3(0.45));
+        }
+    }
+
     // 2. Outdoor Volumetric Sun Shafts (two-lobe Mie scattering), OR Doorway / Cave-Mouth light shafts indoors!
     vec3 shafts = vec3(0.0);
     if (p.sun_dir_view.w < 0.5 && p.scatter_color.a > 0.001 && p.sun_screen.z > 0.02) {
@@ -149,5 +228,5 @@ void main() {
         shafts = vec3(0.86, 0.90, 0.96) * (opening * 0.09);
     }
 
-    imageStore(u_vol_out, gid, vec4(fog_scatter + shafts, transmittance));
+    imageStore(u_vol_out, gid, vec4(fog_scatter + shafts + froxel_scatter, transmittance));
 }

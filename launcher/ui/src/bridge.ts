@@ -112,6 +112,11 @@ export interface Settings {
   vkFxaa?: boolean;
   vkVignette?: boolean;
   vkKillcamDof?: boolean;
+  vkSunShadows?: boolean;
+  vkDynamicLights?: boolean;
+  vkPbrMaterials?: boolean;
+  vkFroxelFog?: boolean;
+  vkRayTracing?: boolean;
   // This copy's text font: MHForever's copy of a font file the player chose, and its file name (missing: the default,
   // Liberation Sans with the HD text).
   textFont?: string;

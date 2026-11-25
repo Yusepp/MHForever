@@ -298,6 +298,34 @@ bool Context::init(SDL_Window *win) {
         pnext_tail = &eds3_enable.pNext;
     }
 
+    // Optional hardware ray queries (VK_KHR_acceleration_structure + VK_KHR_ray_query + VK_KHR_deferred_host_operations).
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR as_query{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, nullptr};
+    VkPhysicalDeviceRayQueryFeaturesKHR rq_query{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, &as_query};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR as_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, nullptr};
+    VkPhysicalDeviceRayQueryFeaturesKHR rq_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, nullptr};
+    if (has_extension(dexts, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+        has_extension(dexts, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+        has_extension(dexts, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 qf2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &rq_query};
+        vkGetPhysicalDeviceFeatures2(physical_device, &qf2);
+        if (as_query.accelerationStructure && rq_query.rayQuery) {
+            dev_exts.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+            dev_exts.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+            dev_exts.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+            caps.ray_query = true;
+            as_enable.accelerationStructure = VK_TRUE;
+            rq_enable.rayQuery = VK_TRUE;
+            *pnext_tail = &as_enable;
+            pnext_tail = &as_enable.pNext;
+            *pnext_tail = &rq_enable;
+            pnext_tail = &rq_enable.pNext;
+        }
+    }
+
 #ifdef VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME
     VkPhysicalDevicePresentModeFifoLatestReadyFeaturesEXT fifo_lr_query{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_EXT, nullptr};

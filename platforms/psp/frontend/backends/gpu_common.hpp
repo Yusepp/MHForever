@@ -99,13 +99,20 @@ struct LiveSettings {
         kVkEffectFxaa           = 1u << 7,
         kVkEffectVignette       = 1u << 8,
         kVkEffectKillcamDof     = 1u << 9,
+        kVkEffectSunShadows     = 1u << 10,
+        kVkEffectDynamicLights  = 1u << 11,
+        kVkEffectPbrMaterials   = 1u << 12,
+        kVkEffectFroxelFog      = 1u << 13,
+        kVkEffectRayTracing     = 1u << 14,
         kVkEffectComputeMask    = kVkEffectAo | kVkEffectContactShadows | kVkEffectVolumetricFog |
                                   kVkEffectBloom | kVkEffectSsgi | kVkEffectSpecular |
-                                  kVkEffectFxaa | kVkEffectVignette,
-        kVkEffectAll            = 0x3FFu,
+                                  kVkEffectFxaa | kVkEffectVignette | kVkEffectSunShadows |
+                                  kVkEffectDynamicLights | kVkEffectFroxelFog | kVkEffectRayTracing,
+        kVkEffectDefault        = 0x3FFFu, // all ON except opt-in Ultra Ray Tracing
+        kVkEffectAll            = 0x7FFFu,
     };
     std::atomic<bool> enhanced_lighting{false};
-    std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectAll};
+    std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectDefault};
     // Vulkan 3D anti-aliasing mode: 0 = Off, 1 = FXAA, 2 = MSAA 4x, 3 = TAA.
     enum AaMode : int {
         kAaOff = 0,
@@ -115,6 +122,7 @@ struct LiveSettings {
     };
     std::atomic<int> aa_mode{kAaFxaa};
     std::atomic<bool> msaa_4x_supported{false};
+    std::atomic<bool> ray_query_supported{false};
     // Optional game-supplied world-space dynamic lights (updated from the host poll, read by Vulkan).
     mutable std::mutex semantic_mutex;
     SemanticSceneFrame semantic_frame{};

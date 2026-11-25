@@ -24,6 +24,7 @@ SHADERS = [
     ("kShadowMapFragSpv", "shadow_map.frag"),
     ("kSunShadowVertSpv", "sun_shadow.vert"),
     ("kSunShadowFragSpv", "sun_shadow.frag"),
+    ("kRtShadowsCompSpv", "rt_shadows.comp"),
     ("kShadowFactorCompSpv", "shadow_factor.comp"),
     ("kShadowApplyCompSpv", "shadow_apply.comp"),
     ("kPlaceV2CompSpv", "place_v2.comp"),

@@ -209,7 +209,28 @@ void main() {
         vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact);
 
         float sun_shadow = 1.0;
-        if (!is_cave && p.shadow_info.x != 0u) {
+        if (!is_cave && p.shadow_info.z != 0u) {
+            // Ultra Hardware Ray-Traced Sun Shadows (VK_KHR_ray_query): 3x3 depth-aware bilateral upsample
+            // of half-res R8_UNORM RT visibility for smooth soft penumbra with crisp silhouette edges!
+            ivec2 rts = textureSize(u_textures[p.shadow_info.z], 0);
+            ivec2 rtmax = rts - ivec2(1);
+            ivec2 rbase = clamp(ip / 2, ivec2(0), rtmax);
+            float rt_sum = 0.0;
+            float rt_w = 0.0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    ivec2 rc = clamp(rbase + ivec2(dx, dy), ivec2(0), rtmax);
+                    ivec2 fc = clamp(rc * 2, ivec2(0), full_max);
+                    float ds = texelFetch(u_textures[dslot], fc, 0).r;
+                    float dw = exp(-abs(ds - d_here) * 3200.0);
+                    float sw = (dx == 0 && dy == 0) ? 1.5 : ((dx == 0 || dy == 0) ? 1.0 : 0.65);
+                    float w = dw * sw + 1e-4;
+                    rt_sum += texelFetch(u_textures[p.shadow_info.z], rc, 0).r * w;
+                    rt_w += w;
+                }
+            }
+            sun_shadow = clamp(rt_sum / rt_w, 0.0, 1.0);
+        } else if (!is_cave && p.shadow_info.x != 0u) {
             // Convert +Y-down view space back to PSP +Y-up view space with normal-offset bias.
             float sh_ndotl = clamp(dot(N, L), 0.0, 1.0);
             vec3 P_psp = vec3(P.x, -P.y, P.z) + vec3(N.x, -N.y, N.z) * 6.5;
