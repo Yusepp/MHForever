@@ -3365,12 +3365,22 @@ void VkBackend::render_interpolated_subframe(float phase) {
     interpolation::Matrix cached_cam_view{};
     float cached_cam_mv[12]{};
 
+    // Capture the EXACT interpolated world->view matrix & projection that `place_v2.comp` actually uses
+    // to rasterize the terrain into `interp_rt_.depth` (eliminates any phase=0 vs phase>0 camera desync!).
+    bool has_exact_terrain_view = false;
+    interpolation::Matrix exact_terrain_view{interpolation::identity()};
+    float exact_terrain_proj[16]{};
+    float exact_terrain_vz_scale = 32767.5f;
+    float exact_terrain_vz_center = 32767.5f;
+    std::uint32_t exact_terrain_vcount = 0u;
+
     for (std::size_t i = 0; i < ndraws; ++i) {
         const PreparedDraw &pd = prepared_draws_[i];
         if (!pd.active) continue; // zero vertices in raw_verts -> never read by place_v2.comp!
 
         const auto &older = blend_older_.summaries[i];
         vk::DrawTransform &tr = transforms[i];
+        interpolation::Matrix used_world_to_eye = older.view;
         if (zero_phase) {
             pack_3x4(older.view, tr.mv_old);
             pack_3x4(older.view, tr.mv_new);
@@ -3383,9 +3393,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
             if (pd.has_partner && pd.has_rigid) {
                 // Algebraically: (R(t) * view * world) * inv(world) == R(t) * view (avoids a 4x4 multiply).
                 const interpolation::Matrix r_t = interpolation::rigid_at(pd.rm, scene_phase);
-                const interpolation::Matrix world_to_eye_old =
+                used_world_to_eye =
                     pd.has_inv_world_old ? interpolation::multiply(r_t, older.view) : older.view;
-                pack_3x4(world_to_eye_old, tr.mv_old);
+                pack_3x4(used_world_to_eye, tr.mv_old);
                 if (pd.has_vertex_pair) {
                     const interpolation::Matrix eye_blend = interpolation::multiply(r_t, pd.eye_old);
                     const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
@@ -3395,9 +3405,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 }
             } else if (!pd.has_partner && pd.follow_cam && has_cam_rt && pd.has_inv_world_old) {
                 // Hoisted cam_rt * older.view, cached across consecutive draws sharing the same view matrix.
+                used_world_to_eye = interpolation::multiply(cam_rt, older.view);
                 if (!has_cached_cam_view || cached_cam_view != older.view) {
                     cached_cam_view = older.view;
-                    pack_3x4(interpolation::multiply(cam_rt, older.view), cached_cam_mv);
+                    pack_3x4(used_world_to_eye, cached_cam_mv);
                     has_cached_cam_view = true;
                 }
                 std::copy_n(cached_cam_mv, 12, tr.mv_old);
@@ -3414,9 +3425,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
                     eye_blend = interpolation::multiply(cam_rt, pd.eye_old);
                 }
 
-                const interpolation::Matrix world_to_eye_old =
+                used_world_to_eye =
                     pd.has_inv_world_old ? interpolation::multiply(eye_blend, pd.inv_world_old) : older.view;
-                pack_3x4(world_to_eye_old, tr.mv_old);
+                pack_3x4(used_world_to_eye, tr.mv_old);
 
                 if (pd.has_vertex_pair) {
                     const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
@@ -3447,6 +3458,24 @@ void VkBackend::render_interpolated_subframe(float phase) {
         tr.vp_center[1] = vp[4] - vp[7];
         tr.vp_center[2] = vp[5];
         tr.vp_center[3] = 1.0f;
+
+        // Pick the largest static perspective terrain draw's exact world->eye matrix (skips skybox / small props!).
+        if (!older.skinned && older.perspective && pd.has_inv_world_old &&
+            std::fabs(vp[0]) >= 100.0f && std::fabs(vp[1]) >= 50.0f) {
+            const std::uint32_t vc = blend_older_.draw_raw_count[i];
+            const float tx = used_world_to_eye[12];
+            const float ty = used_world_to_eye[13];
+            const float tz = used_world_to_eye[14];
+            const bool has_cam_pos = (tx * tx + ty * ty + tz * tz) > 1.0f;
+            if (has_cam_pos && (!has_exact_terrain_view || vc > exact_terrain_vcount)) {
+                has_exact_terrain_view = true;
+                exact_terrain_view = used_world_to_eye;
+                std::copy_n(tr.proj, 16, exact_terrain_proj);
+                exact_terrain_vz_scale = vp[2];
+                exact_terrain_vz_center = vp[5];
+                exact_terrain_vcount = vc;
+            }
+        }
     }
 
     // 2. GPU Compute: dual-stream per-vertex interpolation + Sutherland-Hodgman near-plane clipping!
@@ -3497,12 +3526,21 @@ void VkBackend::render_interpolated_subframe(float phase) {
     // Update Partitioned RT BVH (static BLAS cached once per zone; dynamic character BLAS smoothly interpolated
     // every subframe at 120/180 Hz so hunter/monster shadows glide with zero 30 Hz vibration!), OR render the
     // 2048x2048 Sun Shadow Map once per 30 Hz game frame (phase <= 0).
-    // IMPORTANT: Always derive `interp_view` and `interp_light_in` from `blend_older_` (NOT `last_view_mat_`!),
-    // so RT world-position reconstruction & lighting match `interp_rt_.depth` identically on every subframe!
-    const bool have_interp_view = blend_older_.has_view_mat;
+    // IMPORTANT: Use the EXACT interpolated terrain `world->eye` matrix & projection captured from the
+    // `place_v2.comp` transform loop above so RT world-position reconstruction matches `interp_rt_.depth`
+    // identically on every single subframe (0.00 / 0.25 / 0.50 / 0.75) — zero 30 Hz shadow oscillation!
+    const bool have_interp_view = has_exact_terrain_view || blend_older_.has_view_mat;
     const interpolation::Matrix interp_view =
-        (have_interp_view && has_cam_rt) ? interpolation::multiply(cam_rt, blend_older_.view_mat) : blend_older_.view_mat;
+        has_exact_terrain_view
+            ? exact_terrain_view
+            : ((blend_older_.has_view_mat && has_cam_rt) ? interpolation::multiply(cam_rt, blend_older_.view_mat)
+                                                         : blend_older_.view_mat);
     vk::LightingFrameInput interp_light_in = blend_older_.light_in;
+    if (has_exact_terrain_view) {
+        std::copy_n(exact_terrain_proj, 16, interp_light_in.proj);
+        interp_light_in.vz_scale = exact_terrain_vz_scale;
+        interp_light_in.vz_center = exact_terrain_vz_center;
+    }
     if (have_interp_view) {
         const float *m = interp_view.data();
         interp_light_in.view_rot[0] = m[0]; interp_light_in.view_rot[1] = m[4]; interp_light_in.view_rot[2] = m[8];
