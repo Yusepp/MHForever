@@ -201,21 +201,17 @@ void main() {
         vec3 L = normalize(p.sun_dir_view.xyz);
         vec3 U = normalize(p.world_up_view.xyz);
 
-        // Multi-bounce AO + Screen-Space Contact Shadows + Projected Sun Shadow Map (4-tap IGN-rotated PCF).
-        vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
-        float ao_shaped = is_cave ? pow(ao, 1.25) : ao;
-        vec3 mb_ao = multi_bounce_ao(ao_shaped, albedo_est);
-        vec3 tinted_ao = mix(shadow_tint_lin * (is_cave ? 0.60 : 0.90), vec3(1.0), mb_ao);
-        vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact);
-
+        // Multi-bounce AO + Screen-Space Contact Shadows + Unified RT (Sun / Point-Light / RTAO) or Sun Shadow Map.
         float sun_shadow = 1.0;
-        if (!is_cave && p.shadow_info.z != 0u) {
-            // Ultra Hardware Ray-Traced Sun Shadows (VK_KHR_ray_query): 5x5 depth-aware bilateral upsample
-            // of half-res 4-spp R8_UNORM RT visibility for grain-free soft penumbra & crisp silhouettes!
+        float pt_shadow = 1.0;
+        if (p.shadow_info.z != 0u) {
+            // Unified Hardware RT Lighting (VK_KHR_ray_query): 5x5 depth-aware bilateral upsample of half-res RGBA8:
+            //   R = 4-spp soft sun shadow (outdoors), G = 2-spp dynamic point-light shadow (campfires/caves),
+            //   B = 2-spp short-range 3D RTAO (halo-free grounding outdoors & in caves!).
             ivec2 rts = textureSize(u_textures[p.shadow_info.z], 0);
             ivec2 rtmax = rts - ivec2(1);
             ivec2 rbase = clamp(ip / 2, ivec2(0), rtmax);
-            float rt_sum = 0.0;
+            vec3 rt_sum = vec3(0.0);
             float rt_w = 0.0;
             for (int dy = -2; dy <= 2; ++dy) {
                 for (int dx = -2; dx <= 2; ++dx) {
@@ -225,11 +221,15 @@ void main() {
                     float dw = exp(-abs(ds - d_here) * 3200.0);
                     float sw = exp(-float(dx * dx + dy * dy) * 0.35);
                     float w = dw * sw + 1e-4;
-                    rt_sum += texelFetch(u_textures[p.shadow_info.z], rc, 0).r * w;
+                    rt_sum += texelFetch(u_textures[p.shadow_info.z], rc, 0).rgb * w;
                     rt_w += w;
                 }
             }
-            sun_shadow = clamp(rt_sum / rt_w, 0.0, 1.0);
+            vec3 rt_val = clamp(rt_sum / rt_w, vec3(0.0), vec3(1.0));
+            sun_shadow = is_cave ? 1.0 : rt_val.r;
+            pt_shadow = mix(0.22, 1.0, rt_val.g);
+            // Blend 3D RTAO with smooth GTAO for rock-solid, halo-free grounding everywhere (including caves!).
+            ao = mix(ao, mix(0.28, 1.0, rt_val.b), 0.58);
         } else if (!is_cave && p.shadow_info.x != 0u) {
             // Convert +Y-down view space back to PSP +Y-up view space with normal-offset bias.
             float sh_ndotl = clamp(dot(N, L), 0.0, 1.0);
@@ -259,6 +259,11 @@ void main() {
                 sun_shadow = mix(1.0, lit * 0.25, border_fade);
             }
         }
+        vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
+        float ao_shaped = is_cave ? pow(ao, 1.25) : ao;
+        vec3 mb_ao = multi_bounce_ao(ao_shaped, albedo_est);
+        vec3 tinted_ao = mix(shadow_tint_lin * (is_cave ? 0.60 : 0.90), vec3(1.0), mb_ao);
+        vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact);
         vec3 tinted_sun_sh = mix(shadow_tint_lin * 0.54, vec3(1.0), sun_shadow);
         col_lin *= tinted_ao * tinted_cs * tinted_sun_sh;
 
@@ -299,8 +304,9 @@ void main() {
                 vec3 light_rad = pl.color_intensity.rgb * (pl.color_intensity.w * att * (0.45 + 0.55 * ao));
                 dyn_accum += light_rad * albedo_est * wrap_ndotl;
             }
-            // Soft-compress stacked point lights so point-blank fireballs/impacts never flood the screen,
-            // and preserve bright sunlit snow/highlights on SDR.
+            // Apply RT point-light shadow (real shadows from campfires, torches, fireballs & cave walls!)
+            // and soft-compress stacked point lights so point-blank impacts never flood SDR.
+            dyn_accum *= pt_shadow;
             dyn_accum = dyn_accum / (vec3(1.0) + dyn_accum * 0.85);
             vec3 headroom = clamp(vec3(1.0) - col_lin * 0.72, vec3(0.16), vec3(1.0));
             col_lin += dyn_accum * headroom;

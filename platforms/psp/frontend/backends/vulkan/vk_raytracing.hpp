@@ -32,9 +32,12 @@ struct alignas(16) RtShadowParams {
     float proj_info[4]{};
     float vz_and_size[4]{};
     float sun_dir_world[4]{};
-    std::uint32_t out_slots[4]{};
+    std::uint32_t out_slots[4]{}; // x = out_w, y = out_h, z = depth_slot, w = frame_idx
+    VkDeviceAddress lights_bda = 0;
+    std::uint32_t light_count = 0u;
+    std::uint32_t flags = 0u; // bit0 = is_cave, bit1 = want_rt_godrays
 };
-static_assert(sizeof(RtShadowParams) == 128);
+static_assert(sizeof(RtShadowParams) == 144);
 
 class RayTracedShadows {
 public:
@@ -67,11 +70,13 @@ public:
                     const std::vector<RtVertex> &dyn_verts,
                     const float view_mat[16]);
 
-    // Traces half-res hardware ray-traced sun shadows for `frame_slot` before lighting_composite.
+    // Traces unified half-res RGBA8 hardware RT lighting (R=sun shadow, G=point-light shadow, B=RTAO, A=god-ray vis).
     bool trace(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                VkDescriptorSet bindless_set, int frame_slot, std::uint32_t full_w, std::uint32_t full_h,
                std::uint32_t depth_slot, const float view_mat[16], const LightingFrameInput &in,
-               const float sun_dir_world[3], void *params_cpu, VkDeviceAddress params_bda);
+               const float sun_dir_world[3], bool is_cave, bool want_godrays,
+               VkDeviceAddress lights_bda, std::uint32_t light_count,
+               void *params_cpu, VkDeviceAddress params_bda);
 
 private:
     struct GpuBuf {

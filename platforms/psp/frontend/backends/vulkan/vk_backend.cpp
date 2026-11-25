@@ -1375,8 +1375,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
     const bool opaque_3d = !setup_.through && (RS(kClearMode) & 1u) == 0 && (RS(kZTestEnable) & 1u) != 0 &&
                            (RS(kAlphaBlendEnable) & 1u) == 0 && (RS(kZWriteDisable) & 1u) == 0 &&
                            is_shown_target(setup_.target);
-    const bool want_rt = rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) &&
-                         !lighting_.active_is_cave();
+    const bool want_rt = rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing);
     setup_is_rt_caster_ = want_rt && opaque_3d;
     if (setup_is_rt_caster_) {
         const auto &wm = ge.world_matrix().m;
@@ -1626,7 +1625,7 @@ void VkBackend::draw_batch() {
                 end_render_pass();
                 std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> vlights{};
                 if (has_cur_view_mat_ && subframes_ <= 1) {
-                    if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) && !lighting_.active_is_cave()) {
+                    if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing)) {
                         ensure_recording();
                         end_render_pass();
                         rt_shadows_.update_bvh(frames_[frame_slot_].cmd, ctx_, frame_slot_, cur_rt_static_verts_,
@@ -3155,7 +3154,7 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
         float shadow_from_view[16]{};
         std::uint32_t shadow_slot = 0u;
         std::uint32_t rt_slot = 0u;
-        if (view_mat != nullptr && !lighting_.active_is_cave()) {
+        if (view_mat != nullptr) {
             if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing)) {
                 auto rtslice = f.params.allocate(sizeof(vk::RtShadowParams), 16);
                 if (rtslice.ptr) {
@@ -3163,12 +3162,13 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
                     lighting_.resolve_sun_dir_world(fin, sun_dir);
                     if (rt_shadows_.trace(f.cmd, ctx_, descriptors_, descriptors_.set(), frame_slot_, w, h,
                                           rt.depth.bindless_slot, view_mat->data(), fin, sun_dir,
-                                          rtslice.ptr, rtslice.address)) {
+                                          lighting_.active_is_cave(), want_vk_effect(LiveSettings::kVkEffectFroxelFog),
+                                          lights_bda, light_cnt, rtslice.ptr, rtslice.address)) {
                         rt_slot = rt_shadows_.shadow_slot();
                     }
                 }
             }
-            if (rt_slot == 0u && sun_shadows_.valid()) {
+            if (rt_slot == 0u && !lighting_.active_is_cave() && sun_shadows_.valid()) {
                 sun_shadows_.compute_shadow_from_view(view_mat->data(), shadow_from_view);
                 shadow_slot = sun_shadows_.map_slot();
             }
@@ -3496,7 +3496,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
     const interpolation::Matrix interp_view =
         (has_last_view_mat_ && has_cam_rt) ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
     if (has_last_view_mat_) {
-        if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) && !lighting_.active_is_cave()) {
+        if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing)) {
             const auto &old_dyn = blend_older_.rt_dyn_verts;
             const auto &new_dyn = blend_newer_.rt_dyn_verts;
             const std::vector<vk::RtVertex> *dyn_ptr = &old_dyn;

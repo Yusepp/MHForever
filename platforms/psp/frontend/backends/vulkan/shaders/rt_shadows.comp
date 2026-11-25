@@ -5,16 +5,28 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_ray_query : require
 
-// Ultra-Efficient Half-Resolution Hardware Ray-Traced Sun Shadows (VK_KHR_ray_query).
-// Uses a 2-instance Partitioned TLAS (cached Static zone BLAS + fast-built Dynamic character BLAS),
-// 1 terminate-on-first-hit ray per half-res pixel with IGN-rotated soft sun cone, and outputs
-// R8_UNORM visibility for bilateral upsampling in lighting_composite.comp.
+// Unified Ultra-Efficient Half-Resolution Hardware Ray-Traced Lighting Pass (VK_KHR_ray_query).
+// Reuses the single Partitioned 2-Instance TLAS (persistent zone Static BLAS + interpolated Dynamic BLAS)
+// to output a packed RGBA8 visibility buffer for single-pass bilateral upsampling in lighting_composite.comp:
+//   R = 4-spp soft-penumbra outdoor sun shadow (0 in caves skipped)
+//   G = 2-spp dominant dynamic point-light shadow (campfires, torches, fireballs, caves!)
+//   B = 2-spp short-range (140 cm) RT Ambient Occlusion (halo-free 3D grounding outdoors & in caves!)
+//   A = 4-slice RT volumetric sun-shaft visibility for volumetric_fog.comp god-rays!
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D u_textures[];
 layout(set = 1, binding = 0) uniform accelerationStructureEXT u_tlas;
-layout(set = 1, binding = 1, r8) uniform writeonly image2D u_rt_shadow_out;
+layout(set = 1, binding = 1, rgba8) uniform writeonly image2D u_rt_shadow_out;
+
+struct ViewPointLight {
+    vec4 pos_radius;      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    vec4 color_intensity; // rgb = linear HDR color, w = intensity
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightListBuf {
+    ViewPointLight items[];
+};
 
 struct RtShadowParams {
     mat4 inv_view;        // PSP view (+Y up) -> world space (cm)
@@ -22,6 +34,9 @@ struct RtShadowParams {
     vec4 vz_and_size;     // x = vz_scale, y = vz_center, z = full_w, w = full_h
     vec4 sun_dir_world;   // xyz = normalized sun dir (world), w = soft_cone_rad
     uvec4 out_slots;      // x = out_w, y = out_h, z = depth_slot, w = frame_idx
+    LightListBuf lights;
+    uint light_count;
+    uint flags;           // bit0 = is_cave, bit1 = want_rt_godrays
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer RtShadowParamsBuf {
@@ -50,6 +65,16 @@ vec3 view_pos_at(RtShadowParams p, ivec2 q, ivec2 full_max) {
     return vec3(nq.x * p.proj_info.x * zq, -nq.y * p.proj_info.y * zq, -zq);
 }
 
+bool trace_shadow_ray(vec3 origin, vec3 dir, float tmax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq, u_tlas,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        0xFF, origin, 0.0, dir, tmax);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
 void main() {
     RtShadowParams p = pc.buf.p;
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -58,19 +83,45 @@ void main() {
     ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
     ivec2 ip = clamp(gid * 2, ivec2(0), full_max);
     float d0 = texelFetch(u_textures[p.out_slots.z], ip, 0).r;
-    if (d0 >= 0.99992 || d0 <= 0.00001) {
-        imageStore(u_rt_shadow_out, gid, vec4(1.0, 0.0, 0.0, 1.0));
+    bool is_sky = (d0 >= 0.99992 || d0 <= 0.00001);
+    bool is_cave = (p.flags & 1u) != 0u;
+    bool want_godrays = (p.flags & 2u) != 0u && !is_cave;
+
+    vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec3 L = normalize(p.sun_dir_world.xyz);
+
+    // Compute 4-slice RT volumetric sun-shaft visibility (even for sky pixels looking past roofs/trees!).
+    float vol_vis = 1.0;
+    float z = is_sky ? 1300.0 : linear_eye_z(p, d0);
+    vec3 ray_psp = normalize(vec3(ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, -1.0));
+    vec3 cam_world = (p.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 ray_world = normalize(mat3(p.inv_view) * ray_psp);
+    if (want_godrays) {
+        float march_far = min(z, 1300.0);
+        if (march_far > 110.0) {
+            float jz = ign(vec2(gid) + vec2(13.0, 7.0));
+            float vsum = 0.0;
+            for (int s = 0; s < 4; ++s) {
+                float t = (float(s) + jz) * 0.25;
+                float dist = mix(110.0, march_far, t * t);
+                vec3 sp = cam_world + ray_world * dist;
+                if (trace_shadow_ray(sp, L, 3500.0)) vsum += 0.25;
+            }
+            vol_vis = vsum;
+        }
+    }
+
+    if (is_sky) {
+        imageStore(u_rt_shadow_out, gid, vec4(1.0, 1.0, 1.0, vol_vis));
         return;
     }
 
-    float z = linear_eye_z(p, d0);
-    vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
-    vec2 ndc = uv * 2.0 - 1.0;
     // PSP view space (+Y up, -Z forward); note screen ndc.y is +Y down so negate Y.
     vec3 P_psp = vec3(ndc.x * p.proj_info.x * z, -ndc.y * p.proj_info.y * z, -z);
     vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
 
-    // Fast edge-preserving surface normal from 4 full-res depth neighbors (eliminates character & slope self-shadow flicker!).
+    // Fast edge-preserving surface normal from 4 full-res depth neighbors (eliminates self-shadow flicker!).
     vec3 pL = view_pos_at(p, ip + ivec2(-1, 0), full_max);
     vec3 pR = view_pos_at(p, ip + ivec2( 1, 0), full_max);
     vec3 pU = view_pos_at(p, ip + ivec2( 0,-1), full_max);
@@ -83,35 +134,99 @@ void main() {
     if (dot(N_psp, -P_psp) < 0.0) N_psp = -N_psp;
     vec3 N_world = normalize(mat3(p.inv_view) * N_psp);
 
-    // 4-ray stratified Poisson soft-sun cone with temporally-stable IGN rotation (zero boiling, smooth penumbra!).
-    vec3 L = normalize(p.sun_dir_world.xyz);
-    vec3 up_ref = (abs(L.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 T = normalize(cross(up_ref, L));
-    vec3 B = cross(L, T);
+    vec3 base_origin = P_world + N_world * 5.0;
     float ang = ign(vec2(gid)) * 6.2831853;
     float ca = cos(ang), sa = sin(ang);
-    const vec2 kDisk4[4] = vec2[4](
-        vec2(-0.55,  0.32), vec2( 0.62,  0.24),
-        vec2(-0.22, -0.68), vec2( 0.44, -0.52)
-    );
 
-    float lit = 0.0;
-    vec3 base_origin = P_world + N_world * 5.0;
-    for (int i = 0; i < 4; ++i) {
-        vec2 d = kDisk4[i];
-        vec2 rot = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) * p.sun_dir_world.w;
-        vec3 ray_dir = normalize(L + T * rot.x + B * rot.y);
-        vec3 origin = base_origin + ray_dir * 4.5;
-
-        rayQueryEXT rq;
-        rayQueryInitializeEXT(
-            rq, u_tlas,
-            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-            0xFF, origin, 0.0, ray_dir, 4500.0);
-        while (rayQueryProceedEXT(rq)) {}
-        if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-            lit += 0.25;
+    // 1. R Channel: 4-spp soft-penumbra outdoor sun shadows (skipped in caves).
+    float sun_lit = 1.0;
+    if (!is_cave) {
+        vec3 up_ref = (abs(L.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+        vec3 T = normalize(cross(up_ref, L));
+        vec3 B = cross(L, T);
+        const vec2 kDisk4[4] = vec2[4](
+            vec2(-0.55,  0.32), vec2( 0.62,  0.24),
+            vec2(-0.22, -0.68), vec2( 0.44, -0.52)
+        );
+        sun_lit = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            vec2 d = kDisk4[i];
+            vec2 rot = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) * p.sun_dir_world.w;
+            vec3 ray_dir = normalize(L + T * rot.x + B * rot.y);
+            if (trace_shadow_ray(base_origin + ray_dir * 4.5, ray_dir, 4500.0)) {
+                sun_lit += 0.25;
+            }
         }
     }
-    imageStore(u_rt_shadow_out, gid, vec4(lit, 0.0, 0.0, 1.0));
+
+    // 2. G Channel: 2-spp RT shadow for the dominant dynamic point light (campfires, torches, fireballs, caves!).
+    float pt_lit = 1.0;
+    uint n_lights = min(p.light_count, 32u);
+    if (n_lights > 0u) {
+        vec3 P_ydown = vec3(P_psp.x, -P_psp.y, P_psp.z);
+        float best_score = 0.0;
+        vec3 best_pos_ydown = vec3(0.0);
+        for (uint i = 0u; i < n_lights; ++i) {
+            ViewPointLight pl = p.lights.items[i];
+            vec3 to_l = pl.pos_radius.xyz - P_ydown;
+            float d2 = dot(to_l, to_l);
+            float rad = pl.pos_radius.w;
+            if (d2 >= rad * rad || d2 < 25.0) continue;
+            float dn = sqrt(d2) / rad;
+            float t = clamp(1.0 - dn * dn, 0.0, 1.0);
+            float score = pl.color_intensity.w * (t * t) / (1.0 + dn * dn * 2.4);
+            if (score > best_score) {
+                best_score = score;
+                best_pos_ydown = pl.pos_radius.xyz;
+            }
+        }
+        if (best_score > 0.03) {
+            vec3 L_psp = vec3(best_pos_ydown.x, -best_pos_ydown.y, best_pos_ydown.z);
+            vec3 L_world = (p.inv_view * vec4(L_psp, 1.0)).xyz;
+            vec3 to_lw = L_world - base_origin;
+            float ldist = length(to_lw);
+            if (ldist > 18.0) {
+                vec3 ldir = to_lw / ldist;
+                vec3 lup = (abs(ldir.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+                vec3 lT = normalize(cross(lup, ldir));
+                vec3 lB = cross(ldir, lT);
+                float cone = min(14.0 / ldist, 0.09);
+                float ssum = 0.0;
+                for (int s = 0; s < 2; ++s) {
+                    float sign_s = (s == 0) ? -1.0 : 1.0;
+                    vec3 jitter_dir = normalize(ldir + (lT * ca + lB * sa) * (cone * sign_s));
+                    if (trace_shadow_ray(base_origin + jitter_dir * 3.5, jitter_dir, ldist - 14.0)) {
+                        ssum += 0.5;
+                    }
+                }
+                pt_lit = ssum;
+            }
+        }
+    }
+
+    // 3. B Channel: 2-spp short-range (140 cm) RT Ambient Occlusion (halo-free 3D grounding everywhere!).
+    float rtao = 1.0;
+    {
+        vec3 nup = (abs(N_world.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+        vec3 nT = normalize(cross(nup, N_world));
+        vec3 nB = cross(N_world, nT);
+        // Two stratified cosine-weighted hemisphere directions rotated by temporally-stable IGN.
+        const vec3 kHemi2[2] = vec3[2](
+            vec3( 0.52,  0.30, 0.80),
+            vec3(-0.38, -0.58, 0.72)
+        );
+        float ao_sum = 0.0;
+        for (int i = 0; i < 2; ++i) {
+            vec3 h = kHemi2[i];
+            float rx = h.x * ca - h.y * sa;
+            float ry = h.x * sa + h.y * ca;
+            vec3 ao_dir = normalize(nT * rx + nB * ry + N_world * h.z);
+            if (trace_shadow_ray(base_origin + ao_dir * 2.5, ao_dir, 140.0)) {
+                ao_sum += 0.5;
+            }
+        }
+        rtao = ao_sum;
+    }
+
+    imageStore(u_rt_shadow_out, gid, vec4(sun_lit, pt_lit, rtao, vol_vis));
 }

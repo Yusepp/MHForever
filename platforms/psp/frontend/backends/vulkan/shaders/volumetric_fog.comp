@@ -121,7 +121,11 @@ void main() {
             const int kSlices = 12;
             float cos_sun = clamp(dot(ray_dir, normalize(p.sun_dir_view.xyz)), -1.0, 1.0);
             float sun_phase = clamp(hg_phase(cos_sun, 0.72) * 0.65 + 0.12, 0.0, 1.8);
+            bool has_rt_godrays = (p.sun_dir_view.w < 0.5 && p.shadow_info.z != 0u && p.scatter_color.a > 0.001);
             bool has_shadow = (p.sun_dir_view.w < 0.5 && p.shadow_info.x != 0u && p.scatter_color.a > 0.001);
+            float rt_vol_vis = has_rt_godrays
+                                   ? texture(sampler2D(u_textures[p.shadow_info.z], u_samplers[p.aux_slots.y]), uv).a
+                                   : 1.0;
             uint n_lights = min(p.light_count, 16u);
             float sigma_t = max(p.fog_color.a * 1.15, 0.00018);
 
@@ -139,8 +143,10 @@ void main() {
                 vec3 P_view = ray_dir * z_mid;
                 vec3 slice_in = vec3(0.0);
 
-                // Shadow-occluded 3D sun volumetric scattering (real cliffs/trees/monsters block god-rays!).
-                if (has_shadow && z_mid > 110.0) {
+                // Shadow-occluded 3D sun volumetric scattering (RT god-rays when RT is active, else shadow map).
+                if (has_rt_godrays && z_mid > 110.0) {
+                    slice_in += p.scatter_color.rgb * (rt_vol_vis * sun_phase * p.scatter_color.a * 0.44);
+                } else if (has_shadow && z_mid > 110.0) {
                     vec3 P_psp = vec3(P_view.x, -P_view.y, P_view.z);
                     vec4 sc = p.shadow_from_view * vec4(P_psp, 1.0);
                     vec2 suv = sc.xy * 0.5 + 0.5;

@@ -447,7 +447,7 @@ bool RayTracedShadows::ensure_output(const Context &ctx, BindlessDescriptors &de
 
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, nullptr};
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8_UNORM;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
     ici.extent = {hw, hh, 1};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
@@ -461,7 +461,7 @@ bool RayTracedShadows::ensure_output(const Context &ctx, BindlessDescriptors &de
     VkImageViewCreateInfo ivci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, nullptr};
     ivci.image = out_img_;
     ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R8_UNORM;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
     ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (vkCreateImageView(ctx.device, &ivci, nullptr, &out_view_) != VK_SUCCESS) return false;
 
@@ -476,7 +476,9 @@ bool RayTracedShadows::ensure_output(const Context &ctx, BindlessDescriptors &de
 bool RayTracedShadows::trace(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                              VkDescriptorSet bindless_set, int frame_slot, std::uint32_t full_w, std::uint32_t full_h,
                              std::uint32_t depth_slot, const float view_mat[16], const LightingFrameInput &in,
-                             const float sun_dir_world[3], void *params_cpu, VkDeviceAddress params_bda) {
+                             const float sun_dir_world[3], bool is_cave, bool want_godrays,
+                             VkDeviceAddress lights_bda, std::uint32_t light_count,
+                             void *params_cpu, VkDeviceAddress params_bda) {
     const int fs = ((frame_slot % kRingSlots) + kRingSlots) % kRingSlots;
     if (!ready() || !tlas_valid_[fs] || tlas_[fs] == VK_NULL_HANDLE || depth_slot == 0u || !params_cpu || params_bda == 0) {
         return false;
@@ -533,6 +535,9 @@ bool RayTracedShadows::trace(VkCommandBuffer cmd, const Context &ctx, BindlessDe
     rp.out_slots[1] = hh;
     rp.out_slots[2] = depth_slot;
     rp.out_slots[3] = static_cast<std::uint32_t>(in.frame_index & 0xFFFFu);
+    rp.lights_bda = lights_bda;
+    rp.light_count = light_count;
+    rp.flags = (is_cave ? 1u : 0u) | (want_godrays ? 2u : 0u);
     std::memcpy(params_cpu, &rp, sizeof(rp));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);

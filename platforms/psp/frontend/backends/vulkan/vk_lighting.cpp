@@ -712,7 +712,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.shadow_info[0] = 0u;
         base.shadow_info[1] = 0u;
     }
-    base.shadow_info[2] = (!active_is_cave_) ? rt_shadow_slot : 0u;
+    base.shadow_info[2] = rt_shadow_slot;
     base.shadow_info[3] = 0u;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
