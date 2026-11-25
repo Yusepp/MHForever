@@ -1950,29 +1950,38 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
     const auto sum = (!draw.through && !draw.clear) || subframes_ > 1 ? interpolation::summarize(draw)
                                                                       : interpolation::DrawSummary{};
     if (!draw.through && !draw.clear && sum.perspective &&
-        std::fabs(draw.viewport[0]) >= 100.0f && std::fabs(draw.viewport[1]) >= 50.0f &&
-        cur_light_in_.proj[0] == 0.0f) {
-        std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
-        cur_light_in_.vz_scale = draw.viewport[2];
-        cur_light_in_.vz_center = draw.viewport[5];
-        cur_view_mat_ = sum.view;
-        has_cur_view_mat_ = true;
-        // Capture orthonormalized 3x3 world -> view rotation from the first terrain/camera draw so sun direction,
-        // contact shadows, and sky/ground hemisphere bounce stay 100% world-locked as the camera rotates.
-        const auto eye = interpolation::multiply(sum.view, sum.world);
-        float c0[3]{eye[0], eye[1], eye[2]};
-        float c1[3]{eye[4], eye[5], eye[6]};
-        float c2[3]{eye[8], eye[9], eye[10]};
-        auto norm3 = [](float v[3]) {
-            const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-            if (l > 1e-4f) { v[0] /= l; v[1] /= l; v[2] /= l; return true; }
-            return false;
-        };
-        if (norm3(c0) && norm3(c1) && norm3(c2)) {
-            cur_light_in_.view_rot[0] = c0[0]; cur_light_in_.view_rot[1] = c1[0]; cur_light_in_.view_rot[2] = c2[0];
-            cur_light_in_.view_rot[3] = c0[1]; cur_light_in_.view_rot[4] = c1[1]; cur_light_in_.view_rot[5] = c2[1];
-            cur_light_in_.view_rot[6] = c0[2]; cur_light_in_.view_rot[7] = c1[2]; cur_light_in_.view_rot[8] = c2[2];
-            cur_light_in_.has_view_rot = true;
+        std::fabs(draw.viewport[0]) >= 100.0f && std::fabs(draw.viewport[1]) >= 50.0f) {
+        // The first 3D perspective draw of a frame is often the skybox (translation == 0,0,0).
+        // Always upgrade cur_view_mat_ once the first real world-space draw (with non-zero camera translation) arrives!
+        const float cur_vtx = has_cur_view_mat_
+            ? (std::fabs(cur_view_mat_[12]) + std::fabs(cur_view_mat_[13]) + std::fabs(cur_view_mat_[14]))
+            : 0.0f;
+        const float new_vtx = std::fabs(sum.view[12]) + std::fabs(sum.view[13]) + std::fabs(sum.view[14]);
+        const bool need_proj = (cur_light_in_.proj[0] == 0.0f);
+        const bool upgrade_from_sky = has_cur_view_mat_ && (cur_vtx < 1.0f) && (new_vtx >= 1.0f);
+        if (need_proj || upgrade_from_sky) {
+            std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
+            cur_light_in_.vz_scale = draw.viewport[2];
+            cur_light_in_.vz_center = draw.viewport[5];
+            cur_view_mat_ = sum.view;
+            has_cur_view_mat_ = true;
+            // Capture orthonormalized 3x3 world -> view rotation from the real camera draw so sun direction,
+            // contact shadows, and sky/ground hemisphere bounce stay 100% world-locked as the camera rotates.
+            const auto eye = interpolation::multiply(sum.view, sum.world);
+            float c0[3]{eye[0], eye[1], eye[2]};
+            float c1[3]{eye[4], eye[5], eye[6]};
+            float c2[3]{eye[8], eye[9], eye[10]};
+            auto norm3 = [](float v[3]) {
+                const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (l > 1e-4f) { v[0] /= l; v[1] /= l; v[2] /= l; return true; }
+                return false;
+            };
+            if (norm3(c0) && norm3(c1) && norm3(c2)) {
+                cur_light_in_.view_rot[0] = c0[0]; cur_light_in_.view_rot[1] = c1[0]; cur_light_in_.view_rot[2] = c2[0];
+                cur_light_in_.view_rot[3] = c0[1]; cur_light_in_.view_rot[4] = c1[1]; cur_light_in_.view_rot[5] = c2[1];
+                cur_light_in_.view_rot[6] = c0[2]; cur_light_in_.view_rot[7] = c1[2]; cur_light_in_.view_rot[8] = c2[2];
+                cur_light_in_.has_view_rot = true;
+            }
         }
     }
     if (subframes_ <= 1) return;
