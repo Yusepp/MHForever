@@ -245,12 +245,10 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
         zone_floor_y_ = cy - 175.0f;
         zone_floor_valid_ = true;
     } else {
-        // Slowly settle to the lowest ground level walked in this zone so fog stays glued to the Swamp floor!
-        const float cand = cy - 165.0f;
+        // Strictly lock to the lowest walked ground level in this zone (no upward drift when orbiting camera!).
+        const float cand = cy - 175.0f;
         if (cand < zone_floor_y_) {
-            zone_floor_y_ = zone_floor_y_ * 0.96f + cand * 0.04f;
-        } else {
-            zone_floor_y_ = zone_floor_y_ * 0.998f + cand * 0.002f;
+            zone_floor_y_ = zone_floor_y_ * 0.95f + cand * 0.05f;
         }
     }
     last_cam_world_[0] = cx;

@@ -169,9 +169,9 @@ void main() {
         if ((bits & 0x80u) != 0u) {
             float f = clamp(v_fog, 0.0, 1.0);
             if (p.jitter_and_lod.w > 0.5) {
-                // Replace flat near/mid PSP vertex fog with our real 3D volumetric vapor fog,
-                // keeping only the very far horizon seam fade (f < 0.22).
-                f = smoothstep(0.0, 0.22, f);
+                // Replace PSP's flat radial camera-distance fog with our true 3D world-locked froxel fog,
+                // keeping only the extreme far clip-plane horizon seam fade (f < 0.08).
+                f = smoothstep(0.0, 0.08, f);
             }
             c.rgb = mix(p.fog_and_zmin.rgb, c.rgb, f);
         }
