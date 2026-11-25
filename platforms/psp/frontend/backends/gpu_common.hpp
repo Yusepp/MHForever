@@ -3,6 +3,7 @@
 // Backend-agnostic types and GE register/pixel helpers shared between the OpenGL and Vulkan hardware renderers.
 
 #include "backend.hpp"
+#include "../semantic_scene.hpp"
 
 #include "psprecomp/guest_memory.hpp"
 
@@ -98,13 +99,20 @@ struct LiveSettings {
         kVkEffectFxaa           = 1u << 7,
         kVkEffectVignette       = 1u << 8,
         kVkEffectKillcamDof     = 1u << 9,
+        kVkEffectSunShadows     = 1u << 10,
+        kVkEffectDynamicLights  = 1u << 11,
+        kVkEffectPbrMaterials   = 1u << 12,
+        kVkEffectFroxelFog      = 1u << 13,
+        kVkEffectRayTracing     = 1u << 14,
         kVkEffectComputeMask    = kVkEffectAo | kVkEffectContactShadows | kVkEffectVolumetricFog |
                                   kVkEffectBloom | kVkEffectSsgi | kVkEffectSpecular |
-                                  kVkEffectFxaa | kVkEffectVignette,
-        kVkEffectAll            = 0x3FFu,
+                                  kVkEffectFxaa | kVkEffectVignette | kVkEffectSunShadows |
+                                  kVkEffectDynamicLights | kVkEffectFroxelFog | kVkEffectRayTracing,
+        kVkEffectDefault        = 0x3FFFu, // all ON except opt-in Ultra Ray Tracing
+        kVkEffectAll            = 0x7FFFu,
     };
     std::atomic<bool> enhanced_lighting{false};
-    std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectAll};
+    std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectDefault};
     // Vulkan 3D anti-aliasing mode: 0 = Off, 1 = FXAA, 2 = MSAA 4x, 3 = TAA.
     enum AaMode : int {
         kAaOff = 0,
@@ -114,6 +122,10 @@ struct LiveSettings {
     };
     std::atomic<int> aa_mode{kAaFxaa};
     std::atomic<bool> msaa_4x_supported{false};
+    std::atomic<bool> ray_query_supported{false};
+    // Optional game-supplied world-space dynamic lights (updated from the host poll, read by Vulkan).
+    mutable std::mutex semantic_mutex;
+    SemanticSceneFrame semantic_frame{};
 };
 
 namespace gpu_common {
@@ -155,15 +167,39 @@ constexpr std::array<int, 256> kKeyIndex = [] {
     return i >= 0 ? key[static_cast<std::size_t>(i)] : 0u;
 }
 
-// Screen-space vertex layout shared by both OpenGL and Vulkan draw pipelines (36 bytes).
+// Screen-space vertex layout shared by both OpenGL and Vulkan draw pipelines (40 bytes).
 struct GpuVertex {
     float x, y, z, inv_w;
     float u, v;
     std::uint8_t color[4];
     std::uint8_t spec[4];
     float fog;
+    std::uint32_t normal_oct; // packed 2x16-bit snorm octahedral view-space normal (0 = none)
 };
-static_assert(sizeof(GpuVertex) == 36);
+static_assert(sizeof(GpuVertex) == 40);
+
+// Encodes a unit view-space normal into 2x16-bit snorm octahedral coordinates (0u reserved for "absent").
+[[nodiscard]] inline std::uint32_t pack_oct_normal(float nx, float ny, float nz) noexcept {
+    const float l1 = (nx < 0.0f ? -nx : nx) + (ny < 0.0f ? -ny : ny) + (nz < 0.0f ? -nz : nz);
+    if (l1 < 1e-5f) return 0u;
+    float ox = nx / l1;
+    float oy = ny / l1;
+    if (nz < 0.0f) {
+        const float tx = (1.0f - (oy < 0.0f ? -oy : oy)) * (ox >= 0.0f ? 1.0f : -1.0f);
+        const float ty = (1.0f - (ox < 0.0f ? -ox : ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
+        ox = tx;
+        oy = ty;
+    }
+    auto to_s16 = [](float v) -> std::int16_t {
+        if (v < -1.0f) v = -1.0f;
+        if (v > 1.0f) v = 1.0f;
+        return static_cast<std::int16_t>(v * 32767.0f + (v >= 0.0f ? 0.5f : -0.5f));
+    };
+    std::uint16_t ux = static_cast<std::uint16_t>(to_s16(ox));
+    std::uint16_t uy = static_cast<std::uint16_t>(to_s16(oy));
+    std::uint32_t packed = static_cast<std::uint32_t>(ux) | (static_cast<std::uint32_t>(uy) << 16u);
+    return packed == 0u ? 1u : packed;
+}
 
 [[nodiscard]] inline std::uint32_t expand_bits(std::uint32_t v, int bits) noexcept {
     return bits == 5 ? (v << 3u) | (v >> 2u) : bits == 6 ? (v << 2u) | (v >> 4u) : (v << 4u) | v;

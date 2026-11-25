@@ -11,7 +11,7 @@
 
 namespace mhf::psp::vk {
 
-// Matches GLSL DrawParams in ge_draw.vert / ge_draw.frag (96 bytes, scalar layout).
+// Matches GLSL DrawParams in ge_draw.vert / ge_draw.frag (128 bytes, scalar layout).
 struct alignas(16) DrawParams {
     float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     float env_and_flags[4]{0.0f, 0.0f, 0.0f, 0.0f};
@@ -23,8 +23,10 @@ struct alignas(16) DrawParams {
     std::uint32_t tex_func_bits{0};
     std::uint32_t alpha_bits{1};
     float jitter_and_lod[4]{0.0f, 0.0f, 0.0f, 0.0f}; // xy = NDC jitter (TAA), z = mip LOD bias, w = unused
+    std::uint32_t pbr_slots[4]{0, 0, 0, 0};          // x = _n normal, y = _r rough/metal, z = _e emissive, w = 0
+    float sun_dir_view[4]{0.34f, 0.78f, 0.52f, 1.0f}; // xyz = view-space sun dir (+Y up), w = outdoor (1 or 0)
 };
-static_assert(sizeof(DrawParams) == 96);
+static_assert(sizeof(DrawParams) == 128);
 
 struct PresentPush {
     float uv_max[2]{1.0f, 1.0f};
@@ -54,6 +56,7 @@ struct GePipelineKey {
     std::uint8_t spec_alpha_test{1};
     std::uint8_t spec_zrange{0};
     std::uint8_t msaa_4x{0};
+    std::uint8_t hdr_3d{0};
     std::uint8_t blend_enable{0};
     std::uint8_t color_op{0};
     std::uint8_t src_factor{1};
@@ -66,7 +69,8 @@ struct GePipelineKey {
                                         (static_cast<std::uint64_t>(spec_textured & 1u) << 1u) |
                                         (static_cast<std::uint64_t>(spec_alpha_test & 1u) << 2u) |
                                         (static_cast<std::uint64_t>(spec_zrange & 1u) << 3u) |
-                                        (static_cast<std::uint64_t>(msaa_4x & 1u) << 4u);
+                                        (static_cast<std::uint64_t>(msaa_4x & 1u) << 4u) |
+                                        (static_cast<std::uint64_t>(hdr_3d & 1u) << 5u);
         return spec_bits | (static_cast<std::uint64_t>(blend_enable) << 8u) |
                (static_cast<std::uint64_t>(color_op) << 16u) | (static_cast<std::uint64_t>(src_factor) << 24u) |
                (static_cast<std::uint64_t>(dst_factor) << 32u) | (static_cast<std::uint64_t>(color_mask) << 40u);
@@ -85,6 +89,8 @@ struct Pipelines {
     VkShaderModule ge_vert = VK_NULL_HANDLE;
     VkShaderModule ge_frag = VK_NULL_HANDLE;
     VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat hdr_color_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    VkFormat gbuf_format = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
 
     std::unordered_map<std::uint64_t, VkPipeline> ge_pipes;

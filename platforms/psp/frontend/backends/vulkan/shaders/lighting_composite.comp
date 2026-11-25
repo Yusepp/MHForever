@@ -4,11 +4,14 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-// Full-resolution unified lighting composite (runs once after 3D and before 2D HUD):
-// - Depth-aware bilateral upsample of multi-bounce GTAO with biome/sky-tinted crevice shading
-// - Subtle per-pixel sun key accent + Fresnel rim light (reconstructed normal, sky-masked)
-// - Depth-aware bilateral upsample of volumetric fog & sun shafts
-// - Selective emissive bloom + gentle filmic highlight shoulder
+// Full-resolution unified Linear-HDR -> rich SDR lighting composite (runs after 3D, before 2D HUD):
+// - Smooth bilateral upsampled GTAO + Contact Shadows + smooth view-space normals (zero cave polygon artifacts!)
+// - Lock-free 2D screen-tile culling for up to 64 world-space dynamic point lights (MHFU-scale calibrated)
+//   with highlight-preserving soft-add (no blown-out snow around campfires, vivid illumination in caves/night!)
+// - Multi-bounce GTAO + world-up hemisphere bounce + gentle outdoor specular & Fresnel rim light
+// - Quarter-res SSGI colored bounce + 4x2 dynamic emissive flash
+// - Rayleigh/Mie atmospheric fog & volumetric sun shafts + HDR Karis bloom with heat shimmer
+// - SDR-calibrated hue-preserving highlight shoulder + deep cave contrast + triangular IGN debanding
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -16,8 +19,16 @@ layout(set = 0, binding = 0) uniform texture2D u_textures[];
 layout(set = 0, binding = 1) uniform sampler u_samplers[];
 layout(set = 1, binding = 0, rgba8) uniform image2D u_lit_out;
 
-// When FXAA is off, kSpecInPlace = 1 reads and writes scene_color in place, skipping lit_tmp_tex_ + fxaa_prehud.comp.
 layout(constant_id = 0) const uint kSpecInPlace = 0u;
+
+struct ViewPointLight {
+    vec4 pos_radius;      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    vec4 color_intensity; // rgb = linear HDR color, w = intensity
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightListBuf {
+    ViewPointLight items[];
+};
 
 struct LightingParams {
     vec4 proj_info;
@@ -34,6 +45,12 @@ struct LightingParams {
     uvec4 tex_slots;    // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     uvec4 aux_slots;    // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
     uvec4 ext_slots;    // x = ssgi_slot, y = gtao_raw_slot, z = biome_id, w = flags
+    uvec4 phase1_slots; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags, w = 0
+    LightListBuf lights;
+    uint light_count;
+    uint lights_pad;
+    mat4 shadow_from_view; // column-major: PSP view (+Y up) -> orthographic sun shadow clip space
+    uvec4 shadow_info;     // x = shadow_map_slot, y = nearest_sampler, z = 0, w = 0
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -44,7 +61,9 @@ layout(push_constant) uniform LightingPush {
     LightingParamsBuf buf;
 } pc;
 
-// Multi-bounce GTAO approximation (Jimenez et al.): preserves surface chroma inside crevices.
+shared uint s_tile_count;
+shared uint s_tile_lights[32];
+
 vec3 multi_bounce_ao(float ao, vec3 albedo) {
     vec3 a =  2.0404 * albedo - 0.3324;
     vec3 b = -4.7951 * albedo + 0.6417;
@@ -52,37 +71,100 @@ vec3 multi_bounce_ao(float ao, vec3 albedo) {
     return max(vec3(ao), ((ao * a + b) * ao + c) * ao);
 }
 
-// Triangular IGN dither for 8-bit debanding (eliminates banding in fog, skies & dark cave ceilings).
 float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Gentle highlight-preserving filmic shoulder: exact identity below 0.85 so bright snow & midtones
-// stay faithful to MHFU art, with C1-smooth asymptotic rolloff above 0.85 for HDR bloom/shafts.
-vec3 soft_filmic(vec3 x) {
+vec3 srgb_to_linear_hdr(vec3 c) {
+    vec3 a = max(c, vec3(0.0));
+    return a * (a * (a * 0.305306011 + 0.682171111) + 0.012522878);
+}
+
+vec3 linear_to_srgb(vec3 c) {
+    vec3 a = max(c, vec3(0.0));
+    vec3 s1 = sqrt(a);
+    vec3 s2 = sqrt(s1);
+    vec3 s3 = sqrt(s2);
+    return clamp(0.662002687 * s1 + 0.684122060 * s2 - 0.323583601 * s3 - 0.0225411470 * a, vec3(0.0), vec3(1.0));
+}
+
+float linear_eye_z(LightingParams p, float d) {
+    float zn = (d * 65535.0 - p.vz_and_size.y) / max(abs(p.vz_and_size.x), 1e-3);
+    float denom = zn + p.proj_info.z;
+    if (abs(denom) < 1e-5) denom = (denom >= 0.0 ? 1e-5 : -1e-5);
+    return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
+}
+
+// SDR-calibrated hue-preserving highlight shoulder:
+// Leaves [0 .. 0.80] linear rich and uncompressed; smoothly rolls off HDR fire/lightning above 0.80.
+vec3 sdr_rich_tonemap(vec3 x) {
     vec3 a = max(x, vec3(0.0));
-    vec3 hi = 0.85 + 0.15 * tanh((a - 0.85) / 0.15);
-    return mix(a, hi, step(vec3(0.85), a));
+    float peak = max(a.r, max(a.g, a.b));
+    if (peak <= 0.80) return a;
+    float compressed = 0.80 + 0.20 * tanh((peak - 0.80) / 0.55);
+    vec3 scaled = a * (compressed / peak);
+    float hot = smoothstep(2.0, 4.8, peak) * 0.18;
+    return mix(scaled, vec3(compressed), hot);
 }
 
 void main() {
     LightingParams p = pc.buf.p;
     ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
-    if (ip.x >= int(p.vz_and_size.z) || ip.y >= int(p.vz_and_size.w)) return;
-
-    vec4 scene = (kSpecInPlace != 0u) ? imageLoad(u_lit_out, ip) : texelFetch(u_textures[p.tex_slots.x], ip, 0);
-    vec3 col = scene.rgb;
-    vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
+    ivec2 sz = ivec2(p.vz_and_size.zw);
+    bool in_bounds = (ip.x < sz.x && ip.y < sz.y);
 
     uint dslot = p.tex_slots.y;
-    float d_here = texelFetch(u_textures[dslot], ip, 0).r;
-    bool is_sky = (d_here >= 0.99992 || d_here <= 0.00001);
+    float d_here = in_bounds ? texelFetch(u_textures[dslot], ip, 0).r : 1.0;
+    bool is_sky = (!in_bounds || d_here >= 0.99992 || d_here <= 0.00001);
+    float z_eye = is_sky ? 0.0 : linear_eye_z(p, d_here);
 
-    // 1. Depth-aware bilateral upsample of denoised half-res GTAO, Contact Shadows & view-space normal.
+    // 0. Lock-free 2D screen-tile culling for up to 64 world-space dynamic point lights.
+    uint lid = gl_LocalInvocationIndex;
+    if (p.light_count > 0u) {
+        if (lid == 0u) s_tile_count = 0u;
+        barrier();
+        if (lid < p.light_count) {
+            ViewPointLight pl = p.lights.items[lid];
+            float r = pl.pos_radius.w;
+            float neg_z = -pl.pos_radius.z;
+            if (neg_z + r > 0.1) {
+                vec2 tile_min_uv = vec2(gl_WorkGroupID.xy * 8u) / p.vz_and_size.zw;
+                vec2 tile_max_uv = min(vec2((gl_WorkGroupID.xy + 1u) * 8u), p.vz_and_size.zw) / p.vz_and_size.zw;
+                vec2 ndc_min = tile_min_uv * 2.0 - 1.0;
+                vec2 ndc_max = tile_max_uv * 2.0 - 1.0;
+                bool overlaps = true;
+                if (neg_z > r + 0.5) {
+                    float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5);
+                    float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5);
+                    vec2 c_ndc = vec2(pl.pos_radius.x * p00, pl.pos_radius.y * p11) / neg_z;
+                    float z_near = max(neg_z - r, 0.5);
+                    vec2 r_ndc = vec2(r * p00, r * p11) / z_near;
+                    overlaps = (c_ndc.x + r_ndc.x >= ndc_min.x) && (c_ndc.x - r_ndc.x <= ndc_max.x) &&
+                               (c_ndc.y + r_ndc.y >= ndc_min.y) && (c_ndc.y - r_ndc.y <= ndc_max.y);
+                }
+                if (overlaps) {
+                    uint slot = atomicAdd(s_tile_count, 1u);
+                    if (slot < 32u) s_tile_lights[slot] = lid;
+                }
+            }
+        }
+        barrier();
+    }
+
+    if (!in_bounds) return;
+
+    vec4 scene = (kSpecInPlace != 0u) ? imageLoad(u_lit_out, ip) : texelFetch(u_textures[p.tex_slots.x], ip, 0);
+    vec3 col_lin = srgb_to_linear_hdr(scene.rgb);
+    vec3 albedo_est = clamp(col_lin, vec3(0.02), vec3(1.0));
+    vec2 uv = (vec2(ip) + 0.5) / p.vz_and_size.zw;
+    uint bid = p.ext_slots.z;
+    bool is_cave = (p.sun_dir_view.w > 0.5);
+
+    // 1. Depth-aware bilateral upsample of denoised half-res GTAO, Contact Shadows & smooth normal.
     if (!is_sky && p.tex_slots.z != 0u) {
         ivec2 gsize = textureSize(u_textures[p.tex_slots.z], 0);
         ivec2 gmax = gsize - ivec2(1);
-        ivec2 full_max = ivec2(p.vz_and_size.zw) - ivec2(1);
+        ivec2 full_max = sz - ivec2(1);
         vec2 gpos = vec2(ip) * 0.5 - 0.25;
         ivec2 base = ivec2(floor(gpos));
         vec2 f = clamp(gpos - vec2(base), 0.0, 1.0);
@@ -114,70 +196,217 @@ void main() {
         vec3 N = normalize(vec3(nxy, nz));
 
         vec2 ndc = uv * 2.0 - 1.0;
-        vec3 V = normalize(vec3(-ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, 1.0));
+        vec3 P = vec3(ndc.x * p.proj_info.x * z_eye, ndc.y * p.proj_info.y * z_eye, -z_eye);
+        vec3 V = normalize(-P);
         vec3 L = normalize(p.sun_dir_view.xyz);
         vec3 U = normalize(p.world_up_view.xyz);
 
-        // Multi-bounce AO + Screen-Space Contact Shadows tinted by biome sky/shadow color.
-        vec3 mb_ao = multi_bounce_ao(ao, col);
-        vec3 tinted_ao = mix(p.shadow_tint.rgb, vec3(1.0), mb_ao);
-        vec3 tinted_cs = mix(p.shadow_tint.rgb * 0.72, vec3(1.0), contact);
-        col *= tinted_ao * tinted_cs;
+        // Multi-bounce AO + Screen-Space Contact Shadows + Unified RT (Sun / Point-Light / RTAO) or Sun Shadow Map.
+        float sun_shadow = 1.0;
+        float pt_shadow = 1.0;
+        if (p.shadow_info.z != 0u) {
+            // Unified Hardware RT Lighting (VK_KHR_ray_query): 5x5 depth-aware bilateral upsample of half-res RGBA8:
+            //   R = 4-spp soft sun shadow (outdoors), G = 2-spp dynamic point-light shadow (campfires/caves),
+            //   B = 2-spp short-range 3D RTAO (halo-free grounding outdoors & in caves!).
+            ivec2 rts = textureSize(u_textures[p.shadow_info.z], 0);
+            ivec2 rtmax = rts - ivec2(1);
+            ivec2 rbase = clamp(ip / 2, ivec2(0), rtmax);
+            vec3 rt_sum = vec3(0.0);
+            float rt_w = 0.0;
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    ivec2 rc = clamp(rbase + ivec2(dx, dy), ivec2(0), rtmax);
+                    ivec2 fc = clamp(rc * 2, ivec2(0), full_max);
+                    float ds = texelFetch(u_textures[dslot], fc, 0).r;
+                    float dw = exp(-abs(ds - d_here) * 3200.0);
+                    float sw = exp(-float(dx * dx + dy * dy) * 0.35);
+                    float w = dw * sw + 1e-4;
+                    rt_sum += texelFetch(u_textures[p.shadow_info.z], rc, 0).rgb * w;
+                    rt_w += w;
+                }
+            }
+            vec3 rt_val = clamp(rt_sum / rt_w, vec3(0.0), vec3(1.0));
+            sun_shadow = is_cave ? 1.0 : rt_val.r;
+            pt_shadow = mix(0.22, 1.0, rt_val.g);
+            // Blend smooth distance-weighted 3D RTAO with GTAO for rock-solid, shimmer-free grounding everywhere!
+            ao = mix(ao, mix(0.42, 1.0, rt_val.b), 0.34);
+        } else if (!is_cave && p.shadow_info.x != 0u) {
+            // Convert +Y-down view space back to PSP +Y-up view space with normal-offset bias.
+            float sh_ndotl = clamp(dot(N, L), 0.0, 1.0);
+            vec3 P_psp = vec3(P.x, -P.y, P.z) + vec3(N.x, -N.y, N.z) * 6.5;
+            vec4 sc = p.shadow_from_view * vec4(P_psp, 1.0);
+            vec2 suv = sc.xy * 0.5 + 0.5;
+            if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
+                float edge = max(abs(sc.x), abs(sc.y));
+                float border_fade = 1.0 - smoothstep(0.82, 0.99, edge);
+                float texel = 1.0 / 2048.0;
+                float ang = ign(vec2(ip)) * 6.2831853;
+                float ca = cos(ang), sa = sin(ang);
+                const vec2 kPoisson4[4] = vec2[4](
+                    vec2(-0.613,  0.342), vec2( 0.728,  0.221),
+                    vec2(-0.241, -0.785), vec2( 0.412, -0.619)
+                );
+                float lit = 0.0;
+                float bias = 0.0018 + (1.0 - sh_ndotl) * 0.0024;
+                for (int s = 0; s < 4; ++s) {
+                    vec2 d = kPoisson4[s];
+                    vec2 rot = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) * (1.75 * texel);
+                    float sd = texture(sampler2D(u_textures[p.shadow_info.x],
+                                                 u_samplers[p.shadow_info.y]),
+                                       suv + rot).r;
+                    lit += (sc.z - bias <= sd) ? 1.0 : 0.0;
+                }
+                sun_shadow = mix(1.0, lit * 0.25, border_fade);
+            }
+        }
+        vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
+        float ao_shaped = is_cave ? pow(ao, 1.25) : ao;
+        vec3 mb_ao = multi_bounce_ao(ao_shaped, albedo_est);
+        vec3 tinted_ao = mix(shadow_tint_lin * (is_cave ? 0.60 : 0.90), vec3(1.0), mb_ao);
+        vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact);
+        vec3 tinted_sun_sh = mix(shadow_tint_lin * 0.54, vec3(1.0), sun_shadow);
+        col_lin *= tinted_ao * tinted_cs * tinted_sun_sh;
 
-        // 2. World-up Hemisphere Ambient Bounce (sky bounce upward, snow/sand/magma under-glow downward).
+        // 2. World-up Hemisphere Ambient Bounce (soft, never highlights individual flat polygons).
         if (p.ground_bounce.a > 0.001) {
             float up_dot = clamp(dot(N, U), -1.0, 1.0);
             float sky_w = max(up_dot, 0.0);
             float gnd_w = max(-up_dot, 0.0);
-            vec3 hemi = p.shadow_tint.rgb * (sky_w * 0.45) + p.ground_bounce.rgb * gnd_w;
-            col += col * hemi * (p.ground_bounce.a * (0.4 + 0.6 * ao));
+            vec3 ground_lin = srgb_to_linear_hdr(p.ground_bounce.rgb);
+            vec3 hemi = shadow_tint_lin * (sky_w * (is_cave ? 0.22 : 0.38)) + ground_lin * (gnd_w * 0.80);
+            col_lin += col_lin * hemi * (p.ground_bounce.a * (0.40 + 0.60 * ao));
         }
 
-        // 3. Per-pixel sun key contrast + GGX-lite biome specular sheen + Fresnel rim light.
+        // 3. Gentle outdoor sun key (no global fake specular/fresnel sheen on grass, dirt, rock, or wood!).
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
-        float sun_vis = ao * contact;
-        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis;
-        col *= clamp(key_boost, 0.88, 1.16);
+        float sun_vis = ao * min(contact, sun_shadow);
+        float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_cave ? 0.45 : 1.0);
+        col_lin *= clamp(key_boost, 0.88, 1.14);
 
-        float ndotv = clamp(dot(N, V), 0.0, 1.0);
-        float fresnel = pow(1.0 - ndotv, 3.0);
-        if (p.spec_contact.x > 0.001 && p.sun_dir_view.w < 0.5) {
-            vec3 H = normalize(L + V);
-            float ndoth = clamp(dot(N, H), 0.0, 1.0);
-            float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-            float spec = pow(ndoth, max(p.spec_contact.y, 4.0)) * (0.25 + 0.75 * fresnel) * ndotl;
-            col += p.scatter_color.rgb * (spec * p.spec_contact.x * sun_vis * (0.35 + 0.65 * luma));
-        }
-        if (p.bloom_rim.z > 0.001) {
-            float sun_align = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
-            col += p.scatter_color.rgb * (fresnel * sun_align * p.bloom_rim.z * sun_vis);
+        // 3b. World-space Tiled Dynamic Point Lights (highlight-preserving soft-add: never blows out bright snow,
+        // while vividly lighting dark caves, night quests, torches, fireballs, and elemental combat hits!).
+        if (p.light_count > 0u) {
+            uint n_lights = min(s_tile_count, 32u);
+            vec3 dyn_accum = vec3(0.0);
+            for (uint i = 0u; i < n_lights; ++i) {
+                ViewPointLight pl = p.lights.items[s_tile_lights[i]];
+                vec3 to_l = pl.pos_radius.xyz - P;
+                float dist2 = dot(to_l, to_l);
+                float rad = pl.pos_radius.w;
+                if (dist2 >= rad * rad || dist2 < 1e-4) continue;
+                float dist = sqrt(dist2);
+                vec3 ldir = to_l / dist;
+                float dn = dist / rad;
+                float t = clamp(1.0 - dn * dn, 0.0, 1.0);
+                float att = (t * t) / (1.0 + dn * dn * 2.4);
+                // Smooth omnidirectional wrap diffuse (avoids exposing flat low-poly cave triangles!).
+                float wrap_ndotl = clamp((dot(N, ldir) + 0.45) / 1.45, 0.0, 1.0);
+                vec3 light_rad = pl.color_intensity.rgb * (pl.color_intensity.w * att * (0.45 + 0.55 * ao));
+                dyn_accum += light_rad * albedo_est * wrap_ndotl;
+            }
+            // Apply RT point-light shadow (real shadows from campfires, torches, fireballs & cave walls!)
+            // and soft-compress stacked point lights so point-blank impacts never flood SDR.
+            dyn_accum *= pt_shadow;
+            dyn_accum = dyn_accum / (vec3(1.0) + dyn_accum * 0.85);
+            vec3 headroom = clamp(vec3(1.0) - col_lin * 0.72, vec3(0.16), vec3(1.0));
+            col_lin += dyn_accum * headroom;
         }
 
-        // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash (explosions/fireballs/lightning).
+        // 4. Quarter-res SSGI-lite Colored Bounce (coarse 4x2 screen-space flash smear removed in favor of
+        // true world-space dynamic point lights above).
         if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
-            vec3 ssgi = texture(sampler2D(u_textures[p.ext_slots.x],
-                                          u_samplers[p.aux_slots.y]),
-                                uv).rgb;
-            col += ssgi * (0.35 + 0.65 * col) * (p.world_up_view.w * (0.45 + 0.55 * ao));
+            vec3 ssgi = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.x],
+                                                             u_samplers[p.aux_slots.y]),
+                                                   uv).rgb);
+            col_lin += ssgi * (0.30 + 0.70 * albedo_est) * (p.world_up_view.w * (0.45 + 0.55 * ao));
         }
-        if (p.ext_slots.y != 0u) {
-            vec3 flash = texture(sampler2D(u_textures[p.ext_slots.y],
-                                           u_samplers[p.aux_slots.y]),
-                                 uv).rgb;
-            // Subtle room-wide colored illumination during bright explosions, fireballs & thunderbolts.
-            col += flash * (0.25 + 0.75 * col) * (0.32 * (0.45 + 0.55 * ao));
+
+        // 4b. Fast Water & Wet-Surface Screen-Space Reflections (reflects hunter, monsters, fireballs & trees!).
+        // Restricted to truly flat horizontal water/puddle pixels in water-bearing biomes (early-outs on 85%+ of screen!).
+        if (!is_cave && z_eye < 1100.0 && (bid == 11u || bid == 10u || bid == 8u || bid == 9u || bid == 6u)) {
+            float flat_up = smoothstep(0.955, 0.992, dot(N, U));
+            if (flat_up > 0.05) {
+                vec3 cs = clamp(scene.rgb, vec3(0.0), vec3(1.0));
+                float sluma = dot(cs, vec3(0.2126, 0.7152, 0.0722));
+                float smax = max(cs.r, max(cs.g, cs.b));
+                float smin = min(cs.r, min(cs.g, cs.b));
+                float ssat = smax > 1e-4 ? (smax - smin) / smax : 0.0;
+                float blue_ratio = cs.b / max(cs.r, 0.02);
+                float wet_mask = 0.0;
+                if (bid == 11u) {
+                    // Swamp shallow water puddles: cool/neutral gray-blue sheen, excludes dry brown mud & foliage.
+                    wet_mask = flat_up * smoothstep(0.11, 0.23, sluma) *
+                               (1.0 - smoothstep(0.15, 0.30, ssat)) *
+                               smoothstep(0.94, 1.04, blue_ratio);
+                } else {
+                    // Jungle, Forest & Hills, Great Forest, Desert oasis rivers/streams: cool blue/teal water.
+                    wet_mask = flat_up * smoothstep(0.08, 0.20, sluma) *
+                               smoothstep(1.04, 1.18, blue_ratio);
+                }
+                if (wet_mask > 0.08) {
+                    // Subtle living water ripple normal perturbation.
+                    float t_rip = p.sun_screen.w * 0.14;
+                    vec3 N_rip = normalize(N + vec3(sin(uv.x * 160.0 + t_rip) * 0.014,
+                                                    cos(uv.y * 120.0 - t_rip * 0.8) * 0.014, 0.0));
+                    vec3 R = reflect(-V, N_rip);
+                    // Only trace reflections heading upward/away from the water plane.
+                    if (dot(R, U) > -0.05) {
+                        float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5);
+                        float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5);
+                        float j = ign(vec2(ip));
+                        float dist_t = 12.0 + j * 14.0;
+                        float step_sz = 18.0;
+                        vec3 hit_col = vec3(0.0);
+                        float hit_w = 0.0;
+                        for (int s = 0; s < 14; ++s) {
+                            vec3 Q = P + R * dist_t;
+                            float qz = -Q.z;
+                            if (qz <= 2.0) break;
+                            vec2 q_ndc = vec2(Q.x * p00, Q.y * p11) / qz;
+                            vec2 q_uv = q_ndc * 0.5 + 0.5;
+                            if (q_uv.x < 0.01 || q_uv.x > 0.99 || q_uv.y < 0.01 || q_uv.y > 0.99) break;
+                            ivec2 qip = clamp(ivec2(q_uv * p.vz_and_size.zw), ivec2(0), full_max);
+                            float qd = texelFetch(u_textures[dslot], qip, 0).r;
+                            if (qd < 0.99992 && qd > 0.00001) {
+                                float scene_z = linear_eye_z(p, qd);
+                                float dz = qz - scene_z;
+                                float thick = 16.0 + step_sz * 1.35;
+                                if (dz > 2.0 && dz < thick && scene_z < z_eye + 40.0) {
+                                    vec3 rcol = (kSpecInPlace != 0u)
+                                                    ? imageLoad(u_lit_out, qip).rgb
+                                                    : texelFetch(u_textures[p.tex_slots.x], qip, 0).rgb;
+                                    hit_col = srgb_to_linear_hdr(rcol);
+                                    float edge_fade = smoothstep(0.01, 0.10, q_uv.x) * smoothstep(0.99, 0.90, q_uv.x) *
+                                                      smoothstep(0.01, 0.12, q_uv.y) * smoothstep(0.99, 0.88, q_uv.y);
+                                    float dist_fade = 1.0 - smoothstep(260.0, 750.0, dist_t);
+                                    hit_w = edge_fade * dist_fade;
+                                    break;
+                                }
+                            }
+                            dist_t += step_sz;
+                            step_sz *= 1.18;
+                        }
+                        if (hit_w > 0.01) {
+                            float ndotv = clamp(dot(N, V), 0.0, 1.0);
+                            float fresnel = 0.10 + 0.42 * pow(1.0 - ndotv, 3.5);
+                            float refl_str = clamp(wet_mask * hit_w * fresnel, 0.0, 0.48);
+                            col_lin = mix(col_lin, hit_col, refl_str);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // 5. Smooth bilinear upsample of quarter-res volumetric fog & sun shafts.
+    // 5. Smooth bilinear upsample of quarter-res Rayleigh/Mie volumetric fog & sun shafts.
     if (p.tex_slots.w != 0u) {
         vec4 vol = texture(sampler2D(u_textures[p.tex_slots.w],
                                      u_samplers[p.aux_slots.y]),
                            uv);
-        col = col * vol.a + vol.rgb;
+        col_lin = col_lin * vol.a + srgb_to_linear_hdr(vol.rgb);
     }
 
-    // 6. Selective emissive bloom + subtle rising heat-shimmer on warm fire/lava halos (100% race-free).
+    // 6. Selective HDR emissive bloom + subtle rising heat-shimmer on warm fire/lava halos.
     if (p.aux_slots.x != 0u && p.bloom_rim.y > 0.001) {
         vec3 bloom = texture(sampler2D(u_textures[p.aux_slots.x],
                                        u_samplers[p.aux_slots.y]),
@@ -192,35 +421,55 @@ void main() {
                                       clamp(uv + heat_off, vec2(0.001), vec2(0.999))).rgb;
             bloom = mix(bloom, bloom_haze, 0.55);
         }
-        col += bloom * p.bloom_rim.y;
+        col_lin += srgb_to_linear_hdr(bloom) * (p.bloom_rim.y * 1.05);
     }
 
-    // 7. Subtle biome color harmony (gentle vibrance boost on desaturated midtones, preserving highlights).
-    if (p.spec_contact.w > 0.001) {
+    // 7. Gentle SDR-safe Adaptive Eye Exposure.
+    if (p.phase1_slots.y != 0u) {
+        float exp_gain = texelFetch(u_textures[p.phase1_slots.y], ivec2(0, 0), 0).r;
+        if (exp_gain > 0.7 && exp_gain < 1.5) {
+            col_lin *= exp_gain;
+        }
+    }
+
+    // 8. Rich SDR-calibrated hue-preserving highlight shoulder -> sRGB.
+    vec3 col = linear_to_srgb(sdr_rich_tonemap(col_lin));
+
+    // 9. Rich contrast & biome color vibrance on SDR.
+    {
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
         float cmax = max(col.r, max(col.g, col.b));
         float cmin = min(col.r, min(col.g, col.b));
         float sat = cmax - cmin;
-        float vib = p.spec_contact.w * (1.0 - clamp(sat, 0.0, 1.0));
+        float vib = (p.spec_contact.w + 0.05) * (1.0 - clamp(sat, 0.0, 1.0));
         col = mix(vec3(luma), col, 1.0 + vib);
+        vec3 scurve = col * col * (3.0 - 2.0 * col);
+        col = mix(col, scurve, is_cave ? 0.14 : 0.07);
     }
 
-    // 8. Subtle cinematic edge framing ONLY in moody biomes (Caves, CozyIndoor, Swamp, Volcano, Castle Schrade).
+    // 10. Aspect-corrected, luminance-preserving cinematic vignette.
     if ((p.ext_slots.w & 2u) != 0u) {
-        uint bid = p.ext_slots.z;
         float vig_str = 0.0;
-        if (bid == 3u || bid == 4u || bid == 5u) vig_str = 0.08;      // IceCave, CozyIndoor, DarkCave
-        else if (bid == 11u || bid == 12u || bid == 14u) vig_str = 0.06; // Swamp, Volcano, FortressSiege
+        vec3 vig_tint = vec3(1.0);
+        if (bid == 3u) { vig_str = 0.12; vig_tint = vec3(0.84, 0.94, 1.06); }
+        else if (bid == 4u) { vig_str = 0.09; vig_tint = vec3(1.05, 0.94, 0.84); }
+        else if (bid == 5u) { vig_str = 0.16; vig_tint = vec3(0.88, 0.91, 1.00); }
+        else if (bid == 11u) { vig_str = 0.10; vig_tint = vec3(0.88, 0.96, 1.02); }
+        else if (bid == 12u) { vig_str = 0.10; vig_tint = vec3(1.08, 0.88, 0.78); }
+        else if (bid == 14u) { vig_str = 0.10; vig_tint = vec3(0.92, 0.93, 0.98); }
+        else { vig_str = 0.03; }
         if (vig_str > 0.0) {
-            vec2 vc = uv * 2.0 - 1.0;
+            float aspect = p.vz_and_size.z / max(p.vz_and_size.w, 1.0);
+            vec2 vc = (uv * 2.0 - 1.0) * vec2(aspect / 1.765, 1.0);
             float r2 = dot(vc, vc);
-            float vig = 1.0 - smoothstep(0.65, 1.85, r2) * vig_str;
-            col *= vig;
+            float vig_mask = smoothstep(0.55, 1.75, r2) * vig_str;
+            float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+            float hi_protect = 1.0 - smoothstep(0.75, 1.0, luma) * 0.5;
+            col *= mix(vec3(1.0), vig_tint * (1.0 - vig_mask * hi_protect), clamp(vig_mask * 2.0, 0.0, 1.0));
         }
     }
 
-    // 9. Gentle C1-smooth highlight rolloff + triangular IGN debanding before RGBA8 store.
-    col = soft_filmic(col);
+    // 11. Triangular IGN debanding before RGBA8 store.
     float dither = (ign(vec2(ip)) + ign(vec2(ip) + vec2(17.0, 31.0)) - 1.0) / 255.0;
     col = clamp(col + vec3(dither), vec3(0.0), vec3(1.0));
     imageStore(u_lit_out, ip, vec4(col, scene.a));

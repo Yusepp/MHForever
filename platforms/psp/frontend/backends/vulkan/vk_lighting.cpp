@@ -58,9 +58,9 @@ constexpr BiomePreset kBiomePresets[] = {
     // Jungle (Jungle & Old Jungle)
     {{0.70f, 0.82f, 0.78f}, 0.64f, {0.70f, 0.82f, 0.78f}, 0.00046f, {0.96f, 0.98f, 0.82f}, 0.30f,
      0.80f, 0.25f, 0.15f, 0.15f, {0.38f, 0.56f, 0.38f}, 0.10f, 0.20f, 44.0f, 0.54f, 0.22f, 0.08f},
-    // Swamp (Swamp & Old Swamp)
-    {{0.70f, 0.76f, 0.88f}, 0.66f, {0.60f, 0.68f, 0.78f}, 0.00066f, {0.80f, 0.88f, 0.96f}, 0.24f,
-     0.78f, 0.26f, 0.14f, 0.12f, {0.30f, 0.40f, 0.48f}, 0.09f, 0.21f, 46.0f, 0.46f, 0.26f, 0.05f},
+    // Swamp (Swamp & Old Swamp) — subtle distant mist without double-fogging over PSP's native Swamp fog.
+    {{0.68f, 0.74f, 0.84f}, 0.66f, {0.42f, 0.50f, 0.58f}, 0.00020f, {0.78f, 0.86f, 0.94f}, 0.16f,
+     0.80f, 0.22f, 0.10f, 0.12f, {0.28f, 0.36f, 0.44f}, 0.08f, 0.14f, 46.0f, 0.46f, 0.26f, 0.05f},
     // Volcano (Volcano, Old Volcano & Battleground)
     {{0.80f, 0.66f, 0.62f}, 0.64f, {0.60f, 0.34f, 0.22f}, 0.00048f, {1.00f, 0.60f, 0.28f}, 0.28f,
      0.70f, 0.38f, 0.19f, 0.14f, {1.00f, 0.36f, 0.10f}, 0.18f, 0.16f, 30.0f, 0.48f, 0.40f, 0.08f},
@@ -87,6 +87,7 @@ enum PassSlot : std::size_t {
     kPassFlash = 7,
     kPassComposite = 8,
     kPassFxaa = 9,
+    kPassExposure = 10,
 };
 
 } // namespace
@@ -118,7 +119,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    constexpr std::uint32_t kTotalSets = 11u + static_cast<std::uint32_t>(kSceneSetCount);
+    constexpr std::uint32_t kTotalSets = 12u + static_cast<std::uint32_t>(kSceneSetCount);
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
@@ -137,10 +138,11 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     ssgi_blur_set_ = sets[6];
     flash_set_ = sets[7];
     lit_tmp_set_ = sets[8];
-    taa_hist_sets_[0] = sets[9];
-    taa_hist_sets_[1] = sets[10];
+    exposure_set_ = sets[9];
+    taa_hist_sets_[0] = sets[10];
+    taa_hist_sets_[1] = sets[11];
     for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        scene_sets_[i] = sets[11 + i];
+        scene_sets_[i] = sets[12 + i];
     }
     scene_set_cursor_ = 0;
 
@@ -175,6 +177,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     const VkSpecializationMapEntry inplace_entry{0, 0, sizeof(std::uint32_t)};
     const VkSpecializationInfo inplace_spec{1, &inplace_entry, sizeof(inplace_val), &inplace_val};
     comp_inplace_pipe_ = make_pipe_spec(shaders::kLightingCompositeCompSpv, &inplace_spec);
+    exposure_pipe_ = make_pipe(shaders::kExposureCompSpv);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
     taa_pipe_ = make_pipe(shaders::kTaaResolveCompSpv);
 
@@ -231,6 +234,9 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     ssgi_blur_tex_.destroy(ctx, desc);
     flash_tex_.destroy(ctx, desc);
     lit_tmp_tex_.destroy(ctx, desc);
+    exposure_tex_.destroy(ctx, desc);
+    exposure_initialized_ = false;
+    exposure_reset_ = true;
     taa_hist_[0].destroy(ctx, desc);
     taa_hist_[1].destroy(ctx, desc);
     taa_hist_valid_ = false;
@@ -249,6 +255,7 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(flash_pipe_);
     kill_pipe(comp_pipe_);
     kill_pipe(comp_inplace_pipe_);
+    kill_pipe(exposure_pipe_);
     kill_pipe(fxaa_pipe_);
     kill_pipe(taa_pipe_);
     scene_set_views_.fill(VK_NULL_HANDLE);
@@ -336,11 +343,15 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
         needs_recreate(vol_tex_, qw, qh) || needs_recreate(bloom_tex_, qw, qh) ||
         needs_recreate(bloom_blur_tex_, qw, qh) || needs_recreate(ssgi_tex_, qw, qh) ||
         needs_recreate(ssgi_blur_tex_, qw, qh) || needs_recreate(flash_tex_, 4u, 2u) ||
-        needs_recreate(lit_tmp_tex_, full_w, full_h);
+        needs_recreate(lit_tmp_tex_, full_w, full_h) || needs_recreate(exposure_tex_, 1u, 1u);
     if (!any_recreate) return true;
 
     ctx.wait_idle();
     scene_set_views_.fill(VK_NULL_HANDLE);
+    if (needs_recreate(exposure_tex_, 1u, 1u)) {
+        exposure_initialized_ = false;
+        exposure_reset_ = true;
+    }
 
     auto make_target = [&](Target2D &t, std::uint32_t w, std::uint32_t h, VkFormat fmt, VkDescriptorSet dset) -> bool {
         if (t.image != VK_NULL_HANDLE && t.w == w && t.h == h) return true;
@@ -386,7 +397,8 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
            make_target(ssgi_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_set_) &&
            make_target(ssgi_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, ssgi_blur_set_) &&
            make_target(flash_tex_, 4u, 2u, VK_FORMAT_R16G16B16A16_SFLOAT, flash_set_) &&
-           make_target(lit_tmp_tex_, full_w, full_h, VK_FORMAT_R8G8B8A8_UNORM, lit_tmp_set_);
+           make_target(lit_tmp_tex_, full_w, full_h, VK_FORMAT_R8G8B8A8_UNORM, lit_tmp_set_) &&
+           make_target(exposure_tex_, 1u, 1u, VK_FORMAT_R16_SFLOAT, exposure_set_);
 }
 
 bool LightingPipeline::ensure_taa_targets(const Context &ctx, BindlessDescriptors &desc,
@@ -452,6 +464,30 @@ VkDescriptorSet LightingPipeline::get_or_bind_scene_set(const Context &ctx, VkIm
     return scene_set;
 }
 
+void LightingPipeline::resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept {
+    float wx = 0.34f, wy = 0.78f, wz = 0.52f;
+    if (active_is_cave_) {
+        wx = 0.14f; wy = 0.95f; wz = 0.28f;
+    } else if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size() &&
+               zones_[static_cast<std::size_t>(active_zone_)].sun_height_deg > 0.0f) {
+        // Prefer deterministic per-zone sun angle so shadows never swing when per-object GE light0 changes!
+        const auto &z = zones_[static_cast<std::size_t>(active_zone_)];
+        const float elev = std::clamp(z.sun_height_deg, 18.0f, 75.0f) * (3.14159265f / 180.0f);
+        const float azim = z.sun_turn * (3.14159265f / 180.0f);
+        const float ce = std::cos(elev);
+        wx = ce * std::sin(azim);
+        wy = std::sin(elev);
+        wz = ce * std::cos(azim);
+    } else if (in.has_light0) {
+        wx = in.light0_dir[0];
+        wy = in.light0_dir[1];
+        wz = in.light0_dir[2];
+    }
+    const float wlen = std::sqrt(wx * wx + wy * wy + wz * wz);
+    if (wlen > 1e-4f) { wx /= wlen; wy /= wlen; wz /= wlen; }
+    out[0] = wx; out[1] = wy; out[2] = wz;
+}
+
 void LightingPipeline::fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept {
     // Projection info for view-space reconstruction.
     const float p00 = std::fabs(in.proj[0]) > 1e-4f ? in.proj[0] : 1.0f;
@@ -463,28 +499,11 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.vz_and_size[0] = in.vz_scale;
     p.vz_and_size[1] = in.vz_center;
 
-    // World-space light direction: overhead indoor light for caves/halls (grounds hunter & props onto floor),
-    // otherwise live PSP GE directional light 0 or zone sun elevation/azimuth.
-    float wx = 0.34f, wy = 0.78f, wz = 0.52f;
-    if (active_is_cave_) {
-        wx = 0.14f; wy = 0.95f; wz = 0.28f;
-    } else if (in.has_light0) {
-        wx = in.light0_dir[0];
-        wy = in.light0_dir[1];
-        wz = in.light0_dir[2];
-    } else if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size() &&
-               zones_[static_cast<std::size_t>(active_zone_)].sun_height_deg > 0.0f) {
-        const auto &z = zones_[static_cast<std::size_t>(active_zone_)];
-        const float elev = std::clamp(z.sun_height_deg, 18.0f, 75.0f) * (3.14159265f / 180.0f);
-        const float azim = z.sun_turn * (3.14159265f / 180.0f);
-        const float ce = std::cos(elev);
-        wx = ce * std::sin(azim);
-        wy = std::sin(elev);
-        wz = ce * std::cos(azim);
-    }
-    const float wlen = std::sqrt(wx * wx + wy * wy + wz * wz);
-    if (wlen > 1e-4f) { wx /= wlen; wy /= wlen; wz /= wlen; }
-    else { wx = 0.34f; wy = 0.78f; wz = 0.52f; }
+    // World-space light direction: deterministic per-zone sun angle (prevents shadow direction jumps!),
+    // with overhead cave fill indoors and first-static-draw GE light0 fallback for unknown zones.
+    float sun_w[3]{};
+    resolve_sun_dir_world(in, sun_w);
+    float wx = sun_w[0], wy = sun_w[1], wz = sun_w[2];
     // Ensure outdoor sun points upward so contact shadows & key light always come from the sky.
     if (wy < 0.15f) {
         wy = std::fabs(wy) + 0.25f;
@@ -609,7 +628,10 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda,
-                                bool run_fxaa) {
+                                bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot,
+                                VkDeviceAddress lights_bda, std::uint32_t light_count,
+                                std::uint32_t shadow_map_slot, const float *shadow_from_view,
+                                std::uint32_t rt_shadow_slot) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
@@ -624,9 +646,15 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     const bool want_spec    = (mask & LiveSettings::kVkEffectSpecular) != 0u;
     const bool want_fxaa    = run_fxaa;
     const bool want_vig     = (mask & LiveSettings::kVkEffectVignette) != 0u;
+    const bool want_froxel  = (mask & LiveSettings::kVkEffectFroxelFog) != 0u;
 
-    const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi;
-    const bool need_bloom_src  = want_bloom || want_ssgi;
+    const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi ||
+                                 (mask & LiveSettings::kVkEffectSunShadows) != 0u ||
+                                 (mask & LiveSettings::kVkEffectDynamicLights) != 0u ||
+                                 (mask & LiveSettings::kVkEffectRayTracing) != 0u;
+    const bool need_bloom_src  = want_bloom;
+    const bool use_hdr_src     = (hdr_input_slot != 0u);
+    const std::uint32_t src_color_slot = use_hdr_src ? hdr_input_slot : scene_color_slot;
 
     LightingComputeParams base{};
     fill_biome_params(base, in);
@@ -641,10 +669,11 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.spec_contact[0] = 0.0f;
         base.spec_contact[3] = 0.0f;
     }
-    base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u);
+    base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u) |
+                        (want_froxel ? 8u : 0u) | (in.has_psp_fog ? 16u : 0u);
     base.vz_and_size[2] = static_cast<float>(scene_w);
     base.vz_and_size[3] = static_cast<float>(scene_h);
-    base.tex_slots[0] = scene_color_slot;
+    base.tex_slots[0] = src_color_slot;
     base.tex_slots[1] = scene_depth_slot;
     base.tex_slots[2] = need_gtao_pass ? gtao_blur_tex_.slot : 0u;
     base.tex_slots[3] = want_vol ? vol_tex_.slot : 0u;
@@ -652,6 +681,23 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     base.aux_slots[1] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
     base.ext_slots[0] = want_ssgi ? ssgi_blur_tex_.slot : 0u;
     base.ext_slots[1] = need_gtao_pass ? gtao_tex_.slot : 0u;
+    base.phase1_slots[0] = gbuf_normal_slot;
+    base.phase1_slots[1] = exposure_tex_.slot;
+    base.phase1_slots[2] = (use_hdr_src ? 1u : 0u) | ((exposure_reset_ || !exposure_initialized_) ? 2u : 0u);
+    base.phase1_slots[3] = 0u;
+    base.lights_bda = lights_bda;
+    base.light_count = std::min<std::uint32_t>(light_count, static_cast<std::uint32_t>(LightingFrameInput::kMaxViewLights));
+    base.lights_pad = 0u;
+    if (shadow_map_slot != 0u && shadow_from_view != nullptr && !active_is_cave_) {
+        std::memcpy(base.shadow_from_view, shadow_from_view, sizeof(base.shadow_from_view));
+        base.shadow_info[0] = shadow_map_slot;
+        base.shadow_info[1] = BindlessDescriptors::sampler_index(false, false, true, true, 1);
+    } else {
+        base.shadow_info[0] = 0u;
+        base.shadow_info[1] = 0u;
+    }
+    base.shadow_info[2] = rt_shadow_slot;
+    base.shadow_info[3] = 0u;
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;
@@ -662,11 +708,12 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     slots[kPassBloomBlur]   = base; slots[kPassBloomBlur].aux_slots[0]   = bloom_tex_.slot;   slots[kPassBloomBlur].aux_slots[2]   = bloom_blur_tex_.w; slots[kPassBloomBlur].aux_slots[3] = bloom_blur_tex_.h;
     slots[kPassSsgiBlur]    = base; slots[kPassSsgiBlur].aux_slots[0]    = ssgi_tex_.slot;    slots[kPassSsgiBlur].aux_slots[2]    = ssgi_blur_tex_.w;  slots[kPassSsgiBlur].aux_slots[3]  = ssgi_blur_tex_.h;
     slots[kPassFlash]       = base; slots[kPassFlash].aux_slots[0]       = bloom_tex_.slot;   slots[kPassFlash].aux_slots[2]       = 4u;                slots[kPassFlash].aux_slots[3]     = 2u;
-    slots[kPassComposite]   = base; slots[kPassComposite].ext_slots[1]   = want_ssgi ? flash_tex_.slot : 0u; slots[kPassComposite].aux_slots[2] = scene_w; slots[kPassComposite].aux_slots[3] = scene_h;
+    slots[kPassComposite]   = base; slots[kPassComposite].ext_slots[1]   = 0u; slots[kPassComposite].aux_slots[2] = scene_w; slots[kPassComposite].aux_slots[3] = scene_h;
     slots[kPassFxaa]        = base; slots[kPassFxaa].aux_slots[0]        = lit_tmp_tex_.slot; slots[kPassFxaa].aux_slots[2]        = scene_w;           slots[kPassFxaa].aux_slots[3]      = scene_h;
+    slots[kPassExposure]    = base; slots[kPassExposure].aux_slots[2]    = 1u;                slots[kPassExposure].aux_slots[3]    = 1u;
 
     // Batch image layout transitions into one vkCmdPipelineBarrier2 per stage boundary.
-    std::array<VkImageMemoryBarrier2, 10> barriers{};
+    std::array<VkImageMemoryBarrier2, 12> barriers{};
     std::uint32_t barrier_count = 0;
     auto push_barrier = [&](VkImage img, VkImageLayout old_l, VkImageLayout new_l,
                             VkAccessFlags2 src_access, VkAccessFlags2 dst_access) {
@@ -713,16 +760,20 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_ssgi) {
         queue_to_general(ssgi_tex_.image);
         queue_to_general(ssgi_blur_tex_.image);
-        queue_to_general(flash_tex_.image);
     }
     if (want_fxaa) queue_to_general(lit_tmp_tex_.image);
+    push_barrier(exposure_tex_.image,
+                 exposure_initialized_ ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 exposure_initialized_ ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : 0,
+                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     flush_barriers();
 
     // Bind global bindless Set 0 once; individual passes only rebind Set 1.
     const VkDescriptorSet bindless_set = desc.set();
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
 
-    // Stage 1: Enabled half/quarter-res passes read scene_depth/scene_color in parallel across GPU CUs.
+    // Stage 1: Enabled half/quarter-res passes + 1-WG adaptive exposure run in parallel across GPU CUs.
     auto run_pass = [&](VkPipeline pipe, VkDescriptorSet out_set, std::uint32_t w, std::uint32_t h, std::size_t idx) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1, &out_set, 0, nullptr);
@@ -735,17 +786,26 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_vol)       run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, kPassVol);
     if (need_bloom_src) run_pass(bloom_pipe_, bloom_set_, bloom_tex_.w, bloom_tex_.h, kPassBloom);
     if (want_ssgi)      run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, kPassSsgi);
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposure_pipe_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1, &exposure_set_, 0, nullptr);
+        const VkDeviceAddress addr = params_bda + kPassExposure * sizeof(LightingComputeParams);
+        vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(addr), &addr);
+        vkCmdDispatch(cmd, 1u, 1u, 1u);
+        exposure_initialized_ = true;
+        exposure_reset_ = false;
+    }
 
     // Stage 2: Bilateral GTAO/ContactShadow denoise + Kawase Bloom/SSGI blur + 4x2 dynamic flash.
     if (need_gtao_pass) queue_to_read(gtao_tex_.image);
     if (need_bloom_src) queue_to_read(bloom_tex_.image);
     if (want_ssgi)      queue_to_read(ssgi_tex_.image);
+    queue_to_read(exposure_tex_.image);
     flush_barriers();
     if (need_gtao_pass) run_pass(gtao_denoise_pipe_, gtao_blur_set_, gtao_blur_tex_.w, gtao_blur_tex_.h, kPassGtaoDenoise);
     if (want_bloom)     run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, kPassBloomBlur);
     if (want_ssgi) {
         run_pass(glow_blur_pipe_, ssgi_blur_set_, ssgi_blur_tex_.w, ssgi_blur_tex_.h, kPassSsgiBlur);
-        run_pass(flash_pipe_, flash_set_, 4u, 2u, kPassFlash);
     }
 
     // Barrier batch: transition produced targets -> SHADER_READ_ONLY.
@@ -754,22 +814,30 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_bloom)     queue_to_read(bloom_blur_tex_.image);
     if (want_ssgi) {
         queue_to_read(ssgi_blur_tex_.image);
-        queue_to_read(flash_tex_.image);
     }
 
     if (want_fxaa) {
         flush_barriers();
-        // Stage 3: Unified full-res composite reading scene_color -> writing lit_tmp_tex_.
+        // Stage 3: Unified full-res composite reading src_color_slot -> writing lit_tmp_tex_.
         run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, kPassComposite);
 
         // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11) -> scene_color.
         queue_to_read(lit_tmp_tex_.image);
-        push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        push_barrier(scene_color,
+                     use_hdr_src ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     use_hdr_src ? 0 : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         flush_barriers();
         run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, kPassFxaa);
+    } else if (use_hdr_src) {
+        // HDR input -> composite & tonemap directly into RGBA8 scene_color (no in-place read needed!).
+        push_barrier(scene_color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                     0, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        flush_barriers();
+        run_pass(comp_pipe_, scene_set, scene_w, scene_h, kPassComposite);
     } else {
-        // FXAA off: composite in place directly on scene_color, skipping lit_tmp_tex_ and fxaa_prehud.comp!
+        // FXAA off, LDR input: composite in place directly on scene_color!
         push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);

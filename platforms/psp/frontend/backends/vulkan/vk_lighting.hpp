@@ -42,6 +42,12 @@ enum class BiomeKind : std::uint8_t {
     Arena,
 };
 
+struct alignas(16) ViewPointLight {
+    float pos_radius[4]{};      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    float color_intensity[4]{}; // rgb = linear HDR color, w = intensity
+};
+static_assert(sizeof(ViewPointLight) == 32);
+
 struct alignas(16) LightingComputeParams {
     float proj_info[4]{};         // x = 1/proj00, y = 1/proj11, z = proj10, w = proj14
     float vz_and_size[4]{};       // x = vz_scale, y = vz_center, z = full_w, w = full_h
@@ -57,8 +63,14 @@ struct alignas(16) LightingComputeParams {
     std::uint32_t tex_slots[4]{}; // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     std::uint32_t aux_slots[4]{}; // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
     std::uint32_t ext_slots[4]{}; // x = ssgi_slot, y = gtao_raw/flash_slot, z = biome_id, w = flags (bit0=cave, bit1=vig, bit2=fxaa)
+    std::uint32_t phase1_slots[4]{}; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags (bit0=hdr, bit1=exp_reset), w = 0
+    VkDeviceAddress lights_bda{0};
+    std::uint32_t light_count{0};
+    std::uint32_t lights_pad{0};
+    float shadow_from_view[16]{}; // column-major: PSP view (+Y up) -> shadow clip space
+    std::uint32_t shadow_info[4]{}; // x = shadow_map_slot, y = nearest_sampler, z = 0, w = 0
 };
-static_assert(sizeof(LightingComputeParams) == 224);
+static_assert(sizeof(LightingComputeParams) == 336);
 
 struct alignas(16) TaaComputeParams {
     float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
@@ -73,6 +85,7 @@ struct alignas(16) TaaComputeParams {
 static_assert(sizeof(TaaComputeParams) == 128);
 
 struct LightingFrameInput {
+    static constexpr std::size_t kMaxViewLights = 64;
     float proj[16]{};         // active 3D perspective projection matrix (column-major)
     float view_rot[9]{1.0f, 0.0f, 0.0f,
                       0.0f, 1.0f, 0.0f,
@@ -97,8 +110,8 @@ public:
                vol_pipe_ != VK_NULL_HANDLE && bloom_pipe_ != VK_NULL_HANDLE &&
                ssgi_pipe_ != VK_NULL_HANDLE && glow_blur_pipe_ != VK_NULL_HANDLE &&
                flash_pipe_ != VK_NULL_HANDLE && comp_pipe_ != VK_NULL_HANDLE &&
-               comp_inplace_pipe_ != VK_NULL_HANDLE && fxaa_pipe_ != VK_NULL_HANDLE &&
-               taa_pipe_ != VK_NULL_HANDLE;
+               comp_inplace_pipe_ != VK_NULL_HANDLE && exposure_pipe_ != VK_NULL_HANDLE &&
+               fxaa_pipe_ != VK_NULL_HANDLE && taa_pipe_ != VK_NULL_HANDLE;
     }
 
     // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
@@ -108,12 +121,17 @@ public:
 
     // Runs enabled lighting/atmosphere compute passes on `scene_color` using `kParamSlotsPerDispatch`
     // contiguous `LightingComputeParams` slots starting at `params_cpu_ptr` / `params_bda`.
-    // Returns true if passes were dispatched (leaving `scene_color` in VK_IMAGE_LAYOUT_GENERAL).
+    // When `hdr_input_slot != 0`, reads 3D linear HDR color from `hdr_input_slot` and optional smooth
+    // G-buffer normals from `gbuf_normal_slot`, tonemapping into `scene_color` (left in VK_IMAGE_LAYOUT_GENERAL).
     bool dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                   VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                   const LightingFrameInput &in,
-                  void *params_cpu_ptr, VkDeviceAddress params_bda, bool run_fxaa = true);
+                  void *params_cpu_ptr, VkDeviceAddress params_bda, bool run_fxaa = true,
+                  std::uint32_t hdr_input_slot = 0, std::uint32_t gbuf_normal_slot = 0,
+                  VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0,
+                  std::uint32_t shadow_map_slot = 0, const float *shadow_from_view = nullptr,
+                  std::uint32_t rt_shadow_slot = 0);
 
     // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
     // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.
@@ -133,6 +151,9 @@ public:
                       void *params_cpu_ptr, VkDeviceAddress params_bda);
 
     void reset_taa_history() noexcept { taa_hist_valid_ = false; }
+    void reset_exposure() noexcept { exposure_reset_ = true; }
+    [[nodiscard]] bool active_is_cave() const noexcept { return active_is_cave_; }
+    void resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept;
 
     // Invalidates any cached VkImageView -> VkDescriptorSet entry matching a retired view.
     void invalidate_scene_view(VkImageView view) noexcept {
@@ -143,8 +164,8 @@ public:
     }
 
     // Number of LightingComputeParams structs needed per dispatch
-    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa).
-    static constexpr std::size_t kParamSlotsPerDispatch = 10;
+    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa, exposure).
+    static constexpr std::size_t kParamSlotsPerDispatch = 11;
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
@@ -174,6 +195,7 @@ private:
     VkDescriptorSet ssgi_blur_set_ = VK_NULL_HANDLE;
     VkDescriptorSet flash_set_ = VK_NULL_HANDLE;
     VkDescriptorSet lit_tmp_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet exposure_set_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, 2> taa_hist_sets_{};
     std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
     std::array<VkImageView, kSceneSetCount> scene_set_views_{};
@@ -189,6 +211,7 @@ private:
     VkPipeline flash_pipe_ = VK_NULL_HANDLE;
     VkPipeline comp_pipe_ = VK_NULL_HANDLE;
     VkPipeline comp_inplace_pipe_ = VK_NULL_HANDLE;
+    VkPipeline exposure_pipe_ = VK_NULL_HANDLE;
     VkPipeline fxaa_pipe_ = VK_NULL_HANDLE;
     VkPipeline taa_pipe_ = VK_NULL_HANDLE;
 
@@ -201,6 +224,9 @@ private:
     Target2D ssgi_blur_tex_;  // quarter-res RGBA16F (Kawase-smoothed indirect bounce.rgb)
     Target2D flash_tex_;      // 4x2 RGBA16F (coarse dynamic emissive flash light-field)
     Target2D lit_tmp_tex_;    // full-res RGBA8 (composite output -> FXAA input)
+    Target2D exposure_tex_;   // 1x1 R16F persistent adaptive eye exposure
+    bool exposure_reset_ = true;
+    bool exposure_initialized_ = false;
     std::array<Target2D, 2> taa_hist_{}; // full-res RGBA8 ping-pong TAA history
     int taa_hist_idx_ = 0;
     bool taa_hist_valid_ = false;

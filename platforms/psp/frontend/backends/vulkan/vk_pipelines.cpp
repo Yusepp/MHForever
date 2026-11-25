@@ -140,12 +140,13 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
     const std::uint64_t h = key.hash();
     if (const auto it = ge_pipes.find(h); it != ge_pipes.end()) return it->second;
 
-    const std::uint32_t spec_data[4] = {key.spec_clear, key.spec_textured, key.spec_alpha_test, key.spec_zrange};
-    const std::array<VkSpecializationMapEntry, 4> spec_entries = {{
+    const std::uint32_t spec_data[5] = {key.spec_clear, key.spec_textured, key.spec_alpha_test, key.spec_zrange, key.hdr_3d};
+    const std::array<VkSpecializationMapEntry, 5> spec_entries = {{
         {0, 0, sizeof(std::uint32_t)},
         {1, sizeof(std::uint32_t), sizeof(std::uint32_t)},
         {2, 2 * sizeof(std::uint32_t), sizeof(std::uint32_t)},
         {3, 3 * sizeof(std::uint32_t), sizeof(std::uint32_t)},
+        {4, 4 * sizeof(std::uint32_t), sizeof(std::uint32_t)},
     }};
     VkSpecializationInfo spec{static_cast<std::uint32_t>(spec_entries.size()), spec_entries.data(),
                               sizeof(spec_data), spec_data};
@@ -156,12 +157,13 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
 
     using gpu_common::GpuVertex;
     VkVertexInputBindingDescription binding{0, sizeof(GpuVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    std::array<VkVertexInputAttributeDescription, 5> attrs = {{
+    std::array<VkVertexInputAttributeDescription, 6> attrs = {{
         {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<std::uint32_t>(offsetof(GpuVertex, x))},
         {1, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<std::uint32_t>(offsetof(GpuVertex, u))},
         {2, 0, VK_FORMAT_R8G8B8A8_UNORM, static_cast<std::uint32_t>(offsetof(GpuVertex, color))},
         {3, 0, VK_FORMAT_R8G8B8A8_UNORM, static_cast<std::uint32_t>(offsetof(GpuVertex, spec))},
         {4, 0, VK_FORMAT_R32_SFLOAT, static_cast<std::uint32_t>(offsetof(GpuVertex, fog))},
+        {5, 0, VK_FORMAT_R32_UINT, static_cast<std::uint32_t>(offsetof(GpuVertex, normal_oct))},
     }};
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, nullptr, 0,
                                             1, &binding, static_cast<std::uint32_t>(attrs.size()), attrs.data()};
@@ -196,7 +198,7 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
 
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb.attachmentCount = 1;
+    cb.attachmentCount = 1u;
     cb.pAttachments = &att;
 
     std::vector<VkDynamicState> dyn = {
@@ -215,10 +217,11 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
     VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, nullptr, 0,
                                         static_cast<std::uint32_t>(dyn.size()), dyn.data()};
 
+    const VkFormat active_color_fmt = key.hdr_3d ? hdr_color_format : color_format;
     VkPipelineRenderingCreateInfo rci{};
     rci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rci.colorAttachmentCount = 1;
-    rci.pColorAttachmentFormats = &color_format;
+    rci.colorAttachmentCount = 1u;
+    rci.pColorAttachmentFormats = &active_color_fmt;
     rci.depthAttachmentFormat = depth_format;
 
     VkGraphicsPipelineCreateInfo pci{};

@@ -22,6 +22,9 @@ SHADERS = [
     ("kGeDrawFragSpv", "ge_draw.frag"),
     ("kShadowMapVertSpv", "shadow_map.vert"),
     ("kShadowMapFragSpv", "shadow_map.frag"),
+    ("kSunShadowVertSpv", "sun_shadow.vert"),
+    ("kSunShadowFragSpv", "sun_shadow.frag"),
+    ("kRtShadowsCompSpv", "rt_shadows.comp"),
     ("kShadowFactorCompSpv", "shadow_factor.comp"),
     ("kShadowApplyCompSpv", "shadow_apply.comp"),
     ("kPlaceV2CompSpv", "place_v2.comp"),
@@ -33,6 +36,7 @@ SHADERS = [
     ("kGlowBlurCompSpv", "glow_blur.comp"),
     ("kEmissiveFlashCompSpv", "emissive_flash.comp"),
     ("kLightingCompositeCompSpv", "lighting_composite.comp"),
+    ("kExposureCompSpv", "exposure.comp"),
     ("kFxaaPrehudCompSpv", "fxaa_prehud.comp"),
     ("kTaaResolveCompSpv", "taa_resolve.comp"),
 ]

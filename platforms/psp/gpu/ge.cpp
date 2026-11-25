@@ -118,6 +118,8 @@ Vertex lerp(const Vertex &a, const Vertex &b, float t) {
     v.fog = l(a.fog, b.fog);
     for (int i = 0; i < 3; ++i) v.world[i] = l(a.world[i], b.world[i]);
     v.has_world = a.has_world && b.has_world;
+    for (int i = 0; i < 3; ++i) v.normal[i] = l(a.normal[i], b.normal[i]);
+    v.has_normal = a.has_normal && b.has_normal;
     return v;
 }
 
@@ -507,7 +509,7 @@ Vertex Ge::transform(const DecodedVertex &in) const {
     }
     // Skinning.
     const bool lighting_on = (regs_[kLightingEnable] & 1u) != 0;
-    const bool need_normal = lighting_on && in.has_normal;
+    const bool need_normal = in.has_normal;
     float model[3] = {in.pos[0], in.pos[1], in.pos[2]};
     float normal[3] = {in.normal[0], in.normal[1], in.normal[2]};
     if (((vt >> 9u) & 3u) != 0) {
@@ -530,7 +532,17 @@ Vertex Ge::transform(const DecodedVertex &in) const {
     }
     float world[3], view[3], wn[3] = {0.0f, 0.0f, 0.0f};
     mul43(world_, model, world);
-    if (lighting_on) mul43(world_, normal, wn, 0.0f);
+    if (need_normal || lighting_on) mul43(world_, normal, wn, 0.0f);
+    if (need_normal) {
+        const float nlen = std::sqrt(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]);
+        if (nlen > 1e-6f) {
+            const float inv = 1.0f / nlen;
+            out.normal[0] = wn[0] * inv;
+            out.normal[1] = wn[1] * inv;
+            out.normal[2] = wn[2] * inv;
+            out.has_normal = true;
+        }
+    }
     mul43(view_, world, view);
     const float v4[4] = {view[0], view[1], view[2], 1.0f};
     float clip[4];

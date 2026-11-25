@@ -537,6 +537,11 @@ void Frontend::set_aa_mode(int mode) {
     impl_->vulkan_lighting_known = true;
 }
 
+void Frontend::set_semantic_frame(const SemanticSceneFrame &frame) {
+    std::lock_guard<std::mutex> lock(impl_->live.semantic_mutex);
+    impl_->live.semantic_frame = frame;
+}
+
 void Frontend::set_song_spot(overlay::SongSpot spot) { impl_->song_spot = spot; }
 
 void Frontend::offer_songs(bool on, overlay::SongSpot spot) {
@@ -900,7 +905,8 @@ void update_dialogs(Frontend::Impl &impl, Runtime &rt) {
 enum MenuId {
     kResume = 1, kQuit, kQuitYes, kQuitNo, kMusic, kSfx, kScale, kFps, kFullscreen, kSmooth, kTexturePack, kHudSize, kSongPlace, kSongMove, kPadStick, kRestoreKeys, kRestorePad,
     kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen,
-    kVkEnhancedLighting, kVkAaMode, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof
+    kVkEnhancedLighting, kVkAaMode, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof,
+    kVkSunShadows, kVkDynamicLights, kVkPbrMaterials, kVkFroxelFog, kVkRayTracing
 };
 constexpr int kGameOptionBase = 3000; // the QoL tab's options of the game: kGameOptionBase + an index into Impl::game_options
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
@@ -1341,13 +1347,22 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
         vk_tab.items.push_back(std::move(aa_item));
         add_toggle(kVkEnhancedLighting, "Enhanced lighting", "Enables modern Vulkan lighting, shadows, and visual effects.", lit_on);
         if (lit_on) {
+            const bool rq_ok = impl.live.ray_query_supported.load(std::memory_order_relaxed);
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Lighting & shadows"));
+            add_toggle(kVkSunShadows, "Projected sun shadows", "2048x2048 orthographic 3D shadows cast by monsters, hunter, and terrain.", (mask & LiveSettings::kVkEffectSunShadows) != 0u);
+            add_toggle(kVkDynamicLights, "Dynamic point lights", "World-space lights for fireballs, campfires, combat hits, and boss auras.", (mask & LiveSettings::kVkEffectDynamicLights) != 0u);
             add_toggle(kVkAo, "Ambient occlusion", "Multi-bounce horizon shading inside crevices and corners.", (mask & LiveSettings::kVkEffectAo) != 0u);
-            add_toggle(kVkContactShadows, "Contact & sun shadows", "Short-range contact grounding and long projected sun shadows.", (mask & LiveSettings::kVkEffectContactShadows) != 0u);
-            add_toggle(kVkSsgi, "Indirect bounce & flash", "Colored firelight/lava bounce and dynamic explosion flashes.", (mask & LiveSettings::kVkEffectSsgi) != 0u);
-            add_toggle(kVkSpecular, "Specular & sky bounce", "Biome specular sheen, Fresnel rim light, and hemisphere bounce.", (mask & LiveSettings::kVkEffectSpecular) != 0u);
+            add_toggle(kVkContactShadows, "Contact shadows", "Short-range screen-space grounding under feet and props.", (mask & LiveSettings::kVkEffectContactShadows) != 0u);
+            add_toggle(kVkSsgi, "Indirect bounce", "Subtle colored bounce light from nearby illuminated surfaces.", (mask & LiveSettings::kVkEffectSsgi) != 0u);
+            add_toggle(kVkSpecular, "Hemisphere bounce", "Sky and ground ambient hemisphere tinting per biome.", (mask & LiveSettings::kVkEffectSpecular) != 0u);
+            add_toggle(kVkPbrMaterials, "PBR material packs", "Uses optional _n normal, _r roughness/metallic, and _e emissive pack maps.", (mask & LiveSettings::kVkEffectPbrMaterials) != 0u);
+            add_toggle(kVkRayTracing, rq_ok ? "Hardware RT shadows (Ultra)" : "Hardware RT shadows (N/A)",
+                       rq_ok ? "VK_KHR_ray_query hardware ray-traced sun shadows via partitioned Static+Dynamic BVH."
+                             : "Requires a GPU/driver with VK_KHR_ray_query support.",
+                       (mask & LiveSettings::kVkEffectRayTracing) != 0u);
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Atmosphere & effects"));
             add_toggle(kVkVolumetricFog, "Volumetric fog & shafts", "Biome height fog, outdoor sun shafts, and cave doorway rays.", (mask & LiveSettings::kVkEffectVolumetricFog) != 0u);
+            add_toggle(kVkFroxelFog, "3D froxel volumetrics", "3D frustum fog grid with shadow-occluded shafts and firelight mist glow.", (mask & LiveSettings::kVkEffectFroxelFog) != 0u);
             add_toggle(kVkBloom, "Emissive bloom & shimmer", "Selective glow on fire, lava, and lightning with rising heat haze.", (mask & LiveSettings::kVkEffectBloom) != 0u);
             add_toggle(kVkSoftParticles, "Soft 3D particles", "Depth-softened smoke, snow, fire, and monster breath.", (mask & LiveSettings::kVkEffectSoftParticles) != 0u);
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Post-processing"));
@@ -1400,6 +1415,7 @@ void save_controls(const Frontend::Impl &impl) {
             static constexpr std::string_view kVkEffectNames[] = {
                 "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
                 "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
+                "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing",
             };
             const std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
             out << "option.aaMode=" << impl.live.aa_mode.load(std::memory_order_relaxed) << "\n";
@@ -1808,7 +1824,12 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
         case kVkSoftParticles:
         case kVkFxaa:
         case kVkVignette:
-        case kVkKillcamDof: {
+        case kVkKillcamDof:
+        case kVkSunShadows:
+        case kVkDynamicLights:
+        case kVkPbrMaterials:
+        case kVkFroxelFog:
+        case kVkRayTracing: {
             const std::uint32_t bit = 1u << static_cast<unsigned>(e.id - kVkAo);
             std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
             if (e.value != 0) m |= bit;

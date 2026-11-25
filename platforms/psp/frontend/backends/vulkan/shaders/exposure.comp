@@ -1,0 +1,92 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Subtle SDR-safe Adaptive Eye Exposure (1x1 R16F persistent luminance adaptation, <0.01ms):
+// Keeps caves deep and atmospheric (no milky lift!) while gently easing harsh bright-snow glare.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, r16f) uniform image2D u_exp_out;
+
+struct LightingParams {
+    vec4 proj_info;
+    vec4 vz_and_size;
+    vec4 sun_dir_view;
+    vec4 sun_screen;
+    vec4 shadow_tint;
+    vec4 fog_color;
+    vec4 scatter_color;
+    vec4 bloom_rim;
+    vec4 world_up_view;
+    vec4 ground_bounce;
+    vec4 spec_contact;
+    uvec4 tex_slots;
+    uvec4 aux_slots;
+    uvec4 ext_slots;
+    uvec4 phase1_slots;
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
+    LightingParams p;
+};
+
+layout(push_constant) uniform LightingPush {
+    LightingParamsBuf buf;
+} pc;
+
+shared float s_log_luma[256];
+shared float s_weight[256];
+
+vec3 srgb_to_linear_fast(vec3 c) {
+    vec3 a = max(c, vec3(0.0));
+    return a * (a * (a * 0.305306011 + 0.682171111) + 0.012522878);
+}
+
+void main() {
+    LightingParams p = pc.buf.p;
+    uint lid = gl_LocalInvocationIndex;
+    ivec2 gid = ivec2(gl_LocalInvocationID.xy);
+
+    vec2 uv = (vec2(gid) + 0.5) / 16.0;
+    ivec2 sz = ivec2(p.vz_and_size.zw);
+    ivec2 ip = clamp(ivec2(uv * vec2(sz)), ivec2(0), sz - ivec2(1));
+
+    vec3 c = texelFetch(u_textures[p.tex_slots.x], ip, 0).rgb;
+    float d = texelFetch(u_textures[p.tex_slots.y], ip, 0).r;
+    vec3 lin = srgb_to_linear_fast(c);
+    float luma = dot(lin, vec3(0.2126, 0.7152, 0.0722));
+
+    vec2 dc = uv - vec2(0.5);
+    float w = exp(-dot(dc, dc) * 2.2) * ((d >= 0.99992) ? 0.35 : 1.0);
+    s_log_luma[lid] = log2(max(luma, 0.01)) * w;
+    s_weight[lid] = w;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            s_log_luma[lid] += s_log_luma[lid + stride];
+            s_weight[lid] += s_weight[lid + stride];
+        }
+        barrier();
+    }
+
+    if (lid == 0u) {
+        float avg_luma = exp2(s_log_luma[0] / max(s_weight[0], 1e-4));
+        // Keep exposure very close to 1.0 on SDR displays: never wash out dark caves (+6% max),
+        // and only gently tame extreme snow/fire glare (-6% max).
+        float is_cave = p.sun_dir_view.w;
+        float target_key = (is_cave > 0.5) ? 0.14 : 0.22;
+        float target_exp = clamp(target_key / max(avg_luma, 0.05), 0.94, 1.06);
+        float prev_exp = imageLoad(u_exp_out, ivec2(0, 0)).r;
+        if ((p.phase1_slots.z & 2u) != 0u || !(prev_exp > 0.5 && prev_exp < 2.0)) {
+            prev_exp = target_exp;
+        }
+        float adapted = mix(prev_exp, target_exp, 0.04);
+        imageStore(u_exp_out, ivec2(0, 0), vec4(adapted, avg_luma, 0.0, 1.0));
+    }
+}

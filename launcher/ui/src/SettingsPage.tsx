@@ -676,17 +676,22 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
         {s.enhancedLighting && (
           <>
             {([
-              ['vkAo', 'Ambient occlusion', 'Multi-bounce horizon shading inside crevices and corners.'],
-              ['vkContactShadows', 'Contact & sun shadows', 'Short-range contact grounding and long projected sun shadows.'],
-              ['vkSsgi', 'Indirect bounce & flash', 'Colored firelight/lava bounce and dynamic explosion flashes.'],
-              ['vkSpecular', 'Specular & sky bounce', 'Biome specular sheen, Fresnel rim light, and hemisphere bounce.'],
-              ['vkVolumetricFog', 'Volumetric fog & shafts', 'Biome height fog, outdoor sun shafts, and cave doorway rays.'],
-              ['vkBloom', 'Emissive bloom & shimmer', 'Selective glow on fire, lava, and lightning with rising heat haze.'],
-              ['vkSoftParticles', 'Soft 3D particles', 'Depth-softened smoke, snow, fire, and monster breath.'],
-              ['vkVignette', 'Moody vignette', 'Subtle edge framing in caves, swamps, volcanoes, and sieges.'],
-              ['vkKillcamDof', 'Killcam depth of field', 'Peripheral bokeh blur during the monster killcam.'],
-            ] as const).map(([key, label, help]) => (
-              <ToggleRow key={key} label={label} help={help} on={s[key] ?? true} onToggle={() => onChange({ [key]: !(s[key] ?? true) })} />
+              ['vkSunShadows', 'Projected sun shadows', '2048x2048 orthographic 3D shadows cast by monsters, hunter, and terrain.', true],
+              ['vkDynamicLights', 'Dynamic point lights', 'World-space lights for fireballs, campfires, combat hits, and boss auras.', true],
+              ['vkAo', 'Ambient occlusion', 'Multi-bounce horizon shading inside crevices and corners.', true],
+              ['vkContactShadows', 'Contact shadows', 'Short-range screen-space grounding under feet and props.', true],
+              ['vkSsgi', 'Indirect bounce', 'Subtle colored bounce light from nearby illuminated surfaces.', true],
+              ['vkSpecular', 'Hemisphere bounce', 'Sky and ground ambient hemisphere tinting per biome.', true],
+              ['vkPbrMaterials', 'PBR material packs', 'Uses optional _n normal, _r roughness/metallic, and _e emissive pack maps.', true],
+              ['vkVolumetricFog', 'Volumetric fog & shafts', 'Biome height fog, outdoor sun shafts, and cave doorway rays.', true],
+              ['vkFroxelFog', '3D froxel volumetrics', '3D frustum fog grid with shadow-occluded shafts and firelight mist glow.', true],
+              ['vkBloom', 'Emissive bloom & shimmer', 'Selective glow on fire, lava, and lightning with rising heat haze.', true],
+              ['vkSoftParticles', 'Soft 3D particles', 'Depth-softened smoke, snow, fire, and monster breath.', true],
+              ['vkVignette', 'Moody vignette', 'Subtle edge framing in caves, swamps, volcanoes, and sieges.', true],
+              ['vkKillcamDof', 'Killcam depth of field', 'Peripheral bokeh blur during the monster killcam.', true],
+              ['vkRayTracing', 'Hardware RT shadows (Ultra)', 'VK_KHR_ray_query hardware ray-traced sun shadows via partitioned Static+Dynamic BVH.', false],
+            ] as const).map(([key, label, help, defOn]) => (
+              <ToggleRow key={key} label={label} help={help} on={s[key] ?? defOn} onToggle={() => onChange({ [key]: !(s[key] ?? defOn) })} />
             ))}
           </>
         )}

@@ -35,9 +35,15 @@ bool PackStreamer::init(const Context &ctx, const std::string &pack_folder, cons
     return true;
 }
 
-void PackStreamer::touch(std::uint32_t bindless_slot, std::uint64_t frame_num) noexcept {
+void PackStreamer::touch(std::uint32_t bindless_slot, std::uint64_t frame_num,
+                         PackPbrSlots *pbr_out) noexcept {
     if (const auto it = slot_map_.find(bindless_slot); it != slot_map_.end() && it->second != nullptr) {
         it->second->last_used = frame_num;
+        if (pbr_out) {
+            pbr_out->normal_slot = it->second->pbr[0].bindless_slot;
+            pbr_out->rough_metal_slot = it->second->pbr[1].bindless_slot;
+            pbr_out->emissive_slot = it->second->pbr[2].bindless_slot;
+        }
     }
 }
 
@@ -65,6 +71,11 @@ void PackStreamer::shutdown(const Context &ctx, BindlessDescriptors &desc) {
         if (img.bindless_slot != 0) desc.free_texture(img.bindless_slot, 0);
         if (img.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, img.view, nullptr);
         if (img.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, img.image, img.alloc);
+        for (auto &comp : img.pbr) {
+            if (comp.bindless_slot != 0) desc.free_texture(comp.bindless_slot, 0);
+            if (comp.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device, comp.view, nullptr);
+            if (comp.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator, comp.image, comp.alloc);
+        }
     }
     uploaded_.clear();
     total_vram_bytes_ = 0;
@@ -209,6 +220,60 @@ bool PackStreamer::upload_image_async(const Context &ctx, BindlessDescriptors &d
     return true;
 }
 
+void PackStreamer::probe_and_stream_pbr(const Context &ctx, BindlessDescriptors &desc,
+                                        const std::string &base_id, const std::filesystem::path &base_file,
+                                        const std::function<VkCommandBuffer()> &begin_upload_cmd,
+                                        std::uint64_t retire_timeline, PackGpuImage &entry) {
+    if (!loader_) return;
+    static constexpr const char *kSuffixes[3] = {"_n", "_r", "_e"};
+    static constexpr const char *kExts[2] = {".ktx2", ".png"};
+    constexpr std::uint32_t kMaxUploadsPerFrame = 4u;
+
+    for (int i = 0; i < 3; ++i) {
+        PackCompanionGpu &comp = entry.pbr[i];
+        if (comp.bindless_slot != 0) continue;
+        if (!comp.probed) {
+            comp.probed = true;
+            if (!base_file.empty()) {
+                const auto dir = base_file.parent_path();
+                const auto stem = base_file.stem().string();
+                std::error_code ec;
+                for (const char *ext : kExts) {
+                    const auto cand = dir / (stem + kSuffixes[i] + ext);
+                    if (std::filesystem::exists(cand, ec) && !ec) {
+                        comp.file_path = textures::utf8(cand);
+                        break;
+                    }
+                }
+            }
+        }
+        if (comp.file_path.empty()) continue;
+
+        const std::string cid = base_id + kSuffixes[i];
+        std::vector<std::filesystem::path> cfiles{textures::from_utf8(comp.file_path)};
+        std::shared_ptr<const textures::Image> decoded;
+        const auto st = loader_->get(cid, cfiles, decoded);
+        if (st == textures::Loader::State::Ready && decoded) {
+            if (uploads_this_frame_ >= kMaxUploadsPerFrame) continue;
+            ++uploads_this_frame_;
+            const VkCommandBuffer cmd = begin_upload_cmd ? begin_upload_cmd() : VK_NULL_HANDLE;
+            PackGpuImage tmp{};
+            if (upload_image_async(ctx, desc, cmd, retire_timeline, *decoded, tmp)) {
+                comp.image = tmp.image;
+                comp.alloc = tmp.alloc;
+                comp.view = tmp.view;
+                comp.bindless_slot = tmp.bindless_slot;
+                comp.vram_bytes = tmp.vram_bytes;
+                total_vram_bytes_ += comp.vram_bytes;
+            }
+            loader_->forget(cid);
+        } else if (st == textures::Loader::State::Missing) {
+            comp.file_path.clear();
+            loader_->forget(cid);
+        }
+    }
+}
+
 std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescriptors &desc,
                                             const textures::TextureFacts &facts,
                                             const textures::MemoryReader &reader,
@@ -216,8 +281,10 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
                                             std::uint64_t retire_timeline,
                                             std::uint64_t frame_num, bool &has_mips,
                                             textures::Filter &filter_out,
-                                            bool &pending_out) {
+                                            bool &pending_out,
+                                            PackPbrSlots *pbr_out) {
     pending_out = false;
+    if (pbr_out) *pbr_out = PackPbrSlots{};
     if (!loader_) return 0;
     const textures::Pack *chosen = nullptr;
     textures::Match match{};
@@ -236,9 +303,23 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
 
     filter_out = match.filter;
     const std::string id = (chosen == builtin_pack_.get() ? "builtin:" : "pack:") + match.entry->image();
+    if (frame_num != last_upload_frame_) {
+        last_upload_frame_ = frame_num;
+        uploads_this_frame_ = 0;
+    }
+
     if (auto it = uploaded_.find(id); it != uploaded_.end()) {
         it->second.last_used = frame_num;
         has_mips = it->second.mip_levels > 1u;
+        // Stream optional PBR companion maps (_n, _r, _e) asynchronously alongside the albedo texture.
+        const auto base_file = match.entry->levels.empty() ? std::filesystem::path{}
+                                                           : chosen->path_of(match.entry->levels.begin()->second);
+        probe_and_stream_pbr(ctx, desc, id, base_file, begin_upload_cmd, retire_timeline, it->second);
+        if (pbr_out) {
+            pbr_out->normal_slot = it->second.pbr[0].bindless_slot;
+            pbr_out->rough_metal_slot = it->second.pbr[1].bindless_slot;
+            pbr_out->emissive_slot = it->second.pbr[2].bindless_slot;
+        }
         return it->second.bindless_slot;
     }
 
@@ -247,10 +328,6 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
     for (const auto &[lvl, name] : match.entry->levels) files.push_back(chosen->path_of(name));
 
     // Budget async GPU texture uploads per frame to keep staging memory bounded while streaming HD packs smoothly.
-    if (frame_num != last_upload_frame_) {
-        last_upload_frame_ = frame_num;
-        uploads_this_frame_ = 0;
-    }
     constexpr std::uint32_t kMaxUploadsPerFrame = 4u;
 
     std::shared_ptr<const textures::Image> decoded;
@@ -269,7 +346,16 @@ std::uint32_t PackStreamer::lookup_or_queue(const Context &ctx, BindlessDescript
             has_mips = gpu_img.mip_levels > 1u;
             const std::uint32_t slot = gpu_img.bindless_slot;
             auto [it, inserted] = uploaded_.emplace(id, gpu_img);
-            if (inserted) slot_map_[slot] = &it->second;
+            if (inserted) {
+                slot_map_[slot] = &it->second;
+                const auto base_file = files.empty() ? std::filesystem::path{} : files.front();
+                probe_and_stream_pbr(ctx, desc, id, base_file, begin_upload_cmd, retire_timeline, it->second);
+                if (pbr_out) {
+                    pbr_out->normal_slot = it->second.pbr[0].bindless_slot;
+                    pbr_out->rough_metal_slot = it->second.pbr[1].bindless_slot;
+                    pbr_out->emissive_slot = it->second.pbr[2].bindless_slot;
+                }
+            }
             loader_->forget(id);
             return slot;
         }
@@ -320,6 +406,13 @@ bool PackStreamer::trim_vram(const Context &ctx, BindlessDescriptors &desc, std:
             retired_images_.push_back({it->second.image, it->second.alloc, it->second.view, retire_timeline});
         }
         total_vram_bytes_ = total_vram_bytes_ > it->second.vram_bytes ? (total_vram_bytes_ - it->second.vram_bytes) : 0;
+        for (auto &comp : it->second.pbr) {
+            if (comp.bindless_slot != 0) desc.free_texture(comp.bindless_slot, retire_timeline);
+            if (comp.image != VK_NULL_HANDLE || comp.view != VK_NULL_HANDLE) {
+                retired_images_.push_back({comp.image, comp.alloc, comp.view, retire_timeline});
+            }
+            total_vram_bytes_ = total_vram_bytes_ > comp.vram_bytes ? (total_vram_bytes_ - comp.vram_bytes) : 0;
+        }
         uploaded_.erase(it);
         evicted = true;
     }
