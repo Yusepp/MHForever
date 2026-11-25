@@ -32,23 +32,27 @@ static_assert(sizeof(RtShadowParams) == 128);
 
 class RayTracedShadows {
 public:
+    static constexpr int kRingSlots = 3; // matches VkBackend::kFramesInFlight
+
     bool init(const Context &ctx, VkDescriptorSetLayout bindless_layout);
     void shutdown(const Context &ctx, BindlessDescriptors &desc);
 
     [[nodiscard]] bool ready() const noexcept { return pipe_ != VK_NULL_HANDLE; }
-    [[nodiscard]] bool valid() const noexcept { return tlas_valid_ && out_slot_ != 0u; }
+    [[nodiscard]] bool valid() const noexcept { return tlas_valid_[last_slot_] && out_slot_ != 0u; }
     [[nodiscard]] std::uint32_t shadow_slot() const noexcept { return valid() ? out_slot_ : 0u; }
 
-    void invalidate() noexcept { tlas_valid_ = false; }
+    void invalidate() noexcept {
+        for (int i = 0; i < kRingSlots; ++i) tlas_valid_[i] = false;
+    }
 
-    // Updates Partitioned Static + Dynamic BLAS and 2-instance TLAS (call ONCE per 30 Hz frame, outside render pass).
-    bool update_bvh(VkCommandBuffer cmd, const Context &ctx,
+    // Updates Partitioned Static + Dynamic BLAS and 2-instance TLAS for `frame_slot` (0..2, guaranteed GPU-idle).
+    bool update_bvh(VkCommandBuffer cmd, const Context &ctx, int frame_slot,
                     const std::vector<RtVertex> &static_verts,
                     const std::vector<RtVertex> &dyn_verts);
 
-    // Traces half-res hardware ray-traced sun shadows (call per subframe before lighting_composite).
+    // Traces half-res hardware ray-traced sun shadows for `frame_slot` before lighting_composite.
     bool trace(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
-               VkDescriptorSet bindless_set, std::uint32_t full_w, std::uint32_t full_h,
+               VkDescriptorSet bindless_set, int frame_slot, std::uint32_t full_w, std::uint32_t full_h,
                std::uint32_t depth_slot, const float view_mat[16], const LightingFrameInput &in,
                const float sun_dir_world[3], void *params_cpu, VkDeviceAddress params_bda);
 
@@ -73,24 +77,28 @@ private:
     };
 
     bool ensure_buf(const Context &ctx, GpuBuf &b, VkDeviceSize needed, VkBufferUsageFlags usage, bool host_visible);
-    bool build_blas(VkCommandBuffer cmd, const Context &ctx, BlasSlot &slot,
+    bool build_blas(VkCommandBuffer cmd, const Context &ctx, BlasSlot &slot, GpuBuf &scratch,
                     const std::vector<RtVertex> &verts, VkBuildAccelerationStructureFlagsKHR flags);
     bool ensure_output(const Context &ctx, BindlessDescriptors &desc, std::uint32_t hw, std::uint32_t hh);
 
     VkDescriptorSetLayout rt_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool rt_pool_ = VK_NULL_HANDLE;
-    VkDescriptorSet rt_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet rt_sets_[kRingSlots]{};
     VkPipelineLayout pipe_layout_ = VK_NULL_HANDLE;
     VkPipeline pipe_ = VK_NULL_HANDLE;
 
-    BlasSlot static_blas_;
-    BlasSlot dyn_blas_;
-    VkAccelerationStructureKHR tlas_ = VK_NULL_HANDLE;
-    GpuBuf tlas_buf_;
-    GpuBuf inst_buf_;
-    GpuBuf scratch_buf_;
-    bool tlas_valid_ = false;
-    bool rt_desc_dirty_ = true;
+    BlasSlot static_blas_[kRingSlots]{};
+    int active_static_slot_ = -1;
+    std::uint64_t active_static_hash_ = 0;
+
+    BlasSlot dyn_blas_[kRingSlots]{};
+    VkAccelerationStructureKHR tlas_[kRingSlots]{};
+    GpuBuf tlas_buf_[kRingSlots]{};
+    GpuBuf inst_buf_[kRingSlots]{};
+    GpuBuf scratch_buf_[kRingSlots]{};
+    bool tlas_valid_[kRingSlots]{};
+    bool rt_desc_dirty_[kRingSlots]{true, true, true};
+    int last_slot_ = 0;
 
     VkImage out_img_ = VK_NULL_HANDLE;
     VmaAllocation out_alloc_ = VK_NULL_HANDLE;

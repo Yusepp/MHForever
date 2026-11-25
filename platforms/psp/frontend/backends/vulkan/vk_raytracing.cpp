@@ -82,14 +82,18 @@ bool RayTracedShadows::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &rt_set_layout_) != VK_SUCCESS) return false;
 
     VkDescriptorPoolSize psizes[2]{
-        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, static_cast<std::uint32_t>(kRingSlots)},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, static_cast<std::uint32_t>(kRingSlots)},
     };
-    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 2, psizes};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0,
+                                    static_cast<std::uint32_t>(kRingSlots), 2, psizes};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &rt_pool_) != VK_SUCCESS) return false;
 
-    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, rt_pool_, 1, &rt_set_layout_};
-    if (vkAllocateDescriptorSets(ctx.device, &dsai, &rt_set_) != VK_SUCCESS) return false;
+    VkDescriptorSetLayout layouts[kRingSlots];
+    for (int i = 0; i < kRingSlots; ++i) layouts[i] = rt_set_layout_;
+    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, rt_pool_,
+                                     static_cast<std::uint32_t>(kRingSlots), layouts};
+    if (vkAllocateDescriptorSets(ctx.device, &dsai, rt_sets_) != VK_SUCCESS) return false;
 
     VkDescriptorSetLayout set_layouts[2] = {bindless_layout, rt_set_layout_};
     VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkDeviceAddress)};
@@ -112,23 +116,29 @@ bool RayTracedShadows::init(const Context &ctx, VkDescriptorSetLayout bindless_l
 void RayTracedShadows::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     if (pipe_ != VK_NULL_HANDLE) { vkDestroyPipeline(ctx.device, pipe_, nullptr); pipe_ = VK_NULL_HANDLE; }
     if (pipe_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(ctx.device, pipe_layout_, nullptr); pipe_layout_ = VK_NULL_HANDLE; }
-    if (rt_pool_ != VK_NULL_HANDLE) { vkDestroyDescriptorPool(ctx.device, rt_pool_, nullptr); rt_pool_ = VK_NULL_HANDLE; rt_set_ = VK_NULL_HANDLE; }
-    if (rt_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(ctx.device, rt_set_layout_, nullptr); rt_set_layout_ = VK_NULL_HANDLE; }
-    if (tlas_ != VK_NULL_HANDLE && vkDestroyAccelerationStructureKHR) {
-        vkDestroyAccelerationStructureKHR(ctx.device, tlas_, nullptr);
-        tlas_ = VK_NULL_HANDLE;
+    if (rt_pool_ != VK_NULL_HANDLE) { vkDestroyDescriptorPool(ctx.device, rt_pool_, nullptr); rt_pool_ = VK_NULL_HANDLE; }
+    for (int i = 0; i < kRingSlots; ++i) {
+        rt_sets_[i] = VK_NULL_HANDLE;
+        if (tlas_[i] != VK_NULL_HANDLE && vkDestroyAccelerationStructureKHR) {
+            vkDestroyAccelerationStructureKHR(ctx.device, tlas_[i], nullptr);
+            tlas_[i] = VK_NULL_HANDLE;
+        }
+        tlas_buf_[i].destroy(ctx);
+        inst_buf_[i].destroy(ctx);
+        scratch_buf_[i].destroy(ctx);
+        static_blas_[i].destroy(ctx);
+        dyn_blas_[i].destroy(ctx);
+        tlas_valid_[i] = false;
+        rt_desc_dirty_[i] = true;
     }
-    tlas_buf_.destroy(ctx);
-    inst_buf_.destroy(ctx);
-    scratch_buf_.destroy(ctx);
-    static_blas_.destroy(ctx);
-    dyn_blas_.destroy(ctx);
+    if (rt_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(ctx.device, rt_set_layout_, nullptr); rt_set_layout_ = VK_NULL_HANDLE; }
+    active_static_slot_ = -1;
+    active_static_hash_ = 0;
     if (out_slot_ != 0u) { desc.free_texture(out_slot_, UINT64_MAX); out_slot_ = 0u; }
     if (out_view_ != VK_NULL_HANDLE) { vkDestroyImageView(ctx.device, out_view_, nullptr); out_view_ = VK_NULL_HANDLE; }
     if (out_img_ != VK_NULL_HANDLE) { vmaDestroyImage(ctx.allocator, out_img_, out_alloc_); out_img_ = VK_NULL_HANDLE; out_alloc_ = VK_NULL_HANDLE; }
     out_w_ = out_h_ = 0u;
     out_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-    tlas_valid_ = false;
 }
 
 bool RayTracedShadows::ensure_buf(const Context &ctx, GpuBuf &b, VkDeviceSize needed,
@@ -154,7 +164,7 @@ bool RayTracedShadows::ensure_buf(const Context &ctx, GpuBuf &b, VkDeviceSize ne
     return b.addr != 0;
 }
 
-bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasSlot &slot,
+bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasSlot &slot, GpuBuf &scratch,
                                   const std::vector<RtVertex> &verts, VkBuildAccelerationStructureFlagsKHR flags) {
     const std::uint32_t tri_count = static_cast<std::uint32_t>(verts.size() / 3u);
     if (tri_count == 0u) return false;
@@ -206,10 +216,10 @@ bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasS
         slot.device_addr = vkGetAccelerationStructureDeviceAddressKHR(ctx.device, &adai);
     }
 
-    if (!ensure_buf(ctx, scratch_buf_, sizes.buildScratchSize + 256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false)) {
+    if (!ensure_buf(ctx, scratch, sizes.buildScratchSize + 256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false)) {
         return false;
     }
-    const VkDeviceAddress aligned_scratch = (scratch_buf_.addr + 255u) & ~VkDeviceAddress(255u);
+    const VkDeviceAddress aligned_scratch = (scratch.addr + 255u) & ~VkDeviceAddress(255u);
     bgi.dstAccelerationStructure = slot.as;
     bgi.scratchData.deviceAddress = aligned_scratch;
 
@@ -226,39 +236,45 @@ bool RayTracedShadows::build_blas(VkCommandBuffer cmd, const Context &ctx, BlasS
     return true;
 }
 
-bool RayTracedShadows::update_bvh(VkCommandBuffer cmd, const Context &ctx,
+bool RayTracedShadows::update_bvh(VkCommandBuffer cmd, const Context &ctx, int frame_slot,
                                   const std::vector<RtVertex> &static_verts,
                                   const std::vector<RtVertex> &dyn_verts) {
     if (!ready()) return false;
+    const int fs = ((frame_slot % kRingSlots) + kRingSlots) % kRingSlots;
+    last_slot_ = fs;
 
-    // 1. Static zone BLAS: rebuild ONLY when static zone geometry changes (cached across all frames in zone!).
+    // 1. Static zone BLAS: rebuild into ring slot `fs` ONLY when static geometry changes (zero CPU/GPU race!).
     bool have_static = false;
+    VkDeviceAddress static_addr = 0;
     if (static_verts.size() >= 3u) {
         const std::uint64_t sh = hash_rt_verts(static_verts);
-        if (static_blas_.as == VK_NULL_HANDLE || static_blas_.cached_hash != sh) {
-            if (build_blas(cmd, ctx, static_blas_, static_verts,
-                           VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)) {
-                static_blas_.cached_hash = sh;
-                have_static = true;
-            }
-        } else {
+        if (active_static_slot_ >= 0 && active_static_hash_ == sh &&
+            static_blas_[active_static_slot_].as != VK_NULL_HANDLE) {
+            static_addr = static_blas_[active_static_slot_].device_addr;
+            have_static = true;
+        } else if (build_blas(cmd, ctx, static_blas_[fs], scratch_buf_[fs], static_verts,
+                              VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)) {
+            static_blas_[fs].cached_hash = sh;
+            active_static_slot_ = fs;
+            active_static_hash_ = sh;
+            static_addr = static_blas_[fs].device_addr;
             have_static = true;
         }
     }
 
-    // 2. Dynamic character BLAS (hunter + monsters): fast-built once per 30 Hz game frame.
+    // 2. Dynamic character BLAS (hunter + monsters): built into per-frame-in-flight slot `fs` (zero race!).
     bool have_dyn = false;
     if (dyn_verts.size() >= 3u) {
-        have_dyn = build_blas(cmd, ctx, dyn_blas_, dyn_verts,
+        have_dyn = build_blas(cmd, ctx, dyn_blas_[fs], scratch_buf_[fs], dyn_verts,
                               VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR);
     }
 
     if (!have_static && !have_dyn) {
-        tlas_valid_ = false;
+        tlas_valid_[fs] = false;
         return false;
     }
 
-    // 3. 2-Instance TLAS (Static zone + Dynamic characters).
+    // 3. Per-frame-in-flight 2-Instance TLAS (Static zone + Dynamic characters).
     VkAccelerationStructureInstanceKHR insts[2]{};
     std::uint32_t icount = 0u;
     auto push_inst = [&](VkDeviceAddress blas_addr, std::uint32_t custom_idx) {
@@ -271,18 +287,18 @@ bool RayTracedShadows::update_bvh(VkCommandBuffer cmd, const Context &ctx,
         in.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         in.accelerationStructureReference = blas_addr;
     };
-    if (have_static) push_inst(static_blas_.device_addr, 0u);
-    if (have_dyn) push_inst(dyn_blas_.device_addr, 1u);
+    if (have_static) push_inst(static_addr, 0u);
+    if (have_dyn) push_inst(dyn_blas_[fs].device_addr, 1u);
 
-    if (!ensure_buf(ctx, inst_buf_, sizeof(insts),
+    if (!ensure_buf(ctx, inst_buf_[fs], sizeof(insts),
                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true)) {
         return false;
     }
-    std::memcpy(inst_buf_.mapped, insts, icount * sizeof(VkAccelerationStructureInstanceKHR));
+    std::memcpy(inst_buf_[fs].mapped, insts, icount * sizeof(VkAccelerationStructureInstanceKHR));
 
     VkAccelerationStructureGeometryInstancesDataKHR idata{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR, nullptr};
     idata.arrayOfPointers = VK_FALSE;
-    idata.data.deviceAddress = inst_buf_.addr;
+    idata.data.deviceAddress = inst_buf_[fs].addr;
 
     VkAccelerationStructureGeometryKHR tgeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, nullptr};
     tgeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -299,29 +315,29 @@ bool RayTracedShadows::update_bvh(VkCommandBuffer cmd, const Context &ctx,
     vkGetAccelerationStructureBuildSizesKHR(ctx.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                                             &tbgi, &icount, &tsizes);
 
-    if (tlas_ == VK_NULL_HANDLE || tlas_buf_.size < tsizes.accelerationStructureSize) {
+    if (tlas_[fs] == VK_NULL_HANDLE || tlas_buf_[fs].size < tsizes.accelerationStructureSize) {
         ctx.wait_idle();
-        if (tlas_ != VK_NULL_HANDLE) {
-            vkDestroyAccelerationStructureKHR(ctx.device, tlas_, nullptr);
-            tlas_ = VK_NULL_HANDLE;
+        if (tlas_[fs] != VK_NULL_HANDLE) {
+            vkDestroyAccelerationStructureKHR(ctx.device, tlas_[fs], nullptr);
+            tlas_[fs] = VK_NULL_HANDLE;
         }
-        if (!ensure_buf(ctx, tlas_buf_, tsizes.accelerationStructureSize,
+        if (!ensure_buf(ctx, tlas_buf_[fs], tsizes.accelerationStructureSize,
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false)) {
             return false;
         }
         VkAccelerationStructureCreateInfoKHR asci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR, nullptr};
-        asci.buffer = tlas_buf_.buf;
+        asci.buffer = tlas_buf_[fs].buf;
         asci.size = tsizes.accelerationStructureSize;
         asci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        if (vkCreateAccelerationStructureKHR(ctx.device, &asci, nullptr, &tlas_) != VK_SUCCESS) return false;
-        rt_desc_dirty_ = true;
+        if (vkCreateAccelerationStructureKHR(ctx.device, &asci, nullptr, &tlas_[fs]) != VK_SUCCESS) return false;
+        rt_desc_dirty_[fs] = true;
     }
 
-    if (!ensure_buf(ctx, scratch_buf_, tsizes.buildScratchSize + 256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false)) {
+    if (!ensure_buf(ctx, scratch_buf_[fs], tsizes.buildScratchSize + 256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false)) {
         return false;
     }
-    tbgi.dstAccelerationStructure = tlas_;
-    tbgi.scratchData.deviceAddress = (scratch_buf_.addr + 255u) & ~VkDeviceAddress(255u);
+    tbgi.dstAccelerationStructure = tlas_[fs];
+    tbgi.scratchData.deviceAddress = (scratch_buf_[fs].addr + 255u) & ~VkDeviceAddress(255u);
 
     VkAccelerationStructureBuildRangeInfoKHR trange{icount, 0u, 0u, 0u};
     const VkAccelerationStructureBuildRangeInfoKHR *ptrange = &trange;
@@ -332,7 +348,7 @@ bool RayTracedShadows::update_bvh(VkCommandBuffer cmd, const Context &ctx,
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR};
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, 0, 1, &mb, 0, nullptr, 0, nullptr};
     vkCmdPipelineBarrier2(cmd, &dep);
-    tlas_valid_ = true;
+    tlas_valid_[fs] = true;
     return true;
 }
 
@@ -367,40 +383,41 @@ bool RayTracedShadows::ensure_output(const Context &ctx, BindlessDescriptors &de
     out_w_ = hw;
     out_h_ = hh;
     out_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-    rt_desc_dirty_ = true;
+    for (int i = 0; i < kRingSlots; ++i) rt_desc_dirty_[i] = true;
     return out_slot_ != 0u;
 }
 
 bool RayTracedShadows::trace(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
-                             VkDescriptorSet bindless_set, std::uint32_t full_w, std::uint32_t full_h,
+                             VkDescriptorSet bindless_set, int frame_slot, std::uint32_t full_w, std::uint32_t full_h,
                              std::uint32_t depth_slot, const float view_mat[16], const LightingFrameInput &in,
                              const float sun_dir_world[3], void *params_cpu, VkDeviceAddress params_bda) {
-    if (!ready() || !tlas_valid_ || tlas_ == VK_NULL_HANDLE || depth_slot == 0u || !params_cpu || params_bda == 0) {
+    const int fs = ((frame_slot % kRingSlots) + kRingSlots) % kRingSlots;
+    if (!ready() || !tlas_valid_[fs] || tlas_[fs] == VK_NULL_HANDLE || depth_slot == 0u || !params_cpu || params_bda == 0) {
         return false;
     }
     const std::uint32_t hw = std::max(full_w / 2u, 1u);
     const std::uint32_t hh = std::max(full_h / 2u, 1u);
     if (!ensure_output(ctx, desc, hw, hh)) return false;
 
-    if (rt_desc_dirty_) {
+    if (rt_desc_dirty_[fs]) {
         VkWriteDescriptorSetAccelerationStructureKHR asw{
-            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, nullptr, 1, &tlas_};
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, nullptr, 1, &tlas_[fs]};
         VkDescriptorImageInfo dii{VK_NULL_HANDLE, out_view_, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet writes[2]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].pNext = &asw;
-        writes[0].dstSet = rt_set_;
+        writes[0].dstSet = rt_sets_[fs];
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = rt_set_;
+        writes[1].dstSet = rt_sets_[fs];
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].pImageInfo = &dii;
         vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
-        rt_desc_dirty_ = false;
+        rt_desc_dirty_[fs] = false;
     }
 
     Context::cmd_transition_image(cmd, out_img_, VK_IMAGE_ASPECT_COLOR_BIT, out_layout_, VK_IMAGE_LAYOUT_GENERAL,
@@ -433,7 +450,7 @@ bool RayTracedShadows::trace(VkCommandBuffer cmd, const Context &ctx, BindlessDe
     std::memcpy(params_cpu, &rp, sizeof(rp));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);
-    VkDescriptorSet sets[2] = {bindless_set, rt_set_};
+    VkDescriptorSet sets[2] = {bindless_set, rt_sets_[fs]};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 2, sets, 0, nullptr);
     vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params_bda), &params_bda);
     vkCmdDispatch(cmd, (hw + 7u) / 8u, (hh + 7u) / 8u, 1u);

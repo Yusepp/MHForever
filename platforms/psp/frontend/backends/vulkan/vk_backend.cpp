@@ -1614,7 +1614,7 @@ void VkBackend::draw_batch() {
                     if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) && !lighting_.active_is_cave()) {
                         ensure_recording();
                         end_render_pass();
-                        rt_shadows_.update_bvh(frames_[frame_slot_].cmd, ctx_, cur_rt_static_verts_, cur_rt_dyn_verts_);
+                        rt_shadows_.update_bvh(frames_[frame_slot_].cmd, ctx_, frame_slot_, cur_rt_static_verts_, cur_rt_dyn_verts_);
                         sun_shadows_.invalidate();
                     } else {
                         rt_shadows_.invalidate();
@@ -3113,7 +3113,7 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
                 if (rtslice.ptr) {
                     float sun_dir[3]{};
                     lighting_.resolve_sun_dir_world(fin, sun_dir);
-                    if (rt_shadows_.trace(f.cmd, ctx_, descriptors_, descriptors_.set(), w, h,
+                    if (rt_shadows_.trace(f.cmd, ctx_, descriptors_, descriptors_.set(), frame_slot_, w, h,
                                           rt.depth.bindless_slot, view_mat->data(), fin, sun_dir,
                                           rtslice.ptr, rtslice.address)) {
                         rt_slot = rt_shadows_.shadow_slot();
@@ -3473,7 +3473,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 }
                 dyn_ptr = &interp_rt_dyn_verts_;
             }
-            rt_shadows_.update_bvh(f.cmd, ctx_, blend_older_.rt_static_verts, *dyn_ptr);
+            rt_shadows_.update_bvh(f.cmd, ctx_, frame_slot_, blend_older_.rt_static_verts, *dyn_ptr);
             sun_shadows_.invalidate();
         } else if (phase <= 0.0f) {
             rt_shadows_.invalidate();
