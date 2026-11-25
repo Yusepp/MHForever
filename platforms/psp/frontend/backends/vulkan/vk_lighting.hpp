@@ -68,9 +68,11 @@ struct alignas(16) LightingComputeParams {
     std::uint32_t light_count{0};
     std::uint32_t lights_pad{0};
     float shadow_from_view[16]{}; // column-major: PSP view (+Y up) -> shadow clip space
-    std::uint32_t shadow_info[4]{}; // x = shadow_map_slot, y = nearest_sampler, z = 0, w = 0
+    std::uint32_t shadow_info[4]{}; // x = shadow_map_slot, y = nearest_sampler, z = rt_shadow_slot, w = noise3d_slot
+    float inv_view[16]{};           // column-major: PSP view (+Y up) -> world space (cm)
+    float env_time[4]{};            // x = elapsed_sec, y = cam_world_y, z = vapor_strength, w = has_inv_view
 };
-static_assert(sizeof(LightingComputeParams) == 336);
+static_assert(sizeof(LightingComputeParams) == 416);
 
 struct alignas(16) TaaComputeParams {
     float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
@@ -131,7 +133,8 @@ public:
                   std::uint32_t hdr_input_slot = 0, std::uint32_t gbuf_normal_slot = 0,
                   VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0,
                   std::uint32_t shadow_map_slot = 0, const float *shadow_from_view = nullptr,
-                  std::uint32_t rt_shadow_slot = 0);
+                  std::uint32_t rt_shadow_slot = 0, const float *view_mat = nullptr,
+                  float elapsed_sec = 0.0f);
 
     // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
     // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.
@@ -169,6 +172,7 @@ public:
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
+    bool ensure_noise3d(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc);
     bool ensure_taa_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
     VkDescriptorSet get_or_bind_scene_set(const Context &ctx, VkImageView scene_color_view);
     void fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept;
@@ -225,6 +229,9 @@ private:
     Target2D flash_tex_;      // 4x2 RGBA16F (coarse dynamic emissive flash light-field)
     Target2D lit_tmp_tex_;    // full-res RGBA8 (composite output -> FXAA input)
     Target2D exposure_tex_;   // 1x1 R16F persistent adaptive eye exposure
+    Target2D noise3d_tex_;    // 256x128 R8_UNORM (8x4 tile atlas of 32x32x32 Perlin-Worley vapor noise, 32 KB)
+    VkBuffer noise3d_stage_buf_ = VK_NULL_HANDLE;
+    VmaAllocation noise3d_stage_alloc_ = VK_NULL_HANDLE;
     bool exposure_reset_ = true;
     bool exposure_initialized_ = false;
     std::array<Target2D, 2> taa_hist_{}; // full-res RGBA8 ping-pong TAA history

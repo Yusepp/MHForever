@@ -235,6 +235,12 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     flash_tex_.destroy(ctx, desc);
     lit_tmp_tex_.destroy(ctx, desc);
     exposure_tex_.destroy(ctx, desc);
+    noise3d_tex_.destroy(ctx, desc);
+    if (noise3d_stage_buf_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(ctx.allocator, noise3d_stage_buf_, noise3d_stage_alloc_);
+        noise3d_stage_buf_ = VK_NULL_HANDLE;
+        noise3d_stage_alloc_ = VK_NULL_HANDLE;
+    }
     exposure_initialized_ = false;
     exposure_reset_ = true;
     taa_hist_[0].destroy(ctx, desc);
@@ -624,6 +630,119 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.ext_slots[2] = static_cast<std::uint32_t>(active_biome_);
 }
 
+bool LightingPipeline::ensure_noise3d(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc) {
+    if (noise3d_tex_.image != VK_NULL_HANDLE && noise3d_tex_.slot != 0u) return true;
+    // Generate a tileable 32x32x32 3D Perlin-Worley vapor noise volume packed into a 256x128 (8x4) R8_UNORM atlas (32 KB).
+    constexpr std::uint32_t kN = 32u;
+    constexpr std::uint32_t kCols = 8u;
+    constexpr std::uint32_t kRows = 4u;
+    constexpr std::uint32_t kAtlasW = kN * kCols;
+    constexpr std::uint32_t kAtlasH = kN * kRows;
+    constexpr VkDeviceSize kBytes = kAtlasW * kAtlasH;
+
+    auto hash3 = [](int x, int y, int z, int period) noexcept -> float {
+        const int px = ((x % period) + period) % period;
+        const int py = ((y % period) + period) % period;
+        const int pz = ((z % period) + period) % period;
+        std::uint32_t h = static_cast<std::uint32_t>(px * 374761393 + py * 668265263 + pz * 2147483647);
+        h = (h ^ (h >> 13u)) * 1274126177u;
+        return static_cast<float>((h ^ (h >> 16u)) & 0xFFFFu) / 65535.0f;
+    };
+    auto smooth_vnoise = [&](float fx, float fy, float fz, int period) noexcept -> float {
+        const float sx = fx * static_cast<float>(period);
+        const float sy = fy * static_cast<float>(period);
+        const float sz = fz * static_cast<float>(period);
+        const int x0 = static_cast<int>(std::floor(sx));
+        const int y0 = static_cast<int>(std::floor(sy));
+        const int z0 = static_cast<int>(std::floor(sz));
+        float tx = sx - static_cast<float>(x0); tx = tx * tx * (3.0f - 2.0f * tx);
+        float ty = sy - static_cast<float>(y0); ty = ty * ty * (3.0f - 2.0f * ty);
+        float tz = sz - static_cast<float>(z0); tz = tz * tz * (3.0f - 2.0f * tz);
+        auto mixf = [](float a, float b, float t) noexcept { return a + (b - a) * t; };
+        const float c000 = hash3(x0, y0, z0, period),     c100 = hash3(x0 + 1, y0, z0, period);
+        const float c010 = hash3(x0, y0 + 1, z0, period), c110 = hash3(x0 + 1, y0 + 1, z0, period);
+        const float c001 = hash3(x0, y0, z0 + 1, period), c101 = hash3(x0 + 1, y0, z0 + 1, period);
+        const float c011 = hash3(x0, y0 + 1, z0 + 1, period), c111 = hash3(x0 + 1, y0 + 1, z0 + 1, period);
+        const float c00 = mixf(c000, c100, tx), c10 = mixf(c010, c110, tx);
+        const float c01 = mixf(c001, c101, tx), c11 = mixf(c011, c111, tx);
+        return mixf(mixf(c00, c10, ty), mixf(c01, c11, ty), tz);
+    };
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, kBytes,
+                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+    VmaAllocationCreateInfo bvaci{};
+    bvaci.usage = VMA_MEMORY_USAGE_AUTO;
+    bvaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo binfo{};
+    if (vmaCreateBuffer(ctx.allocator, &bci, &bvaci, &noise3d_stage_buf_, &noise3d_stage_alloc_, &binfo) != VK_SUCCESS ||
+        !binfo.pMappedData) {
+        return false;
+    }
+    auto *dst = static_cast<std::uint8_t *>(binfo.pMappedData);
+    for (std::uint32_t z = 0u; z < kN; ++z) {
+        const std::uint32_t tx = (z % kCols) * kN;
+        const std::uint32_t ty = (z / kCols) * kN;
+        const float fz = (static_cast<float>(z) + 0.5f) / static_cast<float>(kN);
+        for (std::uint32_t y = 0u; y < kN; ++y) {
+            const float fy = (static_cast<float>(y) + 0.5f) / static_cast<float>(kN);
+            for (std::uint32_t x = 0u; x < kN; ++x) {
+                const float fx = (static_cast<float>(x) + 0.5f) / static_cast<float>(kN);
+                // 3-octave tileable FBM cloud/vapor density.
+                const float n = smooth_vnoise(fx, fy, fz, 4) * 0.55f +
+                                smooth_vnoise(fx, fy, fz, 8) * 0.30f +
+                                smooth_vnoise(fx, fy, fz, 16) * 0.15f;
+                const float shaped = std::clamp((n - 0.18f) * 1.45f, 0.0f, 1.0f);
+                dst[(ty + y) * kAtlasW + (tx + x)] = static_cast<std::uint8_t>(std::lround(shaped * 255.0f));
+            }
+        }
+    }
+
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, nullptr};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8_UNORM;
+    ici.extent = {kAtlasW, kAtlasH, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VmaAllocationCreateInfo ivaci{};
+    ivaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(ctx.allocator, &ici, &ivaci, &noise3d_tex_.image, &noise3d_tex_.alloc, nullptr) != VK_SUCCESS) {
+        return false;
+    }
+    VkImageViewCreateInfo ivci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, nullptr};
+    ivci.image = noise3d_tex_.image;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_R8_UNORM;
+    ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(ctx.device, &ivci, nullptr, &noise3d_tex_.view) != VK_SUCCESS) {
+        noise3d_tex_.destroy(ctx, desc);
+        return false;
+    }
+    noise3d_tex_.w = kAtlasW;
+    noise3d_tex_.h = kAtlasH;
+    noise3d_tex_.slot = desc.allocate_texture(ctx, noise3d_tex_.view);
+    if (noise3d_tex_.slot == 0u) {
+        noise3d_tex_.destroy(ctx, desc);
+        return false;
+    }
+
+    Context::cmd_transition_image(cmd, noise3d_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {kAtlasW, kAtlasH, 1};
+    vkCmdCopyBufferToImage(cmd, noise3d_stage_buf_, noise3d_tex_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    Context::cmd_transition_image(cmd, noise3d_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    return true;
+}
+
 bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                                 VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
@@ -631,9 +750,10 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot,
                                 VkDeviceAddress lights_bda, std::uint32_t light_count,
                                 std::uint32_t shadow_map_slot, const float *shadow_from_view,
-                                std::uint32_t rt_shadow_slot) {
+                                std::uint32_t rt_shadow_slot, const float *view_mat, float elapsed_sec) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
+    ensure_noise3d(cmd, ctx, desc);
 
     VkDescriptorSet scene_set = get_or_bind_scene_set(ctx, scene_color_view);
 
@@ -697,7 +817,32 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.shadow_info[1] = 0u;
     }
     base.shadow_info[2] = rt_shadow_slot;
-    base.shadow_info[3] = 0u;
+    base.shadow_info[3] = noise3d_tex_.slot;
+    if (view_mat != nullptr) {
+        // Rigid column-major inverse: [R | t; 0 1] -> [R^T | -R^T t; 0 1]
+        base.inv_view[0] = view_mat[0]; base.inv_view[1] = view_mat[4]; base.inv_view[2]  = view_mat[8];  base.inv_view[3]  = 0.0f;
+        base.inv_view[4] = view_mat[1]; base.inv_view[5] = view_mat[5]; base.inv_view[6]  = view_mat[9];  base.inv_view[7]  = 0.0f;
+        base.inv_view[8] = view_mat[2]; base.inv_view[9] = view_mat[6]; base.inv_view[10] = view_mat[10]; base.inv_view[11] = 0.0f;
+        const float tx = view_mat[12], ty = view_mat[13], tz = view_mat[14];
+        base.inv_view[12] = -(view_mat[0] * tx + view_mat[1] * ty + view_mat[2] * tz);
+        base.inv_view[13] = -(view_mat[4] * tx + view_mat[5] * ty + view_mat[6] * tz);
+        base.inv_view[14] = -(view_mat[8] * tx + view_mat[9] * ty + view_mat[10] * tz);
+        base.inv_view[15] = 1.0f;
+        base.env_time[0] = elapsed_sec;
+        base.env_time[1] = base.inv_view[13]; // camera world Y (cm)
+        // Stronger billowing vapor in Swamp, Great Forest, Jungle, Snowy Peak & Caves; subtle in dry Desert.
+        float vstr = 0.70f;
+        if (active_biome_ == BiomeKind::Swamp) vstr = 1.25f;
+        else if (active_biome_ == BiomeKind::GreatForest || active_biome_ == BiomeKind::Jungle) vstr = 0.95f;
+        else if (active_biome_ == BiomeKind::SnowyPeak || active_biome_ == BiomeKind::PokkeVillage) vstr = 0.80f;
+        else if (active_biome_ == BiomeKind::DesertSandstorm) vstr = 1.15f;
+        else if (active_biome_ == BiomeKind::Desert) vstr = 0.45f;
+        base.env_time[2] = vstr;
+        base.env_time[3] = 1.0f;
+    } else {
+        base.env_time[0] = elapsed_sec;
+        base.env_time[3] = 0.0f;
+    }
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;

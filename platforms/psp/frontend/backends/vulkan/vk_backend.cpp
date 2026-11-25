@@ -1452,7 +1452,10 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     dp.jitter_and_lod[0] = jitter_ndc_x;
     dp.jitter_and_lod[1] = jitter_ndc_y;
     dp.jitter_and_lod[2] = mip_lod_bias;
-    dp.jitter_and_lod[3] = 0.0f;
+    dp.jitter_and_lod[3] = (fog && want_vk_effect(LiveSettings::kVkEffectFroxelFog) &&
+                            want_vk_effect(LiveSettings::kVkEffectVolumetricFog))
+                               ? 1.0f
+                               : 0.0f;
     if (textured && !clear && !setup.through && want_vk_effect(LiveSettings::kVkEffectPbrMaterials) &&
         (setup.pbr_slots.normal_slot != 0u || setup.pbr_slots.rough_metal_slot != 0u ||
          setup.pbr_slots.emissive_slot != 0u)) {
@@ -3191,10 +3194,12 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
                 shadow_slot = sun_shadows_.map_slot();
             }
         }
+        const float elapsed_sec = static_cast<float>(frame_number_) * (1.0f / 30.0f);
         if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
                                rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address, want_fxaa,
                                hdr_slot, 0u, lights_bda, light_cnt, shadow_slot,
-                               shadow_slot != 0u ? shadow_from_view : nullptr, rt_slot)) {
+                               shadow_slot != 0u ? shadow_from_view : nullptr, rt_slot,
+                               view_mat != nullptr ? view_mat->data() : nullptr, elapsed_sec)) {
             rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
         }
     } else if (want_fxaa) {

@@ -167,7 +167,13 @@ void main() {
             }
         }
         if ((bits & 0x80u) != 0u) {
-            c.rgb = mix(p.fog_and_zmin.rgb, c.rgb, clamp(v_fog, 0.0, 1.0));
+            float f = clamp(v_fog, 0.0, 1.0);
+            if (p.jitter_and_lod.w > 0.5) {
+                // Soften flat PSP near/mid vertex fog when 3D volumetric vapor fog is active,
+                // while preserving seamless far-horizon fade (f -> 0).
+                f = pow(f, 0.42);
+            }
+            c.rgb = mix(p.fog_and_zmin.rgb, c.rgb, f);
         }
         if (kSpecAlphaTest != 0u) {
             uint af = p.alpha_bits & 7u;
