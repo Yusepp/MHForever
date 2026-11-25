@@ -353,6 +353,7 @@ private:
         std::vector<std::array<float, 8>> viewports;
         std::vector<std::uint32_t> draw_raw_start;
         std::vector<std::uint32_t> draw_raw_count;
+        std::vector<std::uint8_t> draw_rt_flags; // bit0 = rt_caster, bit1 = dynamic (skinned or non-identity world)
         std::vector<vk::RawGpuVertex> raw_verts;
         std::vector<GpuVertex> flat_verts;
         std::vector<RecordedBatch> batches;
@@ -374,6 +375,7 @@ private:
             viewports.clear();
             draw_raw_start.clear();
             draw_raw_count.clear();
+            draw_rt_flags.clear();
             raw_verts.clear();
             flat_verts.clear();
             batches.clear();
@@ -1926,12 +1928,17 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
     cur_snap_.viewports.push_back(draw.viewport);
     cur_snap_.draw_raw_start.push_back(static_cast<std::uint32_t>(cur_snap_.raw_verts.size()));
     cur_snap_.draw_raw_count.push_back(0u);
+    cur_snap_.draw_rt_flags.push_back(0u);
     cur_draw_eligible_ = next_eligible;
 }
 
 void VkBackend::triangle_unclipped(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Vertex &b, const gpu::Vertex &c) {
     if (subframes_ <= 1 || !cur_draw_eligible_ || cur_snap_.summaries.empty()) return;
     apply_state(ge);
+    if (setup_is_rt_caster_ && !cur_snap_.draw_rt_flags.empty()) {
+        cur_snap_.draw_rt_flags.back() |=
+            static_cast<std::uint8_t>(1u | ((setup_.is_skinned || !setup_rt_world_identity_) ? 2u : 0u));
+    }
     auto &sum = cur_snap_.summaries.back();
     auto push_raw = [&](const gpu::Vertex &v) {
         if (v.has_world) {
@@ -3550,32 +3557,76 @@ void VkBackend::render_interpolated_subframe(float phase) {
     }
     if (have_interp_view) {
         if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing)) {
-            const auto &old_dyn = blend_older_.rt_dyn_verts;
-            const auto &new_dyn = blend_newer_.rt_dyn_verts;
-            const std::vector<vk::RtVertex> *dyn_ptr = &old_dyn;
-            if (scene_phase > 0.001f && !old_dyn.empty() && old_dyn.size() == new_dyn.size()) {
-                const std::size_t n = old_dyn.size();
-                interp_rt_dyn_verts_.resize(n);
-                const float inv_p = 1.0f - scene_phase;
-                for (std::size_t i = 0; i < n; ++i) {
-                    const float dx = new_dyn[i].x - old_dyn[i].x;
-                    const float dy = new_dyn[i].y - old_dyn[i].y;
-                    const float dz = new_dyn[i].z - old_dyn[i].z;
-                    // Guard against sudden teleports/camera cuts (> 150 cm in 1/30s).
-                    if (dx * dx + dy * dy + dz * dz < 150.0f * 150.0f) {
-                        interp_rt_dyn_verts_[i] = {
-                            old_dyn[i].x * inv_p + new_dyn[i].x * scene_phase,
-                            old_dyn[i].y * inv_p + new_dyn[i].y * scene_phase,
-                            old_dyn[i].z * inv_p + new_dyn[i].z * scene_phase,
-                        };
+            // Build per-draw interpolated Dynamic BLAS directly from unclipped `raw_verts` + `prepared_draws_`
+            // in exact lockstep with `place_v2.comp` (works even when other NPCs enter/leave the frustum!).
+            interp_rt_dyn_verts_.clear();
+            interpolation::Matrix inv_interp_view{interpolation::identity()};
+            const bool have_inv_view = interpolation::affine_inverse(interp_view, inv_interp_view);
+            auto unpack_3x4 = [](const float m[12]) noexcept -> interpolation::Matrix {
+                interpolation::Matrix out{interpolation::identity()};
+                out[0] = m[0]; out[4] = m[1]; out[8]  = m[2];  out[12] = m[3];
+                out[1] = m[4]; out[5] = m[5]; out[9]  = m[6];  out[13] = m[7];
+                out[2] = m[8]; out[6] = m[9]; out[10] = m[10]; out[14] = m[11];
+                return out;
+            };
+            auto xform_pt = [](const interpolation::Matrix &m, const float p[3]) noexcept -> vk::RtVertex {
+                return {
+                    m[0] * p[0] + m[4] * p[1] + m[8]  * p[2] + m[12],
+                    m[1] * p[0] + m[5] * p[1] + m[9]  * p[2] + m[13],
+                    m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+                };
+            };
+            const auto &raw_old = blend_older_.raw_verts;
+            const auto &raw_new = blend_newer_.raw_verts;
+            const auto &rt_flags = blend_older_.draw_rt_flags;
+            const float inv_p = 1.0f - scene_phase;
+            for (std::size_t i = 0; i < ndraws && i < rt_flags.size(); ++i) {
+                if ((rt_flags[i] & 3u) != 3u) continue; // must be opaque RT caster & dynamic
+                const PreparedDraw &pd = prepared_draws_[i];
+                if (!pd.active) continue;
+                const auto &older = blend_older_.summaries[i];
+                // Skip large static non-identity architecture (houses/trees) already in the persistent zone cache;
+                // include all skinned characters/monsters/NPCs AND all moving rigid weapons/props!
+                if (!older.skinned) {
+                    const bool moved_rigid = pd.has_partner && (older.world != blend_newer_.summaries[pd.partner].world);
+                    if (!moved_rigid) continue;
+                }
+                const std::uint32_t vcnt = (blend_older_.draw_raw_count[i] / 3u) * 3u;
+                if (vcnt < 3u || static_cast<std::size_t>(pd.old_start) + vcnt > raw_old.size()) continue;
+                if (interp_rt_dyn_verts_.size() + vcnt > 150000u) break;
+
+                const vk::DrawTransform &tr = transforms[i];
+                const interpolation::Matrix m_old =
+                    have_inv_view ? interpolation::multiply(inv_interp_view, unpack_3x4(tr.mv_old))
+                                  : interpolation::identity();
+                const bool use_pair = !zero_phase && pd.has_vertex_pair &&
+                                      static_cast<std::size_t>(pd.new_start) + vcnt <= raw_new.size();
+                const interpolation::Matrix m_new =
+                    (use_pair && have_inv_view) ? interpolation::multiply(inv_interp_view, unpack_3x4(tr.mv_new))
+                                                : interpolation::identity();
+                for (std::uint32_t k = 0u; k < vcnt; ++k) {
+                    const vk::RtVertex p0 = xform_pt(m_old, raw_old[pd.old_start + k].world_pos);
+                    if (use_pair) {
+                        const vk::RtVertex p1 = xform_pt(m_new, raw_new[pd.new_start + k].world_pos);
+                        const float dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
+                        if (dx * dx + dy * dy + dz * dz < 600.0f * 600.0f) {
+                            interp_rt_dyn_verts_.push_back({
+                                p0.x * inv_p + p1.x * scene_phase,
+                                p0.y * inv_p + p1.y * scene_phase,
+                                p0.z * inv_p + p1.z * scene_phase,
+                            });
+                        } else {
+                            interp_rt_dyn_verts_.push_back(p0);
+                        }
                     } else {
-                        interp_rt_dyn_verts_[i] = old_dyn[i];
+                        interp_rt_dyn_verts_.push_back(p0);
                     }
                 }
-                dyn_ptr = &interp_rt_dyn_verts_;
             }
+            const std::vector<vk::RtVertex> &dyn_ref =
+                !interp_rt_dyn_verts_.empty() ? interp_rt_dyn_verts_ : blend_older_.rt_dyn_verts;
             rt_shadows_.update_bvh(f.cmd, ctx_, frame_slot_, blend_older_.rt_static_verts,
-                                   blend_older_.rt_static_batches, *dyn_ptr, interp_view.data());
+                                   blend_older_.rt_static_batches, dyn_ref, interp_view.data());
             sun_shadows_.invalidate();
         } else if (phase <= 0.0f) {
             rt_shadows_.invalidate();
