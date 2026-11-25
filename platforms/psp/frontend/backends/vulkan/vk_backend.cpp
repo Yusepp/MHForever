@@ -1348,6 +1348,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
     const auto RS = [&](std::uint32_t reg) { return key_reg(setup_.key, reg); };
     setup_is_shadow_caster_ = sun_shadows_.ready() && want_enhanced_3d_hdr() && !lighting_.active_is_cave() &&
                               !setup_.through && (RS(kClearMode) & 1u) == 0 &&
+                              (RS(kZTestEnable) & 1u) != 0 &&
                               (RS(kAlphaBlendEnable) & 1u) == 0 && (RS(kZWriteDisable) & 1u) == 0 &&
                               is_shown_target(setup_.target);
 }
@@ -1732,14 +1733,14 @@ void VkBackend::draw_batch() {
                 // Neutral-white additive bursts (e.g. textured fireballs/explosions) get a natural warm amber tint.
                 cr = 1.00f; cg = 0.72f; cb = 0.42f;
             }
-            const float intensity = std::clamp(0.36f + cmax * 0.34f + sat * 0.25f, 0.36f, 0.88f);
-            const float radius = 260.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 1.1f, 220.0f);
+            const float intensity = std::clamp(0.30f + cmax * 0.28f + sat * 0.20f, 0.30f, 0.72f);
+            const float radius = 250.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 1.0f, 200.0f);
             bool merged = false;
             for (auto &ex : cur_vfx_lights_) {
                 const float dx = ex.world_pos[0] - cx;
                 const float dy = ex.world_pos[1] - cy;
                 const float dz = ex.world_pos[2] - cz;
-                if (dx * dx + dy * dy + dz * dz < 85.0f * 85.0f) {
+                if (dx * dx + dy * dy + dz * dz < 160.0f * 160.0f) {
                     ex.world_pos[0] = 0.5f * (ex.world_pos[0] + cx);
                     ex.world_pos[1] = 0.5f * (ex.world_pos[1] + cy);
                     ex.world_pos[2] = 0.5f * (ex.world_pos[2] + cz);
