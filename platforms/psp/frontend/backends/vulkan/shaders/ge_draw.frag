@@ -169,9 +169,9 @@ void main() {
         if ((bits & 0x80u) != 0u) {
             float f = clamp(v_fog, 0.0, 1.0);
             if (p.jitter_and_lod.w > 0.5) {
-                // Soften flat PSP near/mid vertex fog when 3D volumetric vapor fog is active,
-                // while preserving seamless far-horizon fade (f -> 0).
-                f = pow(f, 0.42);
+                // Replace flat near/mid PSP vertex fog with our real 3D volumetric vapor fog,
+                // keeping only the very far horizon seam fade (f < 0.22).
+                f = smoothstep(0.0, 0.22, f);
             }
             c.rgb = mix(p.fog_and_zmin.rgb, c.rgb, f);
         }

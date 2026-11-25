@@ -830,13 +830,15 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.inv_view[15] = 1.0f;
         base.env_time[0] = elapsed_sec;
         base.env_time[1] = base.inv_view[13]; // camera world Y (cm)
-        // Stronger billowing vapor in Swamp, Great Forest, Jungle, Snowy Peak & Caves; subtle in dry Desert.
-        float vstr = 0.70f;
-        if (active_biome_ == BiomeKind::Swamp) vstr = 1.25f;
-        else if (active_biome_ == BiomeKind::GreatForest || active_biome_ == BiomeKind::Jungle) vstr = 0.95f;
-        else if (active_biome_ == BiomeKind::SnowyPeak || active_biome_ == BiomeKind::PokkeVillage) vstr = 0.80f;
-        else if (active_biome_ == BiomeKind::DesertSandstorm) vstr = 1.15f;
-        else if (active_biome_ == BiomeKind::Desert) vstr = 0.45f;
+        // Per-biome 3D billowing vapor intensity (strongest in Swamp/Sandstorm/Forest, crisp & light in Pokke).
+        float vstr = 0.45f;
+        if (active_biome_ == BiomeKind::Swamp) vstr = 1.65f;
+        else if (active_biome_ == BiomeKind::DesertSandstorm) vstr = 1.50f;
+        else if (active_biome_ == BiomeKind::GreatForest || active_biome_ == BiomeKind::Jungle) vstr = 1.05f;
+        else if (active_biome_ == BiomeKind::SnowyPeak) vstr = 0.75f;
+        else if (active_biome_ == BiomeKind::PokkeVillage) vstr = 0.35f;
+        else if (active_biome_ == BiomeKind::IceCave || active_biome_ == BiomeKind::DarkCave) vstr = 0.90f;
+        else if (active_biome_ == BiomeKind::Desert) vstr = 0.25f;
         base.env_time[2] = vstr;
         base.env_time[3] = 1.0f;
     } else {
