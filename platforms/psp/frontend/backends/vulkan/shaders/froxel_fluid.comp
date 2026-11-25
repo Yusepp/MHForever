@@ -96,17 +96,17 @@ void main() {
         float speed = p.actors[i].vel_pad.w; // cm/s
         float move_k = clamp(speed / 120.0, 0.15, 2.5);
 
-        // Inner body footprint: physically parts the ground mist down to clear air!
-        float inner = 1.0 - smoothstep(rad * 0.25, rad * 1.05, dist);
-        // Outer displaced collar: mist pushed aside billows higher and swirls outward!
-        float rim = smoothstep(rad * 0.45, rad * 1.15, dist) * (1.0 - smoothstep(rad * 1.15, rad * 2.25, dist));
+        // Inner body footprint: cleanly parts the ground mist right around boots/body (even while standing!).
+        float inner = 1.0 - smoothstep(rad * 0.30, rad * 1.15, dist);
+        // Outer displaced collar: pushed-aside mist swirls outward in a ring outside the hunter!
+        float rim = smoothstep(rad * 0.95, rad * 1.45, dist) * (1.0 - smoothstep(rad * 1.45, rad * 2.35, dist));
 
-        float part_strength = clamp(inner * (0.62 + 0.38 * move_k), 0.0, 0.94);
+        float part_strength = clamp(inner * (0.85 + 0.15 * move_k), 0.0, 0.96);
         state.b = min(state.b, 1.0 - part_strength);
-        state.a = clamp(state.a + rim * (0.35 + 0.45 * move_k) * clamp(dt * 12.0, 0.15, 1.0), 0.0, 1.25);
+        state.a = clamp(state.a + rim * (0.20 + 0.45 * clamp(speed / 140.0, 0.0, 1.5)) * clamp(dt * 10.0, 0.12, 1.0), 0.0, 0.85);
 
-        // Outward radial blast + forward drag velocity for visible swirling curls!
-        vec2 push_v = dir * (18.0 * move_k * (inner + rim * 0.8)) + avel_tex * (0.45 * inner);
+        // Outward radial push + trailing slipstream velocity for visible swirling vapor curls!
+        vec2 push_v = dir * (22.0 * move_k * (inner * 0.6 + rim)) + avel_tex * (0.55 * inner);
         state.rg = clamp(state.rg + push_v * clamp(dt * 10.0, 0.12, 1.0), vec2(-42.0), vec2(42.0));
     }
 

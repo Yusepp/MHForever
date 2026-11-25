@@ -417,120 +417,104 @@ void main() {
                 }
             }
         }
-    }
 
-    // 5a. Ocarina-of-Time-Remake / Adam Myhre Full-Res Interactive Ground-Mist Blanket:
-    //     Analytically intersects the ray with the world-locked ground mist slab [floor_y - 25, floor_y + 150 cm],
-    //     marching 8 jittered steps ONLY inside the slab (early-outs in 1 instruction on sky/canopy!).
-    //     Driven by the 128x128 semi-Lagrangian fluid sim (u_ground_fluid) so walking, rolling, and monster
-    //     charges physically part & swirl the waist-high billowing mist around boots and tree trunks!
-    if ((p.ext_slots.w & 32u) != 0u && p.env_time.w > 0.5 && p.ground_fog_info.w > 1.0 && p.env_time.z > 0.42) {
-        vec2 ndc_g = uv * 2.0 - 1.0;
-        vec3 ray_psp = normalize(vec3(ndc_g.x * p.proj_info.x, -ndc_g.y * p.proj_info.y, -1.0));
-        vec3 cam_w = p.inv_view[3].xyz;
-        vec3 ray_w = normalize(mat3(p.inv_view) * ray_psp);
-        float max_t = is_sky ? 2100.0 : (z_eye / max(-ray_psp.z, 0.05));
+        // 5a. Ocarina-of-Time-Remake / OddPotatoDev Terrain-Conforming Multi-Layer Parallax Ground Mist
+        //     + Adam Myhre 128x128 Interactive Semi-Lagrangian Fluid Wakes:
+        //     - Follows EVERY terrain slope, hill, path, AND distant lake (zero flat-plane cutoff!).
+        //     - 5 true 3D world-space parallax layers (8..78 cm above ground) with domain-warped wispy vapor
+        //       ribbons and real transparent gaps showing grass, mud & water underneath!
+        //     - Fluid velocity warps the vapor curls & cleanly parts a swirling trail behind hunter & monsters!
+        if ((p.ext_slots.w & 32u) != 0u && p.env_time.w > 0.5 && p.ground_fog_info.w > 1.0 && p.env_time.z > 0.42) {
+            vec3 P_psp_surf = vec3(P.x, -P.y, P.z);
+            vec3 P_world = (p.inv_view * vec4(P_psp_surf, 1.0)).xyz;
+            vec3 N_world = normalize(mat3(p.inv_view) * vec3(N.x, -N.y, N.z));
+            vec3 cam_w = p.inv_view[3].xyz;
+            vec3 to_surf = P_world - cam_w;
+            float surf_dist = length(to_surf);
 
-        float floor_y = p.ground_fog_info.y;
-        float y_bot = floor_y - 28.0;
-        float y_top = floor_y + 152.0;
+            // Conforms to all walkable/water surfaces (hills, slopes, lakes) + wraps around knee-high trunks/boots!
+            float floor_y = p.ground_fog_info.y;
+            float slope_mask = smoothstep(0.32, 0.72, N_world.y);
+            float near_ground_obj = (1.0 - smoothstep(floor_y + 10.0, floor_y + 82.0, P_world.y))
+                                  * smoothstep(floor_y - 35.0, floor_y - 4.0, P_world.y);
+            float surf_mask = max(slope_mask, near_ground_obj * 0.85);
+            float dist_mask = smoothstep(65.0, 150.0, surf_dist) * (1.0 - smoothstep(1450.0, 2250.0, surf_dist));
 
-        float t_enter = 1e9;
-        float t_exit = -1e9;
-        if (abs(ray_w.y) > 1e-4) {
-            float t0 = (y_bot - cam_w.y) / ray_w.y;
-            float t1 = (y_top - cam_w.y) / ray_w.y;
-            t_enter = min(t0, t1);
-            t_exit  = max(t0, t1);
-        } else if (cam_w.y >= y_bot && cam_w.y <= y_top) {
-            t_enter = 35.0;
-            t_exit  = max_t;
-        }
-        t_enter = max(t_enter, 35.0);
-        t_exit  = min(t_exit, min(max_t, 1950.0));
+            if (surf_mask > 0.02 && dist_mask > 0.01 && surf_dist > 10.0) {
+                vec3 ray_w = to_surf / surf_dist;
+                float inv_vy = 1.0 / max(abs(ray_w.y), 0.34);
 
-        if (t_exit > t_enter + 4.0) {
-            const int kSteps = 8;
-            float dt = (t_exit - t_enter) / float(kSteps);
-            float j = ign(vec2(ip) + vec2(p.sun_screen.w * 1.7, p.sun_screen.w * 2.9));
-            float t_cur = t_enter + dt * j;
+                vec2 orig_xz = p.ground_fog_info.xz;
+                float inv_wsize = 1.0 / p.ground_fog_info.w;
+                float t_wind = p.env_time.x * 0.032;
+                float vstr = clamp((p.env_time.z - 0.35) * 0.90, 0.0, 1.35);
+                vec3 fog_lin = srgb_to_linear_hdr(p.fog_color.rgb);
+                vec3 scat_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
+                vec3 mist_shadow = fog_lin * 0.55;
+                vec3 mist_crest  = fog_lin * 1.75 + vec3(0.11, 0.14, 0.17);
 
-            vec2 orig_xz = p.ground_fog_info.xz;
-            float inv_wsize = 1.0 / p.ground_fog_info.w;
-            float t_wind = p.env_time.x * 0.022;
-            float vstr = clamp((p.env_time.z - 0.35) * 0.95, 0.0, 1.45);
-            vec3 fog_lin = srgb_to_linear_hdr(p.fog_color.rgb);
-            vec3 scat_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
-            vec3 shadow_mist = fog_lin * 0.42;
-            vec3 crest_mist  = fog_lin * 1.62 + vec3(0.08, 0.11, 0.14);
+                float rt_sun = 1.0;
+                if (p.shadow_info.z != 0u && !is_cave) {
+                    rt_sun = texture(sampler2D(u_textures[p.shadow_info.z], u_samplers[p.aux_slots.y]), uv).a;
+                }
+                uint nslot = p.shadow_info.w;
+                uint lsamp = p.aux_slots.y;
+                float j = ign(vec2(ip) + vec2(p.sun_screen.w * 1.3, p.sun_screen.w * 2.1));
 
-            // Sample RT god-ray visibility once per pixel to carve crisp light shafts across the rolling mist!
-            float rt_sun = 1.0;
-            if (p.shadow_info.z != 0u && !is_cave) {
-                rt_sun = texture(sampler2D(u_textures[p.shadow_info.z], u_samplers[p.aux_slots.y]), uv).a;
+                const int kLayers = 5;
+                vec3 g_scatter = vec3(0.0);
+                float g_trans = 1.0;
+
+                for (int li = 0; li < kLayers; ++li) {
+                    float lf = (float(li) + 0.35 + j * 0.30) / float(kLayers);
+                    float h_cm = 8.0 + lf * 72.0;
+                    float t_off = min(h_cm * inv_vy, surf_dist * 0.42);
+                    vec3 Q = P_world - ray_w * t_off;
+
+                    vec2 fuv = (Q.xz - orig_xz) * inv_wsize;
+                    vec4 fl = vec4(0.0, 0.0, 1.0, 0.0);
+                    if (fuv.x > 0.005 && fuv.x < 0.995 && fuv.y > 0.005 && fuv.y < 0.995) {
+                        vec2 edge = min(fuv, 1.0 - fuv);
+                        float em = smoothstep(0.005, 0.06, min(edge.x, edge.y));
+                        fl = mix(fl, texture(u_ground_fluid, fuv), em);
+                    }
+                    vec2 fvel = fl.rg;
+                    float wake_open = clamp(fl.b, 0.02, 1.0);
+                    float rim_boost = clamp(fl.a, 0.0, 1.0);
+
+                    vec2 Q_xz = Q.xz - fvel * (2.2 + lf * 2.0);
+                    float wisp = 0.0;
+                    if (nslot != 0u) {
+                        float z_slice = lf * 0.35 + t_wind * 0.18;
+                        vec3 p_warp = vec3(Q_xz.x * 0.00085 + t_wind * 0.42, z_slice, Q_xz.y * 0.00085 + t_wind * 0.25);
+                        float wx = sample_vapor_noise(nslot, lsamp, p_warp) - 0.5;
+                        float wz = sample_vapor_noise(nslot, lsamp, p_warp + vec3(0.37, 0.19, 0.61)) - 0.5;
+                        vec2 warped_xz = Q_xz + vec2(wx, wz) * 260.0;
+
+                        float n_base = sample_vapor_noise(nslot, lsamp,
+                            vec3(warped_xz.x * 0.00105 + t_wind * 0.55, z_slice + 0.12, warped_xz.y * 0.00105 - t_wind * 0.30));
+                        float n_fine = sample_vapor_noise(nslot, lsamp,
+                            vec3(warped_xz.x * 0.00285 - t_wind * 0.90, z_slice + 0.45, warped_xz.y * 0.00285 + t_wind * 0.65));
+
+                        float raw_w = n_base * 0.62 + n_fine * 0.38;
+                        float thresh_lo = 0.38 + lf * 0.14;
+                        wisp = smoothstep(thresh_lo, thresh_lo + 0.34, raw_w);
+                    }
+
+                    float layer_env = (1.0 - lf * 0.55) * surf_mask * dist_mask;
+                    float alpha = clamp((wisp * wake_open + rim_boost * wisp * 0.45) * layer_env * 0.34 * vstr, 0.0, 0.62);
+
+                    if (alpha > 0.002) {
+                        float lit = clamp(0.28 + 0.72 * lf * (0.50 + 0.50 * rt_sun) + rim_boost * 0.16, 0.0, 1.2);
+                        vec3 lcol = mix(mist_shadow, mist_crest, clamp(lit, 0.0, 1.0))
+                                  + scat_lin * (rt_sun * lf * p.scatter_color.a * 0.35);
+                        g_scatter += g_trans * lcol * alpha;
+                        g_trans *= (1.0 - alpha);
+                        if (g_trans < 0.18) break;
+                    }
+                }
+                col_lin = col_lin * g_trans + g_scatter;
             }
-            float cos_sun = clamp(dot(ray_psp, vec3(p.sun_dir_view.x, -p.sun_dir_view.y, p.sun_dir_view.z)), -1.0, 1.0);
-            float silver = pow(clamp(cos_sun * 0.5 + 0.5, 0.0, 1.0), 4.0) * (is_cave ? 0.0 : 0.45);
-
-            vec3 g_scatter = vec3(0.0);
-            float g_trans = 1.0;
-            uint nslot = p.shadow_info.w;
-            uint lsamp = p.aux_slots.y;
-
-            for (int s = 0; s < kSteps; ++s) {
-                vec3 Q = cam_w + ray_w * t_cur;
-
-                // Sample world-locked 128x128 interactive fluid simulation (hunter + monster wakes!).
-                vec2 fuv = (Q.xz - orig_xz) * inv_wsize;
-                vec4 fl = vec4(0.0, 0.0, 1.0, 0.0);
-                if (fuv.x > 0.005 && fuv.x < 0.995 && fuv.y > 0.005 && fuv.y < 0.995) {
-                    vec2 edge = min(fuv, 1.0 - fuv);
-                    float em = smoothstep(0.005, 0.06, min(edge.x, edge.y));
-                    fl = mix(fl, texture(u_ground_fluid, fuv), em);
-                }
-                vec2 fvel = fl.rg;
-                float wake_open = clamp(fl.b, 0.04, 1.0);
-                float rim_boost = clamp(fl.a, 0.0, 1.2);
-
-                // Warp world coordinates by fluid velocity so the mist billows physically curl around wakes!
-                vec2 Q_xz = Q.xz - fvel * 2.6;
-                float n1 = 0.5, n2 = 0.5;
-                if (nslot != 0u) {
-                    vec3 uvw1 = vec3(Q_xz.x * 0.00052 + t_wind * 0.45, (Q.y - floor_y) * 0.0018, Q_xz.y * 0.00052 + t_wind * 0.28);
-                    vec3 uvw2 = vec3(Q_xz.x * 0.00145 - t_wind * 0.85, (Q.y - floor_y) * 0.0032 + t_wind * 0.12, Q_xz.y * 0.00145 + t_wind * 0.65);
-                    n1 = sample_vapor_noise(nslot, lsamp, uvw1);
-                    n2 = sample_vapor_noise(nslot, lsamp, uvw2);
-                }
-                // Sculpted rolling billowing pillows (Ocarina of Time Lost Woods style: thick mounds + clear troughs!).
-                float billow = smoothstep(0.28, 0.80, n1 * 0.64 + n2 * 0.36);
-                float top_y = floor_y + 24.0 + 106.0 * billow + rim_boost * 44.0;
-
-                // Soft fluffy top surface + gentle bottom hug + depth intersection feathering around boots/trunks!
-                float under_top = 1.0 - smoothstep(top_y - 38.0, top_y, Q.y);
-                float above_bot = smoothstep(y_bot, floor_y + 6.0, Q.y);
-                float surf_soft = smoothstep(0.0, 26.0, max_t - t_cur);
-                float dist_fade = 1.0 - smoothstep(1250.0, 1950.0, t_cur);
-
-                float local_d = under_top * above_bot * surf_soft * dist_fade * (0.28 + 0.72 * billow) * wake_open;
-                // Push extra wispy density into the displaced wake collar so parted trails have bright curling rims!
-                local_d += rim_boost * under_top * above_bot * surf_soft * 0.35;
-
-                float sigma = local_d * 0.0052 * vstr;
-                if (sigma > 1e-5) {
-                    // Self-shadowed crest lighting: glowing moonlit/sunlit tops, deep moody mud-hugging bellies!
-                    float h_frac = clamp((Q.y - floor_y) / max(top_y - floor_y, 20.0), 0.0, 1.0);
-                    float lit_k = clamp(0.22 + 0.78 * h_frac * (0.55 + 0.45 * rt_sun) + rim_boost * 0.18, 0.0, 1.25);
-                    vec3 mist_col = mix(shadow_mist, crest_mist, clamp(lit_k, 0.0, 1.0))
-                                  + scat_lin * (silver * rt_sun * h_frac * p.scatter_color.a * 0.85);
-
-                    float step_t = exp(-sigma * dt);
-                    g_scatter += g_trans * mist_col * (1.0 - step_t);
-                    g_trans *= step_t;
-                    if (g_trans < 0.08) break;
-                }
-                t_cur += dt;
-            }
-            col_lin = col_lin * g_trans + g_scatter;
         }
     }
 

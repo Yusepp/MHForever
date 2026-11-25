@@ -142,12 +142,12 @@ void main() {
     float billow = smoothstep(0.42, 0.78, raw_cloud);
     billow = billow * billow * (3.0 - 2.0 * billow);
 
-    // Keep the 3D froxel volume light & atmospheric (valley haze + RT god-rays + point lights),
-    // leaving the dense waist-high billowing mist blanket to the crisp full-res interactive ground-fog slab!
-    float near_fade = smoothstep(near_z, near_z + 180.0, z_jit);
+    // Keep the 3D froxel volume subtle & atmospheric (distant valley haze + RT god-rays + point lights)
+    // so it NEVER washes out the crisp terrain-conforming wispy ground mist blanket!
+    float near_fade = smoothstep(near_z + 120.0, near_z + 520.0, z_jit);
     float vapor_str = p.world_env.z;
-    float base_air = 0.000018 * vapor_str * exp(-max(rel_y, 0.0) / 560.0);
-    float bank_dens = 0.00055 * billow * height_mask * vapor_str;
+    float base_air = 0.000014 * vapor_str * exp(-max(rel_y, 0.0) / 600.0);
+    float bank_dens = 0.00028 * billow * height_mask * vapor_str;
     float sigma_t = (base_air + bank_dens) * near_fade;
 
     // 2. Physical In-Scattering: Beer-Lambert Directional Self-Shadowing + Silver-Lining Sun Shafts + Point Lights!
