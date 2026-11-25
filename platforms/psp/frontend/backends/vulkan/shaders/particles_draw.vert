@@ -54,9 +54,9 @@ void main() {
     }
 
     vec4 view_pos = p.view * vec4(pt.pos_life.xyz, 1.0);
-    // Reject behind camera or too close to near plane (prevents screen-filling blobs!).
+    // Reject behind camera or too close to near plane (prevents giant lens-flare blobs!).
     float dist = -view_pos.z;
-    if (dist < 38.0 || dist > 2600.0) {
+    if (dist < 75.0 || dist > 2600.0) {
         gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
         v_uv = vec2(0.0);
         v_color = vec4(0.0);
@@ -100,7 +100,7 @@ void main() {
     float life_frac = clamp(pt.pos_life.w / max(pt.aux.x, 0.05), 0.0, 1.0);
     float fade_in = smoothstep(1.0, 0.84, life_frac);
     float fade_out = smoothstep(0.0, 0.22, life_frac);
-    float near_fade = smoothstep(38.0, 110.0, dist);
+    float near_fade = smoothstep(75.0, 185.0, dist);
     float far_fade = smoothstep(2500.0, 1400.0, dist);
     // Gentle firefly/ember flicker.
     float pulse = (kind < 0.5) ? (0.72 + 0.28 * sin(p.screen_info.z * 5.2 + pt.aux.y * 3.0)) : 1.0;

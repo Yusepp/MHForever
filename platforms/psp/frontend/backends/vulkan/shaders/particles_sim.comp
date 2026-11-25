@@ -207,27 +207,26 @@ void main() {
             }
             // Spawn within a tight sphere around the emitter (campfire/fireball/hit point).
             vec3 dir = normalize(vec3(rand01(rng) * 2.0 - 1.0, rand01(rng) * 2.0 - 1.0, rand01(rng) * 2.0 - 1.0) + vec3(0.001));
-            float r_off = rand01(rng) * min(em.pos_radius.w * 0.22, 48.0);
+            float r_off = rand01(rng) * min(em.pos_radius.w * 0.14, 28.0);
             pt.pos_life.xyz = em.pos_radius.xyz + dir * r_off;
-            float max_l = 0.55 + rand01(rng) * 1.15;
-            pt.pos_life.w = max_l;
-
-            // Rising embers & outward sparks.
+            // Rising embers & outward sparks (compact physical size so they never turn into huge orbs).
             bool is_spark = (em.color_rate.w > 1.05 && rand01(rng) < 0.55);
-            vec3 v = dir * (is_spark ? (140.0 + rand01(rng) * 220.0) : (25.0 + rand01(rng) * 55.0));
-            v.y += is_spark ? (70.0 + rand01(rng) * 90.0) : (95.0 + rand01(rng) * 110.0);
+            float max_l = is_spark ? (0.35 + rand01(rng) * 0.45) : (0.55 + rand01(rng) * 0.75);
+            pt.pos_life.w = max_l;
+            vec3 v = dir * (is_spark ? (130.0 + rand01(rng) * 210.0) : (14.0 + rand01(rng) * 32.0));
+            v.y += is_spark ? (65.0 + rand01(rng) * 85.0) : (55.0 + rand01(rng) * 70.0);
             pt.vel_size.xyz = v;
-            pt.vel_size.w = is_spark ? (2.6 + rand01(rng) * 2.2) : (2.2 + rand01(rng) * 2.4);
-            pt.color_kind = vec4(em.color_rate.rgb * (1.15 + 0.55 * rand01(rng)), is_spark ? 3.0 : 0.0);
-            pt.aux = vec4(max_l, rand01(rng) * 6.283185, is_spark ? -260.0 : 40.0, 1.0);
+            pt.vel_size.w = is_spark ? (1.5 + rand01(rng) * 1.4) : (1.1 + rand01(rng) * 1.2);
+            pt.color_kind = vec4(em.color_rate.rgb * (1.10 + 0.45 * rand01(rng)), is_spark ? 3.0 : 0.0);
+            pt.aux = vec4(max_l, rand01(rng) * 6.283185, is_spark ? -260.0 : 12.0, 1.0);
             p.particles.items[id] = pt;
             return;
         }
 
         // Integrate emitter particle.
         vec3 curl = curl_wind(pt.pos_life.xyz * 1.8, time * 1.5 + pt.aux.y);
-        pt.vel_size.xyz += (curl * 45.0 + vec3(0.0, pt.aux.z, 0.0)) * dt;
-        pt.vel_size.xyz *= exp(-dt * 1.15);
+        pt.vel_size.xyz += (curl * 32.0 + vec3(0.0, pt.aux.z, 0.0)) * dt;
+        pt.vel_size.xyz *= exp(-dt * 1.85);
         pt.pos_life.xyz += pt.vel_size.xyz * dt;
         pt.pos_life.w -= dt;
         p.particles.items[id] = pt;

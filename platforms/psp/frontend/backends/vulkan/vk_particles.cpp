@@ -56,11 +56,11 @@ BiomeParticlePreset preset_for_biome(BiomeKind b, bool is_cave) noexcept {
     }
     switch (b) {
         case BiomeKind::PokkeVillage:
-            return {{38.0f, -48.0f, 18.0f}, 0.42f, -35.0f, 42.0f, 3.0f,
-                    {0.92f, 0.96f, 1.00f}, {0.78f, 0.88f, 0.98f}, 1.0f, 0.0f, 0.62f};
+            return {{38.0f, -48.0f, 18.0f}, 0.56f, -35.0f, 42.0f, 3.2f,
+                    {0.96f, 0.98f, 1.00f}, {0.82f, 0.91f, 1.00f}, 1.0f, 0.0f, 0.74f};
         case BiomeKind::SnowyPeak:
-            return {{115.0f, -62.0f, 45.0f}, 0.68f, -45.0f, 75.0f, 3.2f,
-                    {0.94f, 0.98f, 1.00f}, {0.80f, 0.90f, 1.00f}, 1.0f, 0.0f, 0.68f};
+            return {{115.0f, -62.0f, 45.0f}, 0.76f, -45.0f, 75.0f, 3.4f,
+                    {0.96f, 0.99f, 1.00f}, {0.84f, 0.92f, 1.00f}, 1.0f, 0.0f, 0.78f};
         case BiomeKind::Volcano:
         case BiomeKind::FortressSiege:
             return {{28.0f, 58.0f, 18.0f}, 0.52f, 38.0f, 65.0f, 3.0f,
