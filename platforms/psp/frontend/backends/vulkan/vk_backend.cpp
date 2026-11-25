@@ -361,6 +361,10 @@ private:
         std::vector<vk::RtVertex> rt_static_verts;
         std::vector<vk::RtStaticBatch> rt_static_batches;
         std::vector<vk::RtVertex> rt_dyn_verts;
+        interpolation::Matrix view_mat{interpolation::identity()};
+        bool has_view_mat = false;
+        vk::LightingFrameInput light_in{};
+        std::vector<SemanticPointLight> vfx_lights;
         void clear() noexcept {
             shown_addr = 0;
             width = 512;
@@ -378,6 +382,10 @@ private:
             rt_static_verts.clear();
             rt_static_batches.clear();
             rt_dyn_verts.clear();
+            view_mat = interpolation::identity();
+            has_view_mat = false;
+            light_in = vk::LightingFrameInput{};
+            vfx_lights.clear();
         }
     };
     struct SnapRawBuf {
@@ -3489,9 +3497,20 @@ void VkBackend::render_interpolated_subframe(float phase) {
     // Update Partitioned RT BVH (static BLAS cached once per zone; dynamic character BLAS smoothly interpolated
     // every subframe at 120/180 Hz so hunter/monster shadows glide with zero 30 Hz vibration!), OR render the
     // 2048x2048 Sun Shadow Map once per 30 Hz game frame (phase <= 0).
+    // IMPORTANT: Always derive `interp_view` and `interp_light_in` from `blend_older_` (NOT `last_view_mat_`!),
+    // so RT world-position reconstruction & lighting match `interp_rt_.depth` identically on every subframe!
+    const bool have_interp_view = blend_older_.has_view_mat;
     const interpolation::Matrix interp_view =
-        (has_last_view_mat_ && has_cam_rt) ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
-    if (has_last_view_mat_) {
+        (have_interp_view && has_cam_rt) ? interpolation::multiply(cam_rt, blend_older_.view_mat) : blend_older_.view_mat;
+    vk::LightingFrameInput interp_light_in = blend_older_.light_in;
+    if (have_interp_view) {
+        const float *m = interp_view.data();
+        interp_light_in.view_rot[0] = m[0]; interp_light_in.view_rot[1] = m[4]; interp_light_in.view_rot[2] = m[8];
+        interp_light_in.view_rot[3] = m[1]; interp_light_in.view_rot[4] = m[5]; interp_light_in.view_rot[5] = m[9];
+        interp_light_in.view_rot[6] = m[2]; interp_light_in.view_rot[7] = m[6]; interp_light_in.view_rot[8] = m[10];
+        interp_light_in.has_view_rot = true;
+    }
+    if (have_interp_view) {
         if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing)) {
             const auto &old_dyn = blend_older_.rt_dyn_verts;
             const auto &new_dyn = blend_newer_.rt_dyn_verts;
@@ -3522,7 +3541,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
             sun_shadows_.invalidate();
         } else if (phase <= 0.0f) {
             rt_shadows_.invalidate();
-            render_sun_shadow_pass(interp_view, last_light_in_, blend_older_.shadow_verts, blend_older_.shadow_batches);
+            render_sun_shadow_pass(interp_view, interp_light_in, blend_older_.shadow_verts, blend_older_.shadow_batches);
         }
     }
 
@@ -3621,8 +3640,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> interp_vlights{};
     std::uint32_t interp_vl_count = 0u;
-    if (has_last_view_mat_) {
-        interp_vl_count = build_view_lights(interp_view, last_vfx_lights_, interp_vlights);
+    if (have_interp_view) {
+        interp_vl_count = build_view_lights(interp_view, blend_older_.vfx_lights, interp_vlights);
     }
 
     for (const auto &rb : blend_older_.batches) {
@@ -3659,9 +3678,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
                                              aa == LiveSettings::kAaFxaa || aa == LiveSettings::kAaTaa));
                 if (need_boundary) {
                     vkCmdEndRendering(f.cmd);
-                    apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false,
+                    apply_post_3d(interp_rt_, interp_light_in, taa_prev_from_curr, taa_valid_reproj, false,
                                   taa_jitter_uv, pass_hdr, interp_vlights.data(), interp_vl_count,
-                                  has_last_view_mat_ ? &interp_view : nullptr);
+                                  have_interp_view ? &interp_view : nullptr);
                     interp_lit = true;
                     if (phase <= 0.0f) {
                         capture_clean_3d_snapshot(interp_rt_);
@@ -3734,9 +3753,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     vkCmdEndRendering(f.cmd);
     if (interp_saw_3d && !interp_lit) {
-        apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv,
+        apply_post_3d(interp_rt_, interp_light_in, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv,
                       pass_hdr, interp_vlights.data(), interp_vl_count,
-                      has_last_view_mat_ ? &interp_view : nullptr);
+                      have_interp_view ? &interp_view : nullptr);
     }
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -3842,6 +3861,10 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         std::swap(cur_snap_.rt_static_verts, cur_rt_static_verts_);
         std::swap(cur_snap_.rt_static_batches, cur_rt_static_batches_);
         std::swap(cur_snap_.rt_dyn_verts, cur_rt_dyn_verts_);
+        cur_snap_.view_mat = cur_view_mat_;
+        cur_snap_.has_view_mat = has_cur_view_mat_;
+        cur_snap_.light_in = cur_light_in_;
+        cur_snap_.vfx_lights = cur_vfx_lights_;
         cur_shadow_verts_.clear();
         cur_shadow_batches_.clear();
         cur_rt_static_verts_.clear();
