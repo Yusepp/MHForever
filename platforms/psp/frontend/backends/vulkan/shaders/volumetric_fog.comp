@@ -89,18 +89,19 @@ void main() {
     bool is_sky = (d0 >= 0.99992);
     float max_dist = is_sky ? 1400.0 : min(linear_eye_z(p, d0), 1600.0);
 
-    // 1. Physically motivated Rayleigh Aerial Perspective + World-up Atmospheric Valley Mist.
-    // Start well beyond foreground combat (PSP zones like Swamp already have native near fog).
-    float fog_start = p.sun_dir_view.w > 0.5 ? 160.0 : 260.0;
+    // 1. Physically motivated Rayleigh Aerial Perspective + Distant Atmospheric Mist.
+    // Keep foreground combat (0..280 cm) 100% crisp, and NEVER thicken fog when pitching the camera downward!
+    bool has_psp_fog = (p.ext_slots.w & 16u) != 0u;
+    float fog_start = p.sun_dir_view.w > 0.5 ? 180.0 : (has_psp_fog ? 320.0 : 280.0);
     float eff_dist = max(max_dist - fog_start, 0.0);
-    // Mist settles naturally toward the world floor (Swamp, Great Forest, Tower cloud-sea, Snowy peaks)
-    // and thins cleanly toward the sky regardless of camera pitch!
+    // Only thin fog when looking UP toward the sky; looking down at the ground stays 1.0 (no downward fog surge!).
     float ray_up = dot(ray_dir, normalize(p.world_up_view.xyz));
-    float height_mod = clamp(1.12 - ray_up * 0.55, 0.42, 1.40);
-    float optical_depth = eff_dist * p.fog_color.a * height_mod;
+    float height_mod = clamp(1.0 - max(ray_up, 0.0) * 0.55, 0.45, 1.0);
+    float psp_fog_scale = has_psp_fog ? 0.58 : 1.0;
+    float optical_depth = eff_dist * p.fog_color.a * height_mod * psp_fog_scale;
     float transmittance = is_sky ? 1.0 : exp(-optical_depth);
     // Keep foreground and mid-ground crisp so combat contrast is never washed out.
-    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.46);
+    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.42);
 
     // Subtle Rayleigh sky-blue aerial perspective on distant outdoor mountains/cliffs.
     vec3 fog_rgb = p.fog_color.rgb;
@@ -112,13 +113,14 @@ void main() {
     vec3 fog_scatter = fog_rgb * (1.0 - transmittance);
 
     // 1b. 3D Froxel Exponential Frustum Ray-March (when kVkEffectFroxelFog is enabled):
-    // True 3D shadow-occluded sun shafts + dynamic point-light scattering through mist/fog!
+    // Starts well beyond foreground combat (240 cm) so Swamp/valley mist reads as distant atmospheric depth!
     vec3 froxel_scatter = vec3(0.0);
     if ((p.ext_slots.w & 8u) != 0u) {
+        float march_start = has_psp_fog ? 280.0 : 220.0;
         float march_far = min(max_dist, 1450.0);
-        if (march_far > 60.0) {
+        if (march_far > march_start + 30.0) {
             float jitter_z = ign(vec2(gid) + vec2(p.sun_screen.w * 37.0, p.sun_screen.w * 19.0));
-            const int kSlices = 12;
+            const int kSlices = 10;
             float cos_sun = clamp(dot(ray_dir, normalize(p.sun_dir_view.xyz)), -1.0, 1.0);
             float sun_phase = clamp(hg_phase(cos_sun, 0.72) * 0.65 + 0.12, 0.0, 1.8);
             bool has_rt_godrays = (p.sun_dir_view.w < 0.5 && p.shadow_info.z != 0u && p.scatter_color.a > 0.001);
@@ -127,15 +129,15 @@ void main() {
                                    ? texture(sampler2D(u_textures[p.shadow_info.z], u_samplers[p.aux_slots.y]), uv).a
                                    : 1.0;
             uint n_lights = min(p.light_count, 16u);
-            float sigma_t = max(p.fog_color.a * 1.15, 0.00018);
+            float sigma_t = max(p.fog_color.a * (has_psp_fog ? 0.65 : 1.05), 0.00014);
 
-            float prev_z = 55.0;
+            float prev_z = march_start;
             float trans = 1.0;
             for (int s = 0; s < kSlices; ++s) {
                 float t0 = float(s) / float(kSlices);
                 float t1 = float(s + 1) / float(kSlices);
-                float z0 = 55.0 + (march_far - 55.0) * (t0 * t0);
-                float z1 = 55.0 + (march_far - 55.0) * (t1 * t1);
+                float z0 = march_start + (march_far - march_start) * (t0 * t0);
+                float z1 = march_start + (march_far - march_start) * (t1 * t1);
                 float z_mid = mix(z0, z1, jitter_z);
                 float dz = max(z1 - prev_z, 1.0);
                 prev_z = z1;
@@ -144,9 +146,9 @@ void main() {
                 vec3 slice_in = vec3(0.0);
 
                 // Shadow-occluded 3D sun volumetric scattering (RT god-rays when RT is active, else shadow map).
-                if (has_rt_godrays && z_mid > 110.0) {
-                    slice_in += p.scatter_color.rgb * (rt_vol_vis * sun_phase * p.scatter_color.a * 0.44);
-                } else if (has_shadow && z_mid > 110.0) {
+                if (has_rt_godrays) {
+                    slice_in += p.scatter_color.rgb * (rt_vol_vis * sun_phase * p.scatter_color.a * 0.40);
+                } else if (has_shadow) {
                     vec3 P_psp = vec3(P_view.x, -P_view.y, P_view.z);
                     vec4 sc = p.shadow_from_view * vec4(P_psp, 1.0);
                     vec2 suv = sc.xy * 0.5 + 0.5;

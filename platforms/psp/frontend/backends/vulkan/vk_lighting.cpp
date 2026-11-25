@@ -58,8 +58,8 @@ constexpr BiomePreset kBiomePresets[] = {
     // Jungle (Jungle & Old Jungle)
     {{0.70f, 0.82f, 0.78f}, 0.64f, {0.70f, 0.82f, 0.78f}, 0.00046f, {0.96f, 0.98f, 0.82f}, 0.30f,
      0.80f, 0.25f, 0.15f, 0.15f, {0.38f, 0.56f, 0.38f}, 0.10f, 0.20f, 44.0f, 0.54f, 0.22f, 0.08f},
-    // Swamp (Swamp & Old Swamp) — keep moody without double-fogging over PSP's native Swamp fog.
-    {{0.68f, 0.74f, 0.84f}, 0.66f, {0.42f, 0.50f, 0.58f}, 0.00028f, {0.78f, 0.86f, 0.94f}, 0.18f,
+    // Swamp (Swamp & Old Swamp) — subtle distant mist without double-fogging over PSP's native Swamp fog.
+    {{0.68f, 0.74f, 0.84f}, 0.66f, {0.42f, 0.50f, 0.58f}, 0.00020f, {0.78f, 0.86f, 0.94f}, 0.16f,
      0.80f, 0.22f, 0.10f, 0.12f, {0.28f, 0.36f, 0.44f}, 0.08f, 0.14f, 46.0f, 0.46f, 0.26f, 0.05f},
     // Volcano (Volcano, Old Volcano & Battleground)
     {{0.80f, 0.66f, 0.62f}, 0.64f, {0.60f, 0.34f, 0.22f}, 0.00048f, {1.00f, 0.60f, 0.28f}, 0.28f,
@@ -468,12 +468,9 @@ void LightingPipeline::resolve_sun_dir_world(const LightingFrameInput &in, float
     float wx = 0.34f, wy = 0.78f, wz = 0.52f;
     if (active_is_cave_) {
         wx = 0.14f; wy = 0.95f; wz = 0.28f;
-    } else if (in.has_light0) {
-        wx = in.light0_dir[0];
-        wy = in.light0_dir[1];
-        wz = in.light0_dir[2];
     } else if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size() &&
                zones_[static_cast<std::size_t>(active_zone_)].sun_height_deg > 0.0f) {
+        // Prefer deterministic per-zone sun angle so shadows never swing when per-object GE light0 changes!
         const auto &z = zones_[static_cast<std::size_t>(active_zone_)];
         const float elev = std::clamp(z.sun_height_deg, 18.0f, 75.0f) * (3.14159265f / 180.0f);
         const float azim = z.sun_turn * (3.14159265f / 180.0f);
@@ -481,6 +478,10 @@ void LightingPipeline::resolve_sun_dir_world(const LightingFrameInput &in, float
         wx = ce * std::sin(azim);
         wy = std::sin(elev);
         wz = ce * std::cos(azim);
+    } else if (in.has_light0) {
+        wx = in.light0_dir[0];
+        wy = in.light0_dir[1];
+        wz = in.light0_dir[2];
     }
     const float wlen = std::sqrt(wx * wx + wy * wy + wz * wz);
     if (wlen > 1e-4f) { wx /= wlen; wy /= wlen; wz /= wlen; }
@@ -498,28 +499,11 @@ void LightingPipeline::fill_biome_params(LightingComputeParams &p, const Lightin
     p.vz_and_size[0] = in.vz_scale;
     p.vz_and_size[1] = in.vz_center;
 
-    // World-space light direction: overhead indoor light for caves/halls (grounds hunter & props onto floor),
-    // otherwise live PSP GE directional light 0 or zone sun elevation/azimuth.
-    float wx = 0.34f, wy = 0.78f, wz = 0.52f;
-    if (active_is_cave_) {
-        wx = 0.14f; wy = 0.95f; wz = 0.28f;
-    } else if (in.has_light0) {
-        wx = in.light0_dir[0];
-        wy = in.light0_dir[1];
-        wz = in.light0_dir[2];
-    } else if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size() &&
-               zones_[static_cast<std::size_t>(active_zone_)].sun_height_deg > 0.0f) {
-        const auto &z = zones_[static_cast<std::size_t>(active_zone_)];
-        const float elev = std::clamp(z.sun_height_deg, 18.0f, 75.0f) * (3.14159265f / 180.0f);
-        const float azim = z.sun_turn * (3.14159265f / 180.0f);
-        const float ce = std::cos(elev);
-        wx = ce * std::sin(azim);
-        wy = std::sin(elev);
-        wz = ce * std::cos(azim);
-    }
-    const float wlen = std::sqrt(wx * wx + wy * wy + wz * wz);
-    if (wlen > 1e-4f) { wx /= wlen; wy /= wlen; wz /= wlen; }
-    else { wx = 0.34f; wy = 0.78f; wz = 0.52f; }
+    // World-space light direction: deterministic per-zone sun angle (prevents shadow direction jumps!),
+    // with overhead cave fill indoors and first-static-draw GE light0 fallback for unknown zones.
+    float sun_w[3]{};
+    resolve_sun_dir_world(in, sun_w);
+    float wx = sun_w[0], wy = sun_w[1], wz = sun_w[2];
     // Ensure outdoor sun points upward so contact shadows & key light always come from the sky.
     if (wy < 0.15f) {
         wy = std::fabs(wy) + 0.25f;
@@ -686,7 +670,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.spec_contact[3] = 0.0f;
     }
     base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u) |
-                        (want_froxel ? 8u : 0u);
+                        (want_froxel ? 8u : 0u) | (in.has_psp_fog ? 16u : 0u);
     base.vz_and_size[2] = static_cast<float>(scene_w);
     base.vz_and_size[3] = static_cast<float>(scene_h);
     base.tex_slots[0] = src_color_slot;

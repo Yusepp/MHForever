@@ -1139,7 +1139,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
         setup_.is_additive_vfx = !clear && !setup_.through && ab && zw_off && bop == 0u && dst_one;
     }
     if (!setup_.through) {
-        if ((ge.reg(0x18u) & 1u) != 0) {
+        if ((ge.reg(0x18u) & 1u) != 0 && !cur_light_in_.has_light0 && !setup_.is_skinned) {
             auto f24 = [](std::uint32_t r) {
                 const std::uint32_t bits = r << 8u;
                 float f = 0.0f;
@@ -1827,13 +1827,9 @@ void VkBackend::draw_batch() {
         const float cmax = std::max({cr, cg, cb});
         const float cmin = std::min({cr, cg, cb});
         const float sat = cmax > 1e-4f ? (cmax - cmin) / cmax : 0.0f;
-        // Require either vivid chromatic VFX or a multi-particle bright burst (catches white-vertex-color fireballs
-        // while ignoring tiny 2-triangle NPC speech bubbles / floating indicators!).
-        if ((cmax > 0.32f && sat > 0.16f) || (cmax > 0.45f && batch_world_cnt_ >= 24u)) {
-            if (sat < 0.10f) {
-                // Neutral-white additive bursts (e.g. textured fireballs/explosions) get a natural warm amber tint.
-                cr = 1.00f; cg = 0.72f; cb = 0.42f;
-            }
+        // Require vivid chromatic VFX (fire, flames, lightning, elemental bursts) so neutral-white
+        // water splashes and running dust puffs NEVER spawn strobing point lights at the hunter's feet!
+        if (cmax > 0.34f && sat > 0.18f) {
             const float intensity = std::clamp(0.30f + cmax * 0.28f + sat * 0.20f, 0.30f, 0.72f);
             const float radius = 250.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 1.0f, 200.0f);
             bool merged = false;

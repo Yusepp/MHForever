@@ -228,8 +228,8 @@ void main() {
             vec3 rt_val = clamp(rt_sum / rt_w, vec3(0.0), vec3(1.0));
             sun_shadow = is_cave ? 1.0 : rt_val.r;
             pt_shadow = mix(0.22, 1.0, rt_val.g);
-            // Blend 3D RTAO with smooth GTAO for rock-solid, halo-free grounding everywhere (including caves!).
-            ao = mix(ao, mix(0.28, 1.0, rt_val.b), 0.58);
+            // Blend smooth distance-weighted 3D RTAO with GTAO for rock-solid, shimmer-free grounding everywhere!
+            ao = mix(ao, mix(0.42, 1.0, rt_val.b), 0.34);
         } else if (!is_cave && p.shadow_info.x != 0u) {
             // Convert +Y-down view space back to PSP +Y-up view space with normal-offset bias.
             float sh_ndotl = clamp(dot(N, L), 0.0, 1.0);
@@ -319,6 +319,82 @@ void main() {
                                                              u_samplers[p.aux_slots.y]),
                                                    uv).rgb);
             col_lin += ssgi * (0.30 + 0.70 * albedo_est) * (p.world_up_view.w * (0.45 + 0.55 * ao));
+        }
+
+        // 4b. Fast Water & Wet-Surface Screen-Space Reflections (reflects hunter, monsters, fireballs & trees!).
+        // Restricted to truly flat horizontal water/puddle pixels in water-bearing biomes (early-outs on 85%+ of screen!).
+        if (!is_cave && z_eye < 1100.0 && (bid == 11u || bid == 10u || bid == 8u || bid == 9u || bid == 6u)) {
+            float flat_up = smoothstep(0.955, 0.992, dot(N, U));
+            if (flat_up > 0.05) {
+                vec3 cs = clamp(scene.rgb, vec3(0.0), vec3(1.0));
+                float sluma = dot(cs, vec3(0.2126, 0.7152, 0.0722));
+                float smax = max(cs.r, max(cs.g, cs.b));
+                float smin = min(cs.r, min(cs.g, cs.b));
+                float ssat = smax > 1e-4 ? (smax - smin) / smax : 0.0;
+                float blue_ratio = cs.b / max(cs.r, 0.02);
+                float wet_mask = 0.0;
+                if (bid == 11u) {
+                    // Swamp shallow water puddles: cool/neutral gray-blue sheen, excludes dry brown mud & foliage.
+                    wet_mask = flat_up * smoothstep(0.11, 0.23, sluma) *
+                               (1.0 - smoothstep(0.15, 0.30, ssat)) *
+                               smoothstep(0.94, 1.04, blue_ratio);
+                } else {
+                    // Jungle, Forest & Hills, Great Forest, Desert oasis rivers/streams: cool blue/teal water.
+                    wet_mask = flat_up * smoothstep(0.08, 0.20, sluma) *
+                               smoothstep(1.04, 1.18, blue_ratio);
+                }
+                if (wet_mask > 0.08) {
+                    // Subtle living water ripple normal perturbation.
+                    float t_rip = p.sun_screen.w * 0.14;
+                    vec3 N_rip = normalize(N + vec3(sin(uv.x * 160.0 + t_rip) * 0.014,
+                                                    cos(uv.y * 120.0 - t_rip * 0.8) * 0.014, 0.0));
+                    vec3 R = reflect(-V, N_rip);
+                    // Only trace reflections heading upward/away from the water plane.
+                    if (dot(R, U) > -0.05) {
+                        float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5);
+                        float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5);
+                        float j = ign(vec2(ip));
+                        float dist_t = 12.0 + j * 14.0;
+                        float step_sz = 18.0;
+                        vec3 hit_col = vec3(0.0);
+                        float hit_w = 0.0;
+                        for (int s = 0; s < 14; ++s) {
+                            vec3 Q = P + R * dist_t;
+                            float qz = -Q.z;
+                            if (qz <= 2.0) break;
+                            vec2 q_ndc = vec2(Q.x * p00, Q.y * p11) / qz;
+                            vec2 q_uv = q_ndc * 0.5 + 0.5;
+                            if (q_uv.x < 0.01 || q_uv.x > 0.99 || q_uv.y < 0.01 || q_uv.y > 0.99) break;
+                            ivec2 qip = clamp(ivec2(q_uv * p.vz_and_size.zw), ivec2(0), full_max);
+                            float qd = texelFetch(u_textures[dslot], qip, 0).r;
+                            if (qd < 0.99992 && qd > 0.00001) {
+                                float scene_z = linear_eye_z(p, qd);
+                                float dz = qz - scene_z;
+                                float thick = 16.0 + step_sz * 1.35;
+                                if (dz > 2.0 && dz < thick && scene_z < z_eye + 40.0) {
+                                    vec3 rcol = (kSpecInPlace != 0u)
+                                                    ? imageLoad(u_lit_out, qip).rgb
+                                                    : texelFetch(u_textures[p.tex_slots.x], qip, 0).rgb;
+                                    hit_col = srgb_to_linear_hdr(rcol);
+                                    float edge_fade = smoothstep(0.01, 0.10, q_uv.x) * smoothstep(0.99, 0.90, q_uv.x) *
+                                                      smoothstep(0.01, 0.12, q_uv.y) * smoothstep(0.99, 0.88, q_uv.y);
+                                    float dist_fade = 1.0 - smoothstep(260.0, 750.0, dist_t);
+                                    hit_w = edge_fade * dist_fade;
+                                    break;
+                                }
+                            }
+                            dist_t += step_sz;
+                            step_sz *= 1.18;
+                        }
+                        if (hit_w > 0.01) {
+                            float ndotv = clamp(dot(N, V), 0.0, 1.0);
+                            float fresnel = 0.10 + 0.42 * pow(1.0 - ndotv, 3.5);
+                            float refl_str = clamp(wet_mask * hit_w * fresnel, 0.0, 0.48);
+                            col_lin = mix(col_lin, hit_col, refl_str);
+                        }
+                    }
+                }
+            }
         }
     }
 

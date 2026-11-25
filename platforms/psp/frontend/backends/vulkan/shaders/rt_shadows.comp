@@ -75,6 +75,21 @@ bool trace_shadow_ray(vec3 origin, vec3 dir, float tmax) {
     return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
 }
 
+// Continuous distance-weighted AO ray (returns [0..1] based on hit distance instead of binary 0/1 -> zero shimmer!).
+float trace_ao_ray(vec3 origin, vec3 dir, float tmax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq, u_tlas,
+        gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        0xFF, origin, 0.0, dir, tmax);
+    while (rayQueryProceedEXT(rq)) {}
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        return 1.0;
+    }
+    float thit = rayQueryGetIntersectionTEXT(rq, true);
+    return clamp(thit / tmax, 0.0, 1.0);
+}
+
 void main() {
     RtShadowParams p = pc.buf.p;
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -91,25 +106,23 @@ void main() {
     vec2 ndc = uv * 2.0 - 1.0;
     vec3 L = normalize(p.sun_dir_world.xyz);
 
-    // Compute 4-slice RT volumetric sun-shaft visibility (even for sky pixels looking past roofs/trees!).
+    // Compute 2-slice RT volumetric sun-shaft visibility (fast for locked 120 FPS, skips foreground!).
     float vol_vis = 1.0;
     float z = is_sky ? 1300.0 : linear_eye_z(p, d0);
     vec3 ray_psp = normalize(vec3(ndc.x * p.proj_info.x, -ndc.y * p.proj_info.y, -1.0));
     vec3 cam_world = (p.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 ray_world = normalize(mat3(p.inv_view) * ray_psp);
-    if (want_godrays) {
+    if (want_godrays && z > 220.0) {
         float march_far = min(z, 1300.0);
-        if (march_far > 110.0) {
-            float jz = ign(vec2(gid) + vec2(13.0, 7.0));
-            float vsum = 0.0;
-            for (int s = 0; s < 4; ++s) {
-                float t = (float(s) + jz) * 0.25;
-                float dist = mix(110.0, march_far, t * t);
-                vec3 sp = cam_world + ray_world * dist;
-                if (trace_shadow_ray(sp, L, 3500.0)) vsum += 0.25;
-            }
-            vol_vis = vsum;
+        float jz = ign(vec2(gid) + vec2(13.0, 7.0));
+        float vsum = 0.0;
+        for (int s = 0; s < 2; ++s) {
+            float t = (float(s) + jz) * 0.5;
+            float dist = mix(220.0, march_far, t);
+            vec3 sp = cam_world + ray_world * dist;
+            if (trace_shadow_ray(sp, L, 3500.0)) vsum += 0.5;
         }
+        vol_vis = vsum;
     }
 
     if (is_sky) {
@@ -221,9 +234,7 @@ void main() {
             float rx = h.x * ca - h.y * sa;
             float ry = h.x * sa + h.y * ca;
             vec3 ao_dir = normalize(nT * rx + nB * ry + N_world * h.z);
-            if (trace_shadow_ray(base_origin + ao_dir * 2.5, ao_dir, 140.0)) {
-                ao_sum += 0.5;
-            }
+            ao_sum += trace_ao_ray(base_origin + ao_dir * 2.5, ao_dir, 140.0) * 0.5;
         }
         rtao = ao_sum;
     }
