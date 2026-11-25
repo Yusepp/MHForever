@@ -1171,21 +1171,30 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             cur_light_in_.light0_dir[2] = f24(ge.reg(0x65u));
             cur_light_in_.has_light0 = true;
         }
-        if ((ge.reg(kFogEnable) & 1u) != 0 && (ge.reg(kAlphaBlendEnable) & 1u) == 0 && !cur_light_in_.has_psp_fog) {
-            unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
+        if ((ge.reg(kFogEnable) & 1u) != 0 && (ge.reg(kAlphaBlendEnable) & 1u) == 0) {
             auto f24 = [](std::uint32_t v) noexcept -> float {
                 std::uint32_t bits = (v & 0xFFFFFFu) << 8u;
                 float f = 0.0f;
                 std::memcpy(&f, &bits, 4);
                 return f;
             };
-            const float fog_end = std::fabs(f24(ge.reg(0xCDu)));
-            const float fog_inv = std::fabs(f24(ge.reg(0xCEu)));
-            // Live PSP fog opacity at 1800 cm mid-distance: 0 = clear area, 1 = dense/surging white fog!
-            cur_light_in_.psp_fog_intensity = (fog_end > 1.0f && fog_inv > 1e-6f)
-                ? std::clamp(1.0f - (fog_end - 1800.0f) * fog_inv, 0.0f, 1.0f)
-                : 0.0f;
-            cur_light_in_.has_psp_fog = true;
+            const float fog1 = f24(ge.reg(0xCDu));
+            const float fog2 = f24(ge.reg(0xCEu));
+            // Exact PSP GE formula (ge.cpp): v_fog = clamp((view_z + fog1) * fog2, 0, 1).
+            // Evaluate fog opacity (1 - v_fog) at 1400 cm mid-distance across all opaque terrain draws
+            // (taking the max so skybox/far draws never mask an intensifying Swamp fog event!).
+            if (fog1 > 10.0f && fog1 < 25000.0f && fog2 > 1e-6f) {
+                const float v_mid = std::clamp((-1400.0f + fog1) * fog2, 0.0f, 1.0f);
+                const float dens_mid = 1.0f - v_mid;
+                if (!cur_light_in_.has_psp_fog || dens_mid > cur_light_in_.psp_fog_intensity) {
+                    unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
+                    cur_light_in_.psp_fog_intensity = dens_mid;
+                    cur_light_in_.has_psp_fog = true;
+                }
+            } else if (!cur_light_in_.has_psp_fog) {
+                unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
+                cur_light_in_.has_psp_fog = true;
+            }
         }
     }
 

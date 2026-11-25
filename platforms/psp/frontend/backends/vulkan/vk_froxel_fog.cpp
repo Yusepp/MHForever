@@ -343,16 +343,17 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
         }
     }
 
-    // Use the hunter's exact foot_y when available (handles hills & sloped terrain automatically!).
+    // Lock zone_floor_y_ strictly to the lowest marsh/basin floor walked in this zone
+    // (never climbs upward when walking up a hill or orbiting camera; resets on zone teleport!).
     const float center_x = (primary_idx >= 0) ? actors[primary_idx].x : cx;
     const float center_z = (primary_idx >= 0) ? actors[primary_idx].z : cz;
     const float target_floor_y = (primary_idx >= 0) ? actors[primary_idx].foot_y : (cy - 175.0f);
     if (!zone_floor_valid_) {
         zone_floor_y_ = target_floor_y;
         zone_floor_valid_ = true;
-    } else if (primary_idx >= 0) {
-        // Smoothly follow actual terrain slope under the hunter's boots (never affected by camera pitch!).
-        zone_floor_y_ = zone_floor_y_ * 0.88f + target_floor_y * 0.12f;
+    } else if (primary_idx >= 0 && target_floor_y < zone_floor_y_) {
+        // Only settle downward into the lowest ground level of the area so mist stays 100% static!
+        zone_floor_y_ = zone_floor_y_ * 0.90f + target_floor_y * 0.10f;
     }
 
     // 1. Pass 0: World-Locked 128x128 Interactive Fluid Wake Simulation (froxel_fluid.comp).

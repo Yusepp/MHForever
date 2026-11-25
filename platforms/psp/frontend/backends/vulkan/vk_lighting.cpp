@@ -844,27 +844,34 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.env_time[0] = elapsed_sec;
         base.env_time[1] = base.inv_view[13]; // camera world Y (cm)
         // Per-biome + live PSP fog intensity modulation:
-        // Clear areas stay clean; misty Swamp/Forest numbers get thin wispy ground mist across the whole area;
-        // when the game's fog intensifies (whiter/closer kFogEnd), ground mist smoothly grows denser & taller!
+        // Clear areas (e.g. Base Camp, Pokke, dry Desert) stay clean (vstr < 0.12 -> no ground mist);
+        // Misty Swamp/Forest numbers get thin static ground mist across the whole basin;
+        // when the area's live PSP fog surges (closer kFogEnd / whiter kFogColor), it smoothly intensifies!
         const float live_fog = in.has_psp_fog ? in.psp_fog_intensity : 0.0f;
         const float psp_luma = in.has_psp_fog
             ? (in.psp_fog_rgb[0] * 0.2126f + in.psp_fog_rgb[1] * 0.7152f + in.psp_fog_rgb[2] * 0.0722f)
-            : 0.45f;
-        const float white_surge = std::clamp((psp_luma - 0.30f) * 1.4f, 0.0f, 1.0f) * live_fog;
+            : 0.35f;
+        const float white_surge = std::clamp((psp_luma - 0.28f) * 1.6f, 0.0f, 1.0f);
         float vstr = 0.0f;
         if (active_biome_ == BiomeKind::Swamp) {
-            // Swamp: thin wisps in mild numbers (~0.35), surging denser & taller when fog intensifies (~1.15).
-            vstr = std::clamp(0.18f + live_fog * 0.78f + white_surge * 0.35f, 0.0f, 1.35f);
+            // Only appear in actually foggy Swamp numbers (live_fog > 0.08); surge strongly when whiter/foggier!
+            vstr = (live_fog > 0.06f)
+                ? std::clamp(0.22f + live_fog * 0.85f + white_surge * live_fog * 0.45f, 0.0f, 1.40f)
+                : 0.0f;
         } else if (active_biome_ == BiomeKind::DesertSandstorm) {
-            vstr = std::clamp(0.45f + live_fog * 0.65f, 0.0f, 1.25f);
+            vstr = std::clamp(0.40f + live_fog * 0.75f, 0.0f, 1.25f);
         } else if (active_biome_ == BiomeKind::GreatForest || active_biome_ == BiomeKind::Jungle) {
-            vstr = std::clamp(live_fog * 0.75f + white_surge * 0.25f, 0.0f, 1.05f);
+            vstr = (live_fog > 0.10f)
+                ? std::clamp(live_fog * 0.80f + white_surge * live_fog * 0.25f, 0.0f, 1.10f)
+                : 0.0f;
         } else if (active_biome_ == BiomeKind::SnowyPeak || active_biome_ == BiomeKind::IceCave) {
-            vstr = std::clamp(live_fog * 0.65f + white_surge * 0.25f, 0.0f, 0.95f);
+            vstr = (live_fog > 0.14f)
+                ? std::clamp(live_fog * 0.70f + white_surge * live_fog * 0.25f, 0.0f, 1.00f)
+                : 0.0f;
         } else if (active_biome_ == BiomeKind::DarkCave) {
-            vstr = std::clamp(live_fog * 0.55f, 0.0f, 0.70f);
+            vstr = (live_fog > 0.18f) ? std::clamp(live_fog * 0.50f, 0.0f, 0.65f) : 0.0f;
         } else {
-            vstr = std::clamp((live_fog - 0.35f) * 0.70f, 0.0f, 0.60f);
+            vstr = (live_fog > 0.35f) ? std::clamp((live_fog - 0.35f) * 0.70f, 0.0f, 0.55f) : 0.0f;
         }
         base.env_time[2] = vstr;
         base.env_time[3] = 1.0f;
