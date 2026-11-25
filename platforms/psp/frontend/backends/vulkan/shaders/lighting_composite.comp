@@ -433,10 +433,10 @@ void main() {
         float max_t = is_sky ? 5200.0 : (z_eye / max(-ray_psp.z, 0.05));
 
         float floor_y = p.ground_fog_info.y;
-        float fog_int = clamp(p.env_time.z, 0.0, 1.35);
-        float surge = smoothstep(0.45, 1.05, fog_int);
-        float max_h_cm = mix(52.0, 104.0, clamp(fog_int * 0.85, 0.0, 1.0));
-        float dens_scale = mix(0.11, 0.26, clamp(fog_int * 0.85, 0.0, 1.0));
+        float fog_int = clamp(p.env_time.z, 0.0, 1.40);
+        float surge = smoothstep(0.48, 1.05, fog_int);
+        float max_h_cm = mix(56.0, 108.0, clamp(fog_int * 0.85, 0.0, 1.0));
+        float dens_scale = mix(0.24, 0.44, clamp(fog_int * 0.85, 0.0, 1.0));
 
         if (abs(ray_w.y) > 0.008) {
             vec2 orig_xz = p.ground_fog_info.xz;
@@ -445,9 +445,9 @@ void main() {
 
             vec3 fog_lin = srgb_to_linear_hdr(p.fog_color.rgb);
             vec3 scat_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
-            vec3 mist_shadow = fog_lin * 0.52;
-            vec3 mist_crest  = mix(fog_lin * 1.65 + vec3(0.10, 0.13, 0.16),
-                                   fog_lin * 2.05 + vec3(0.22, 0.25, 0.28), surge);
+            vec3 mist_shadow = fog_lin * 0.55;
+            vec3 mist_crest  = mix(fog_lin * 1.95 + vec3(0.16, 0.20, 0.24),
+                                   fog_lin * 2.40 + vec3(0.28, 0.32, 0.36), surge);
 
             float rt_sun = 1.0;
             if (p.shadow_info.z != 0u && !is_cave) {
@@ -462,13 +462,14 @@ void main() {
 
             for (int pi = kPlanes - 1; pi >= 0; --pi) {
                 float lf = (float(pi) + 0.5) / float(kPlanes);
-                float plane_y = floor_y + 8.0 + lf * max_h_cm;
+                float plane_y = floor_y + 6.0 + lf * max_h_cm;
                 float t_k = (plane_y - cam_w.y) / ray_w.y;
 
                 // True 3D depth occlusion against walls, hills, rocks, trees, and the hunter's body!
                 if (t_k <= 28.0 || t_k >= max_t || t_k > 4800.0) continue;
 
-                float wall_soft = smoothstep(0.0, 48.0, max_t - t_k);
+                // Soft 14 cm intersection fade: crisp wall/leg collision without erasing the lower ground shells!
+                float wall_soft = smoothstep(0.0, 14.0, max_t - t_k);
                 float near_soft = smoothstep(28.0, 75.0, t_k);
                 float far_soft  = 1.0 - smoothstep(3400.0, 4800.0, t_k);
                 float env_w = wall_soft * near_soft * far_soft;
@@ -489,32 +490,32 @@ void main() {
                     vec4 fl = texture(u_ground_fluid, fuv);
                     sim_vel  = fl.rg * in_sim;
                     sim_d    = fl.b;
-                    sim_vort = clamp(fl.a * 0.14, 0.0, 0.65) * in_sim;
+                    sim_vort = clamp(fl.a * 0.16, 0.0, 0.85) * in_sim;
                 }
 
-                // Seamless fallback outside the 32m Navier-Stokes box + subtle fine smoke detail inside.
+                // Seamless fallback outside the 32m Navier-Stokes box + crisp fine smoke tendrils inside.
                 float detail = 0.55;
                 if (nslot != 0u) {
-                    vec2 Q_xz = Q.xz - sim_vel * (1.8 + lf * 1.4);
+                    vec2 Q_xz = Q.xz - sim_vel * (2.4 + lf * 1.8);
                     detail = sample_vapor_noise(nslot, lsamp,
-                        vec3(Q_xz.x * 0.0018 + t_wind * 0.45, lf * 0.42 + t_wind * 0.12, Q_xz.y * 0.0018 - t_wind * 0.28));
+                        vec3(Q_xz.x * 0.0020 + t_wind * 0.45, lf * 0.42 + t_wind * 0.12, Q_xz.y * 0.0020 - t_wind * 0.28));
                 }
-                float far_d = smoothstep(0.32, 0.78, detail);
-                float smoke_d = mix(far_d, sim_d * (0.72 + 0.52 * detail), in_sim);
+                float far_d = smoothstep(0.30, 0.76, detail);
+                float smoke_d = mix(far_d, sim_d * (0.78 + 0.45 * detail), in_sim);
 
                 // Fur-shell heightfield slicing: piled-up vortex crests reach higher shells, parted wakes stay clear!
-                float shell_thresh = mix(0.14, 0.08, surge) + lf * 0.56 - sim_vort * 0.22;
-                float shell_w = smoothstep(shell_thresh, shell_thresh + 0.28, smoke_d);
+                float shell_thresh = mix(0.10, 0.05, surge) + lf * 0.48 - sim_vort * 0.28;
+                float shell_w = smoothstep(shell_thresh, shell_thresh + 0.24, smoke_d);
 
-                float alpha = clamp(shell_w * env_w * dens_scale * (1.0 - lf * 0.35), 0.0, 0.48);
+                float alpha = clamp(shell_w * env_w * dens_scale * (1.0 - lf * 0.28), 0.0, 0.62);
                 if (alpha > 0.002) {
                     // Lit curling vortex tops + moody mud-hugging undersides!
-                    float lit = clamp(0.24 + 0.76 * lf * (0.48 + 0.52 * rt_sun) + sim_vort * 0.35, 0.0, 1.3);
+                    float lit = clamp(0.28 + 0.72 * lf * (0.50 + 0.50 * rt_sun) + sim_vort * 0.40, 0.0, 1.35);
                     vec3 lcol = mix(mist_shadow, mist_crest, clamp(lit, 0.0, 1.0))
-                              + scat_lin * (rt_sun * lf * p.scatter_color.a * 0.32);
+                              + scat_lin * (rt_sun * lf * p.scatter_color.a * 0.35);
                     g_scatter += g_trans * lcol * alpha;
                     g_trans *= (1.0 - alpha);
-                    if (g_trans < 0.20) break;
+                    if (g_trans < 0.14) break;
                 }
             }
             col_lin = col_lin * g_trans + g_scatter;

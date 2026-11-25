@@ -989,6 +989,20 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
             ground_info);
         if (froxel_dispatched) {
             std::memcpy(slots[kPassComposite].ground_fog_info, ground_info, sizeof(ground_info));
+            static std::uint64_t s_last_fog_log = ~0ull;
+            static const bool s_log_fog = [] {
+                const char *v = std::getenv("MHF_VK_PROFILE");
+                return v != nullptr && v[0] == '1';
+            }();
+            if (s_log_fog && (in.frame_index != s_last_fog_log) && ((in.frame_index % 60u) == 0u)) {
+                s_last_fog_log = in.frame_index;
+                std::fprintf(stderr,
+                             "[vk][fog] biome=%u live_fog=%.2f psp_rgb=(%.2f,%.2f,%.2f) vstr=%.2f actors=%u cam_y=%.1f floor_y=%.1f\n",
+                             static_cast<unsigned>(active_biome_),
+                             in.has_psp_fog ? in.psp_fog_intensity : -1.0f,
+                             in.psp_fog_rgb[0], in.psp_fog_rgb[1], in.psp_fog_rgb[2],
+                             base.env_time[2], in.fog_actor_count, base.inv_view[13], ground_info[1]);
+            }
         }
     }
 
