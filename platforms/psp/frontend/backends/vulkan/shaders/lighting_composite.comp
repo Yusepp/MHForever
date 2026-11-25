@@ -464,17 +464,17 @@ void main() {
             vec3 g_scatter = vec3(0.0);
             float g_trans = 1.0;
 
-            // March from highest plane (closest to camera when looking down) to lowest plane.
+            // March 5 silky-smooth static world-space planes from top to bottom (zero grain, 100% static!).
             for (int pi = kPlanes - 1; pi >= 0; --pi) {
-                float lf = (float(pi) + 0.30 + j * 0.35) / float(kPlanes);
-                float plane_y = floor_y + 8.0 + lf * max_h_cm;
+                float lf = (float(pi) + 0.5) / float(kPlanes);
+                float plane_y = floor_y + 10.0 + lf * max_h_cm;
                 float t_k = (plane_y - cam_w.y) / ray_w.y;
 
                 // True 3D depth occlusion against walls, hills, rocks, trees, and the hunter's body!
                 if (t_k <= 28.0 || t_k >= max_t || t_k > 4800.0) continue;
 
                 // Soft 3D intersection fade where the static mist plane touches walls, cliffs, trunks & boots!
-                float wall_soft = smoothstep(0.0, 42.0, max_t - t_k);
+                float wall_soft = smoothstep(0.0, 52.0, max_t - t_k);
                 float near_soft = smoothstep(28.0, 75.0, t_k);
                 float far_soft  = 1.0 - smoothstep(3400.0, 4800.0, t_k);
                 float env_w = wall_soft * near_soft * far_soft * (1.0 - lf * 0.45);

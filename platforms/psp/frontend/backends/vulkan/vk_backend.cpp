@@ -1178,17 +1178,18 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 std::memcpy(&f, &bits, 4);
                 return f;
             };
-            const float fog1 = f24(ge.reg(0xCDu));
-            const float fog2 = f24(ge.reg(0xCEu));
+            const float fog1 = std::fabs(f24(ge.reg(0xCDu)));
+            const float fog2 = std::fabs(f24(ge.reg(0xCEu)));
             // Exact PSP GE formula (ge.cpp): v_fog = clamp((view_z + fog1) * fog2, 0, 1).
-            // Evaluate fog opacity (1 - v_fog) at 1400 cm mid-distance across all opaque terrain draws
-            // (taking the max so skybox/far draws never mask an intensifying Swamp fog event!).
-            if (fog1 > 10.0f && fog1 < 25000.0f && fog2 > 1e-6f) {
-                const float v_mid = std::clamp((-1400.0f + fog1) * fog2, 0.0f, 1.0f);
-                const float dens_mid = 1.0f - v_mid;
-                if (!cur_light_in_.has_psp_fog || dens_mid > cur_light_in_.psp_fog_intensity) {
+            // Evaluate fog opacity at 2600 cm AND pull-in of fog_end so both normal Swamp mist (fog_end ~3500)
+            // and surging white Swamp fog (fog_end < 2000) are detected reliably across all areas!
+            if (fog1 > 10.0f && fog1 < 30000.0f && fog2 > 1e-6f) {
+                const float v_far = std::clamp((-2600.0f + fog1) * fog2, 0.0f, 1.0f);
+                const float pull_in = std::clamp((5500.0f - fog1) / 3800.0f, 0.0f, 1.0f);
+                const float dens = std::max(1.0f - v_far, pull_in * 0.75f);
+                if (!cur_light_in_.has_psp_fog || dens > cur_light_in_.psp_fog_intensity) {
                     unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
-                    cur_light_in_.psp_fog_intensity = dens_mid;
+                    cur_light_in_.psp_fog_intensity = dens;
                     cur_light_in_.has_psp_fog = true;
                 }
             } else if (!cur_light_in_.has_psp_fog) {
@@ -4169,6 +4170,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             has_last_view_mat_ = true;
         }
         last_vfx_lights_ = cur_vfx_lights_;
+    } else {
+        // Loading screen / area transition (e.g. Swamp Area 5 -> Area 6): reset static ground-mist floor!
+        lighting_.reset_froxel_history();
     }
     cur_vfx_lights_.clear();
     cur_shadow_verts_.clear();

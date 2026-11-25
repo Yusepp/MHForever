@@ -160,6 +160,7 @@ public:
 
     void reset_taa_history() noexcept { taa_hist_valid_ = false; }
     void reset_exposure() noexcept { exposure_reset_ = true; }
+    void reset_froxel_history() noexcept { froxel_.reset_history(); }
     [[nodiscard]] bool active_is_cave() const noexcept { return active_is_cave_; }
     void resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept;
 

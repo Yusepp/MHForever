@@ -851,27 +851,28 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         const float psp_luma = in.has_psp_fog
             ? (in.psp_fog_rgb[0] * 0.2126f + in.psp_fog_rgb[1] * 0.7152f + in.psp_fog_rgb[2] * 0.0722f)
             : 0.35f;
-        const float white_surge = std::clamp((psp_luma - 0.28f) * 1.6f, 0.0f, 1.0f);
+        // Detect white/bright fog surges (e.g. Swamp Area 6/8 mist rolling in).
+        const float white_surge = std::clamp((psp_luma - 0.24f) * 1.85f, 0.0f, 1.0f);
         float vstr = 0.0f;
         if (active_biome_ == BiomeKind::Swamp) {
-            // Only appear in actually foggy Swamp numbers (live_fog > 0.08); surge strongly when whiter/foggier!
-            vstr = (live_fog > 0.06f)
-                ? std::clamp(0.22f + live_fog * 0.85f + white_surge * live_fog * 0.45f, 0.0f, 1.40f)
+            // Swamp: thin wispy ground mist in marsh areas (~0.38), surging denser/whiter/taller (~1.30) during fog events!
+            vstr = (live_fog > 0.08f)
+                ? std::clamp(0.32f + live_fog * 0.72f + white_surge * 0.45f, 0.0f, 1.40f)
                 : 0.0f;
         } else if (active_biome_ == BiomeKind::DesertSandstorm) {
             vstr = std::clamp(0.40f + live_fog * 0.75f, 0.0f, 1.25f);
         } else if (active_biome_ == BiomeKind::GreatForest || active_biome_ == BiomeKind::Jungle) {
-            vstr = (live_fog > 0.10f)
-                ? std::clamp(live_fog * 0.80f + white_surge * live_fog * 0.25f, 0.0f, 1.10f)
+            vstr = (live_fog > 0.14f)
+                ? std::clamp(live_fog * 0.75f + white_surge * live_fog * 0.25f, 0.0f, 1.10f)
                 : 0.0f;
         } else if (active_biome_ == BiomeKind::SnowyPeak || active_biome_ == BiomeKind::IceCave) {
-            vstr = (live_fog > 0.14f)
-                ? std::clamp(live_fog * 0.70f + white_surge * live_fog * 0.25f, 0.0f, 1.00f)
+            vstr = (live_fog > 0.18f)
+                ? std::clamp(live_fog * 0.65f + white_surge * live_fog * 0.25f, 0.0f, 1.00f)
                 : 0.0f;
         } else if (active_biome_ == BiomeKind::DarkCave) {
-            vstr = (live_fog > 0.18f) ? std::clamp(live_fog * 0.50f, 0.0f, 0.65f) : 0.0f;
+            vstr = (live_fog > 0.20f) ? std::clamp(live_fog * 0.48f, 0.0f, 0.65f) : 0.0f;
         } else {
-            vstr = (live_fog > 0.35f) ? std::clamp((live_fog - 0.35f) * 0.70f, 0.0f, 0.55f) : 0.0f;
+            vstr = (live_fog > 0.38f) ? std::clamp((live_fog - 0.38f) * 0.65f, 0.0f, 0.55f) : 0.0f;
         }
         base.env_time[2] = vstr;
         base.env_time[3] = 1.0f;
