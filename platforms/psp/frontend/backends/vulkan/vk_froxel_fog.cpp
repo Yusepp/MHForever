@@ -356,101 +356,108 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
     }
 
     // 1. Pass 0: World-Locked 128x128 Interactive Fluid Wake Simulation (froxel_fluid.comp).
+    //    Step once per 30 Hz game frame so 120 FPS frame-gen subframes NEVER zero out actor velocity!
     constexpr float kTexelCm = kFluidWorldSize / static_cast<float>(kFluidSize);
-    const int new_cell_x = static_cast<int>(std::floor((center_x - 0.5f * kFluidWorldSize) / kTexelCm));
-    const int new_cell_z = static_cast<int>(std::floor((center_z - 0.5f * kFluidWorldSize) / kTexelCm));
-    int shift_x = 0, shift_z = 0;
-    bool reset_fluid = !fluid_valid_;
-    if (fluid_valid_) {
-        shift_x = new_cell_x - fluid_cell_origin_[0];
-        shift_z = new_cell_z - fluid_cell_origin_[1];
-        if (std::abs(shift_x) >= static_cast<int>(kFluidSize) / 2 ||
-            std::abs(shift_z) >= static_cast<int>(kFluidSize) / 2) {
-            reset_fluid = true;
-            shift_x = 0;
-            shift_z = 0;
-        }
-    }
-    fluid_cell_origin_[0] = new_cell_x;
-    fluid_cell_origin_[1] = new_cell_z;
-    const float origin_x = static_cast<float>(new_cell_x) * kTexelCm;
-    const float origin_z = static_cast<float>(new_cell_z) * kTexelCm;
+    const bool step_fluid = !fluid_valid_ || (frame_idx != last_fluid_frame_idx_);
+    float origin_x = static_cast<float>(fluid_cell_origin_[0]) * kTexelCm;
+    float origin_z = static_cast<float>(fluid_cell_origin_[1]) * kTexelCm;
 
-    float dt = elapsed_sec - last_elapsed_sec_;
-    if (!fluid_valid_ || dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
-    last_elapsed_sec_ = elapsed_sec;
-
-    const int fcur = fluid_ping_;
-    const int fprev = 1 - fluid_ping_;
-    if (fluid_vol_[fprev].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        Context::cmd_transition_image(cmd, fluid_vol_[fprev].image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                      fluid_vol_[fprev].layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
-                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        fluid_vol_[fprev].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-    Context::cmd_transition_image(cmd, fluid_vol_[fcur].image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  fluid_vol_[fcur].layout, VK_IMAGE_LAYOUT_GENERAL,
-                                  fluid_vol_[fcur].layout == VK_IMAGE_LAYOUT_UNDEFINED
-                                      ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
-                                      : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                  fluid_vol_[fcur].layout == VK_IMAGE_LAYOUT_UNDEFINED
-                                      ? 0
-                                      : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    fluid_vol_[fcur].layout = VK_IMAGE_LAYOUT_GENERAL;
-
-    FroxelFluidParams fp{};
-    fp.grid_info[0] = origin_x;
-    fp.grid_info[1] = origin_z;
-    fp.grid_info[2] = kFluidWorldSize;
-    fp.grid_info[3] = dt;
-    fp.shift_and_t[0] = static_cast<float>(shift_x);
-    fp.shift_and_t[1] = static_cast<float>(shift_z);
-    fp.shift_and_t[2] = elapsed_sec;
-    fp.shift_and_t[3] = reset_fluid ? 1.0f : 0.0f;
-    fp.counts[0] = n_act;
-    for (std::uint32_t i = 0u; i < n_act; ++i) {
-        const FogActor &a = actors[i];
-        float vx = 0.0f, vz = 0.0f;
-        float best_match_d2 = 220.0f * 220.0f;
-        for (std::uint32_t j = 0u; j < prev_actor_count_; ++j) {
-            const float dx = a.x - prev_actors_[j].x;
-            const float dz = a.z - prev_actors_[j].z;
-            const float d2 = dx * dx + dz * dz;
-            if (d2 < best_match_d2) {
-                best_match_d2 = d2;
-                vx = dx / dt;
-                vz = dz / dt;
+    if (step_fluid) {
+        const int new_cell_x = static_cast<int>(std::floor((center_x - 0.5f * kFluidWorldSize) / kTexelCm));
+        const int new_cell_z = static_cast<int>(std::floor((center_z - 0.5f * kFluidWorldSize) / kTexelCm));
+        int shift_x = 0, shift_z = 0;
+        bool reset_fluid = !fluid_valid_;
+        if (fluid_valid_) {
+            shift_x = new_cell_x - fluid_cell_origin_[0];
+            shift_z = new_cell_z - fluid_cell_origin_[1];
+            if (std::abs(shift_x) >= static_cast<int>(kFluidSize) / 2 ||
+                std::abs(shift_z) >= static_cast<int>(kFluidSize) / 2) {
+                reset_fluid = true;
+                shift_x = 0;
+                shift_z = 0;
             }
         }
-        const float spd = std::sqrt(vx * vx + vz * vz);
-        fp.actors[i].pos_rad[0] = a.x;
-        fp.actors[i].pos_rad[1] = a.foot_y;
-        fp.actors[i].pos_rad[2] = a.z;
-        fp.actors[i].pos_rad[3] = std::clamp(a.radius, 65.0f, 260.0f);
-        fp.actors[i].vel_pad[0] = vx;
-        fp.actors[i].vel_pad[1] = 0.0f;
-        fp.actors[i].vel_pad[2] = vz;
-        fp.actors[i].vel_pad[3] = spd;
-        prev_actors_[i] = a;
+        fluid_cell_origin_[0] = new_cell_x;
+        fluid_cell_origin_[1] = new_cell_z;
+        origin_x = static_cast<float>(new_cell_x) * kTexelCm;
+        origin_z = static_cast<float>(new_cell_z) * kTexelCm;
+
+        const float dt = 1.0f / 30.0f;
+        last_elapsed_sec_ = elapsed_sec;
+        last_fluid_frame_idx_ = frame_idx;
+
+        const int fcur = fluid_ping_;
+        const int fprev = 1 - fluid_ping_;
+        if (fluid_vol_[fprev].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            Context::cmd_transition_image(cmd, fluid_vol_[fprev].image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                          fluid_vol_[fprev].layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                          VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            fluid_vol_[fprev].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        Context::cmd_transition_image(cmd, fluid_vol_[fcur].image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      fluid_vol_[fcur].layout, VK_IMAGE_LAYOUT_GENERAL,
+                                      fluid_vol_[fcur].layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                          ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
+                                          : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                      fluid_vol_[fcur].layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                          ? 0
+                                          : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        fluid_vol_[fcur].layout = VK_IMAGE_LAYOUT_GENERAL;
+
+        FroxelFluidParams fp{};
+        fp.grid_info[0] = origin_x;
+        fp.grid_info[1] = origin_z;
+        fp.grid_info[2] = kFluidWorldSize;
+        fp.grid_info[3] = dt;
+        fp.shift_and_t[0] = static_cast<float>(shift_x);
+        fp.shift_and_t[1] = static_cast<float>(shift_z);
+        fp.shift_and_t[2] = elapsed_sec;
+        fp.shift_and_t[3] = reset_fluid ? 1.0f : 0.0f;
+        fp.counts[0] = n_act;
+        for (std::uint32_t i = 0u; i < n_act; ++i) {
+            const FogActor &a = actors[i];
+            float vx = 0.0f, vz = 0.0f;
+            float best_match_d2 = 240.0f * 240.0f;
+            for (std::uint32_t j = 0u; j < prev_actor_count_; ++j) {
+                const float dx = a.x - prev_actors_[j].x;
+                const float dz = a.z - prev_actors_[j].z;
+                const float d2 = dx * dx + dz * dz;
+                if (d2 < best_match_d2) {
+                    best_match_d2 = d2;
+                    vx = dx / dt;
+                    vz = dz / dt;
+                }
+            }
+            const float spd = std::sqrt(vx * vx + vz * vz);
+            fp.actors[i].pos_rad[0] = a.x;
+            fp.actors[i].pos_rad[1] = a.foot_y;
+            fp.actors[i].pos_rad[2] = a.z;
+            fp.actors[i].pos_rad[3] = std::clamp(a.radius, 65.0f, 260.0f);
+            fp.actors[i].vel_pad[0] = vx;
+            fp.actors[i].vel_pad[1] = 0.0f;
+            fp.actors[i].vel_pad[2] = vz;
+            fp.actors[i].vel_pad[3] = spd;
+            prev_actors_[i] = a;
+        }
+        prev_actor_count_ = n_act;
+        std::memcpy(fluid_cpu, &fp, sizeof(fp));
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fluid_pipe_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fluid_pipe_layout_, 0, 1, &fluid_sets_[fcur], 0, nullptr);
+        vkCmdPushConstants(cmd, fluid_pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fluid_bda), &fluid_bda);
+        vkCmdDispatch(cmd, (kFluidSize + 7u) / 8u, (kFluidSize + 7u) / 8u, 1u);
+
+        Context::cmd_transition_image(cmd, fluid_vol_[fcur].image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        fluid_vol_[fcur].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        last_fluid_idx_ = fcur;
+        fluid_ping_ = 1 - fluid_ping_;
+        fluid_valid_ = true;
     }
-    prev_actor_count_ = n_act;
-    std::memcpy(fluid_cpu, &fp, sizeof(fp));
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fluid_pipe_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fluid_pipe_layout_, 0, 1, &fluid_sets_[fcur], 0, nullptr);
-    vkCmdPushConstants(cmd, fluid_pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fluid_bda), &fluid_bda);
-    vkCmdDispatch(cmd, (kFluidSize + 7u) / 8u, (kFluidSize + 7u) / 8u, 1u);
-
-    Context::cmd_transition_image(cmd, fluid_vol_[fcur].image, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    fluid_vol_[fcur].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    last_fluid_idx_ = fcur;
-    fluid_ping_ = 1 - fluid_ping_;
-    fluid_valid_ = true;
 
     if (out_ground_info) {
         out_ground_info[0] = origin_x;

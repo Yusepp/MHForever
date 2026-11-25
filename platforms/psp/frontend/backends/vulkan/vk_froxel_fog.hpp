@@ -161,6 +161,7 @@ private:
     float last_cam_world_[3]{};
     int fluid_cell_origin_[2]{0, 0};
     float last_elapsed_sec_ = 0.0f;
+    std::uint64_t last_fluid_frame_idx_ = ~0ull;
     FogActor prev_actors_[kMaxActors]{};
     std::uint32_t prev_actor_count_ = 0u;
 };

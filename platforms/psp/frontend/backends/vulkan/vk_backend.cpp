@@ -1173,6 +1173,18 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
         }
         if ((ge.reg(kFogEnable) & 1u) != 0 && (ge.reg(kAlphaBlendEnable) & 1u) == 0 && !cur_light_in_.has_psp_fog) {
             unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
+            auto f24 = [](std::uint32_t v) noexcept -> float {
+                std::uint32_t bits = (v & 0xFFFFFFu) << 8u;
+                float f = 0.0f;
+                std::memcpy(&f, &bits, 4);
+                return f;
+            };
+            const float fog_end = std::fabs(f24(ge.reg(0xCDu)));
+            const float fog_inv = std::fabs(f24(ge.reg(0xCEu)));
+            // Live PSP fog opacity at 1800 cm mid-distance: 0 = clear area, 1 = dense/surging white fog!
+            cur_light_in_.psp_fog_intensity = (fog_end > 1.0f && fog_inv > 1e-6f)
+                ? std::clamp(1.0f - (fog_end - 1800.0f) * fog_inv, 0.0f, 1.0f)
+                : 0.0f;
             cur_light_in_.has_psp_fog = true;
         }
     }

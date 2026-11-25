@@ -100,6 +100,7 @@ struct LightingFrameInput {
     float light0_dir[3]{0.35f, 0.78f, 0.52f}; // live PSP GE directional light 0 (world space)
     bool has_light0 = false;
     float psp_fog_rgb[3]{0.72f, 0.78f, 0.86f};
+    float psp_fog_intensity = 0.0f; // live PSP fog density at mid-range (0 = clear area, 1 = dense/surging fog)
     bool has_psp_fog = false;
     std::uint64_t frame_index = 0;
     FogActor fog_actors[FroxelFog::kMaxActors]{};
