@@ -1,0 +1,211 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Frostbite / Wronski True 3D Froxel Volumetric Fog — Pass 1: Density, Lighting & Temporal Reprojection.
+// Runs on a real 160x90x64 VK_IMAGE_TYPE_3D (RGBA16F) frustum volume with exponential depth slicing.
+// - 100% world-locked 3D altitude band (NEVER follows camera pitch or height!)
+// - Sculpted 2-octave 3D Perlin-Worley billowing vapor banks + directional derivative self-shadowing
+// - Direct sun scattering occluded by shadow map or RT god-ray visibility + dynamic world point lights
+// - Temporal reprojection into previous frame's 3D volume (7x effective supersampling, zero banding!)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D u_scatter_out;
+layout(set = 1, binding = 1) uniform sampler3D u_scatter_prev;
+
+struct ViewPointLight {
+    vec4 pos_radius;      // xyz = view-space pos (+Y down, -Z forward), w = radius
+    vec4 color_intensity; // rgb = linear HDR color, w = intensity
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightListBuf {
+    ViewPointLight items[];
+};
+
+struct FroxelParams {
+    mat4 inv_view;        // column-major: PSP view (+Y up) -> world space (cm)
+    mat4 prev_view;       // column-major: world space (cm) -> previous frame PSP view (+Y up)
+    mat4 shadow_from_view;// column-major: PSP view (+Y up) -> sun shadow clip space
+    vec4 proj_info;       // x = 1/p00, y = 1/p11, z = p00, w = p11
+    vec4 prev_proj_info;  // x = prev_p00, y = prev_p11, z = near_z, w = far_z
+    vec4 sun_dir_view;    // xyz = normalized sun dir (+Y down view), w = is_cave
+    vec4 fog_color;       // rgb = biome fog color (linear), a = base_density
+    vec4 scatter_color;   // rgb = sun scatter color (linear), a = scatter_strength
+    vec4 world_env;       // x = elapsed_sec, y = fixed_zone_floor_y, z = vapor_strength, w = frame_idx
+    uvec4 slots;          // x = noise3d_slot, y = linear_sampler, z = shadow_map_slot, w = nearest_sampler
+    uvec4 rt_and_flags;   // x = rt_shadow_slot, y = reset_history, z = light_count, w = 0
+    LightListBuf lights;
+    uvec2 pad_bda;
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer FroxelParamsBuf {
+    FroxelParams p;
+};
+
+layout(push_constant) uniform FroxelPush {
+    FroxelParamsBuf buf;
+} pc;
+
+const float kFroxelW = 160.0;
+const float kFroxelH = 90.0;
+const float kFroxelD = 64.0;
+
+float ign3(vec3 p) {
+    return fract(52.9829189 * fract(dot(p, vec3(0.06711056, 0.00583715, 0.1319283))));
+}
+
+float hg_phase(float cos_theta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cos_theta, 0.05);
+    return (1.0 - g2) / (4.0 * 3.14159265 * pow(denom, 1.5));
+}
+
+float slice_depth(float s, float near_z, float far_z) {
+    return near_z * pow(far_z / near_z, s / kFroxelD);
+}
+
+// Fast trilinear sample of our 32x32x32 Perlin-Worley vapor noise atlas (256x128 = 8x4 tiles, L1-cached).
+float sample_vapor_noise(uint nslot, uint lsamp, vec3 uvw) {
+    vec3 f = fract(uvw);
+    float zf = f.z * 32.0;
+    float z0 = floor(zf);
+    float z1 = mod(z0 + 1.0, 32.0);
+    float zt = fract(zf);
+    vec2 tile0 = vec2(mod(z0, 8.0), floor(z0 / 8.0));
+    vec2 tile1 = vec2(mod(z1, 8.0), floor(z1 / 8.0));
+    vec2 local_uv = (f.xy * 30.0 + 1.0) / 32.0;
+    vec2 uv0 = (tile0 + local_uv) / vec2(8.0, 4.0);
+    vec2 uv1 = (tile1 + local_uv) / vec2(8.0, 4.0);
+    float v0 = texture(sampler2D(u_textures[nslot], u_samplers[lsamp]), uv0).r;
+    float v1 = texture(sampler2D(u_textures[nslot], u_samplers[lsamp]), uv1).r;
+    return mix(v0, v1, zt);
+}
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+    if (gid.x >= int(kFroxelW) || gid.y >= int(kFroxelH) || gid.z >= int(kFroxelD)) return;
+
+    FroxelParams p = pc.buf.p;
+    float near_z = p.prev_proj_info.z;
+    float far_z  = p.prev_proj_info.w;
+
+    // Temporal low-discrepancy jitter inside the froxel breaks up 3D grid aliasing cleanly.
+    float fidx = mod(p.world_env.w, 64.0);
+    float jz = ign3(vec3(gid) + vec3(fidx * 1.7, fidx * 2.3, fidx * 0.9));
+    float jx = fract(jz * 7.31) - 0.5;
+    float jy = fract(jz * 13.17) - 0.5;
+
+    float z0 = slice_depth(float(gid.z), near_z, far_z);
+    float z1 = slice_depth(float(gid.z) + 1.0, near_z, far_z);
+    float z_jit = mix(z0, z1, jz);
+    float z_ctr = 0.5 * (z0 + z1);
+
+    vec2 uv_jit = (vec2(gid.xy) + vec2(0.5) + vec2(jx, jy) * 0.65) / vec2(kFroxelW, kFroxelH);
+    vec2 ndc_jit = uv_jit * 2.0 - 1.0;
+    // PSP view space (+Y up, -Z forward); screen UV is +Y down so negate Y.
+    vec3 P_psp = vec3(ndc_jit.x * p.proj_info.x * z_jit, -ndc_jit.y * p.proj_info.y * z_jit, -z_jit);
+    vec3 P_view_ydown = vec3(P_psp.x, -P_psp.y, P_psp.z);
+    vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
+
+    // 1. 100% World-Locked Altitude-Banded 3D Billowing Vapor Density (NEVER follows camera!).
+    float floor_y = p.world_env.y;
+    float rel_y = P_world.y - floor_y;
+    // Dense ground-hugging mist banks (0..180 cm above zone floor) + soft high distant valley mist.
+    float ground_band = exp(-max(rel_y, 0.0) / 160.0) * smoothstep(-90.0, 15.0, rel_y);
+    float far_band = smoothstep(500.0, 1800.0, z_jit) * 0.30 * exp(-max(rel_y, 0.0) / 520.0);
+    float env_mask = clamp(ground_band + far_band, 0.0, 1.15);
+
+    float t_wind = p.world_env.x * 0.024;
+    float billow = 0.5;
+    float n1 = 0.5;
+    vec3 uvw1 = P_world * 0.0014 + vec3(t_wind, -t_wind * 0.12, t_wind * 0.68);
+    vec3 uvw2 = P_world * 0.0034 + vec3(-t_wind * 0.55, t_wind * 0.22, t_wind * 1.05);
+    if (p.slots.x != 0u) {
+        n1 = sample_vapor_noise(p.slots.x, p.slots.y, uvw1);
+        float n2 = sample_vapor_noise(p.slots.x, p.slots.y, uvw2);
+        float wisp = n1 * 0.66 + n2 * 0.34;
+        // Crisp pockets of clear air (< 0.34) between sculpted billowing vapor banks (> 0.74)!
+        billow = smoothstep(0.34, 0.76, wisp);
+    }
+
+    float near_fade = smoothstep(near_z, near_z + 110.0, z_jit);
+    float vapor_str = p.world_env.z;
+    float sigma_t = (0.00004 + 0.00185 * billow * env_mask * vapor_str) * near_fade;
+
+    // 2. Physical In-Scattering: Directional Self-Shadowed Vapor + Sun Shafts + Dynamic Point Lights!
+    vec3 sun_v = normalize(p.sun_dir_view.xyz);
+    vec3 sun_w = normalize(mat3(p.inv_view) * vec3(sun_v.x, -sun_v.y, sun_v.z));
+    vec3 ray_v = normalize(P_view_ydown);
+    float cos_sun = clamp(dot(ray_v, sun_v), -1.0, 1.0);
+    float phase = clamp(hg_phase(cos_sun, 0.65) * 0.90 + 0.25, 0.0, 2.4);
+
+    // Directional derivative self-shadowing: bright sunlit/moonlit vapor crests, moody shaded bellies!
+    float crest = 0.65;
+    if (p.slots.x != 0u && sigma_t > 0.00008) {
+        float n_sun = sample_vapor_noise(p.slots.x, p.slots.y, uvw1 + sun_w * 0.075);
+        crest = clamp((n1 - n_sun) * 2.8 + 0.55, 0.14, 1.35);
+    }
+
+    vec3 ambient_col = mix(p.fog_color.rgb * 0.52, p.fog_color.rgb * 1.32 + vec3(0.06, 0.08, 0.10), clamp(crest, 0.0, 1.0));
+    vec3 in_scatter = ambient_col * sigma_t;
+
+    // Direct sun volumetric shafts (occluded by shadow map or RT god-ray visibility).
+    if (p.sun_dir_view.w < 0.5 && p.scatter_color.a > 0.001) {
+        float sun_vis = 1.0;
+        if (p.rt_and_flags.x != 0u) {
+            sun_vis = texture(sampler2D(u_textures[p.rt_and_flags.x], u_samplers[p.slots.y]), uv_jit).a;
+        } else if (p.slots.z != 0u) {
+            vec4 sc = p.shadow_from_view * vec4(P_psp, 1.0);
+            vec2 suv = sc.xy * 0.5 + 0.5;
+            if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
+                float sd = texture(sampler2D(u_textures[p.slots.z], u_samplers[p.slots.w]), suv).r;
+                sun_vis = (sc.z - 0.002 <= sd) ? 1.0 : 0.0;
+            }
+        }
+        in_scatter += p.scatter_color.rgb * (sun_vis * phase * p.scatter_color.a * sigma_t * 1.65);
+    }
+
+    // Dynamic world-space point lights (campfires, torches, Kut-Ku fireballs) glowing inside the 3D mist!
+    uint n_lights = min(p.rt_and_flags.z, 16u);
+    for (uint li = 0u; li < n_lights; ++li) {
+        ViewPointLight pl = p.lights.items[li];
+        vec3 to_l = pl.pos_radius.xyz - P_view_ydown;
+        float d2 = dot(to_l, to_l);
+        float rad = pl.pos_radius.w * 1.35;
+        if (d2 >= rad * rad) continue;
+        float dn = sqrt(d2) / rad;
+        float w = (1.0 - dn * dn);
+        float att = (w * w) / (1.0 + dn * dn * 2.2);
+        in_scatter += pl.color_intensity.rgb * (pl.color_intensity.w * att * max(sigma_t, 0.00022) * 2.4);
+    }
+
+    vec4 curr_val = vec4(in_scatter, sigma_t);
+
+    // 3. Temporal Reprojection into Previous Frame's 3D Froxel Volume (7x supersampling, zero flicker!).
+    if (p.rt_and_flags.y == 0u) {
+        vec2 uv_ctr = (vec2(gid.xy) + 0.5) / vec2(kFroxelW, kFroxelH);
+        vec2 ndc_ctr = uv_ctr * 2.0 - 1.0;
+        vec3 P_psp_ctr = vec3(ndc_ctr.x * p.proj_info.x * z_ctr, -ndc_ctr.y * p.proj_info.y * z_ctr, -z_ctr);
+        vec3 P_world_ctr = (p.inv_view * vec4(P_psp_ctr, 1.0)).xyz;
+        vec3 P_prev = (p.prev_view * vec4(P_world_ctr, 1.0)).xyz;
+        float prev_z = -P_prev.z;
+        if (prev_z > near_z && prev_z < far_z) {
+            vec2 prev_ndc = vec2(P_prev.x * p.prev_proj_info.x, -P_prev.y * p.prev_proj_info.y) / prev_z;
+            vec2 prev_uv = prev_ndc * 0.5 + 0.5;
+            float prev_w = log(prev_z / near_z) / log(far_z / near_z);
+            if (prev_uv.x > 0.005 && prev_uv.x < 0.995 && prev_uv.y > 0.005 && prev_uv.y < 0.995 &&
+                prev_w > 0.005 && prev_w < 0.995) {
+                vec4 prev_val = texture(u_scatter_prev, vec3(prev_uv, prev_w));
+                curr_val = mix(prev_val, curr_val, 0.14);
+            }
+        }
+    }
+
+    imageStore(u_scatter_out, gid, curr_val);
+}

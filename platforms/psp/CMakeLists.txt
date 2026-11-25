@@ -62,6 +62,7 @@ if(MHF_WITH_SDL)
         frontend/backends/vulkan/vk_pipelines.cpp
         frontend/backends/vulkan/vk_transfer.cpp
         frontend/backends/vulkan/vk_lighting.cpp
+        frontend/backends/vulkan/vk_froxel_fog.cpp
         frontend/backends/vulkan/vk_shadows.cpp
         frontend/backends/vulkan/vk_raytracing.cpp
         frontend/backends/vulkan/vk_interpolate.cpp)

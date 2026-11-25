@@ -18,6 +18,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform texture2D u_textures[];
 layout(set = 0, binding = 1) uniform sampler u_samplers[];
 layout(set = 1, binding = 0, rgba8) uniform image2D u_lit_out;
+layout(set = 2, binding = 0) uniform sampler3D u_froxel_vol;
 
 layout(constant_id = 0) const uint kSpecInPlace = 0u;
 
@@ -398,8 +399,14 @@ void main() {
         }
     }
 
-    // 5. Smooth bilinear upsample of quarter-res Rayleigh/Mie volumetric fog & sun shafts.
-    if (p.tex_slots.w != 0u) {
+    // 5. True 3D Frostbite/Wronski Froxel Volumetric Fog (single hardware trilinear lookup at exact pixel depth!),
+    //    or fallback to quarter-res 2D volumetric fog when Froxel Fog is OFF.
+    if ((p.ext_slots.w & 32u) != 0u) {
+        float z_sample = is_sky ? 2200.0 : clamp(z_eye, 70.0, 2200.0);
+        float fw = log(z_sample / 70.0) / log(2200.0 / 70.0);
+        vec4 froxel = texture(u_froxel_vol, vec3(uv, clamp(fw, 0.0, 1.0)));
+        col_lin = col_lin * froxel.a + froxel.rgb;
+    } else if (p.tex_slots.w != 0u) {
         vec4 vol = texture(sampler2D(u_textures[p.tex_slots.w],
                                      u_samplers[p.aux_slots.y]),
                            uv);

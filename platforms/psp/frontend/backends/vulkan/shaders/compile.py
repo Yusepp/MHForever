@@ -31,6 +31,8 @@ SHADERS = [
     ("kGtaoCompSpv", "gtao.comp"),
     ("kGtaoDenoiseCompSpv", "gtao_denoise.comp"),
     ("kVolumetricFogCompSpv", "volumetric_fog.comp"),
+    ("kFroxelInjectCompSpv", "froxel_inject.comp"),
+    ("kFroxelIntegrateCompSpv", "froxel_integrate.comp"),
     ("kBloomExtractCompSpv", "bloom_extract.comp"),
     ("kSsgiBounceCompSpv", "ssgi_bounce.comp"),
     ("kGlowBlurCompSpv", "glow_blur.comp"),

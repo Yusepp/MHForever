@@ -12,6 +12,7 @@
 
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
+#include "vk_froxel_fog.hpp"
 #include "../gpu_common.hpp"
 #include "texture_pack.hpp"
 
@@ -167,8 +168,8 @@ public:
     }
 
     // Number of LightingComputeParams structs needed per dispatch
-    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa, exposure).
-    static constexpr std::size_t kParamSlotsPerDispatch = 11;
+    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa, exposure, froxel_inject, froxel_integ).
+    static constexpr std::size_t kParamSlotsPerDispatch = 13;
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
@@ -206,6 +207,8 @@ private:
     std::size_t scene_set_cursor_ = 0;
 
     VkPipelineLayout pipe_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout comp_pipe_layout_ = VK_NULL_HANDLE;
+    FroxelFog froxel_;
     VkPipeline gtao_pipe_ = VK_NULL_HANDLE;
     VkPipeline gtao_denoise_pipe_ = VK_NULL_HANDLE;
     VkPipeline vol_pipe_ = VK_NULL_HANDLE;

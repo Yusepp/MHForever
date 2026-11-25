@@ -151,19 +151,25 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 2, pipe_sets.data(), 1, &pcr};
     if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &pipe_layout_) != VK_SUCCESS) return false;
 
-    auto make_pipe_spec = [&](const auto &spv, const VkSpecializationInfo *spec) -> VkPipeline {
+    // Initialize True 3D Froxel Volumetric Fog (160x90x64 RGBA16F) and build 3-set composite layout (Set 2 = sampler3D).
+    if (!froxel_.init(ctx, bindless_layout)) return false;
+    std::array<VkDescriptorSetLayout, 3> comp_sets = {bindless_layout, storage_layout_, froxel_.sample_set_layout()};
+    VkPipelineLayoutCreateInfo cplci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 3, comp_sets.data(), 1, &pcr};
+    if (vkCreatePipelineLayout(ctx.device, &cplci, nullptr, &comp_pipe_layout_) != VK_SUCCESS) return false;
+
+    auto make_pipe_layout = [&](const auto &spv, VkPipelineLayout layout, const VkSpecializationInfo *spec) -> VkPipeline {
         VkShaderModule mod = ctx.create_shader_module(spv);
         if (!mod) return VK_NULL_HANDLE;
         VkComputePipelineCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
         ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", spec};
-        ci.layout = pipe_layout_;
+        ci.layout = layout;
         VkPipeline pipe = VK_NULL_HANDLE;
         vkCreateComputePipelines(ctx.device, ctx.pipeline_cache, 1, &ci, nullptr, &pipe);
         vkDestroyShaderModule(ctx.device, mod, nullptr);
         return pipe;
     };
-    auto make_pipe = [&](const auto &spv) -> VkPipeline { return make_pipe_spec(spv, nullptr); };
+    auto make_pipe = [&](const auto &spv) -> VkPipeline { return make_pipe_layout(spv, pipe_layout_, nullptr); };
 
     gtao_pipe_ = make_pipe(shaders::kGtaoCompSpv);
     gtao_denoise_pipe_ = make_pipe(shaders::kGtaoDenoiseCompSpv);
@@ -172,11 +178,11 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     ssgi_pipe_ = make_pipe(shaders::kSsgiBounceCompSpv);
     glow_blur_pipe_ = make_pipe(shaders::kGlowBlurCompSpv);
     flash_pipe_ = make_pipe(shaders::kEmissiveFlashCompSpv);
-    comp_pipe_ = make_pipe(shaders::kLightingCompositeCompSpv);
+    comp_pipe_ = make_pipe_layout(shaders::kLightingCompositeCompSpv, comp_pipe_layout_, nullptr);
     const std::uint32_t inplace_val = 1u;
     const VkSpecializationMapEntry inplace_entry{0, 0, sizeof(std::uint32_t)};
     const VkSpecializationInfo inplace_spec{1, &inplace_entry, sizeof(inplace_val), &inplace_val};
-    comp_inplace_pipe_ = make_pipe_spec(shaders::kLightingCompositeCompSpv, &inplace_spec);
+    comp_inplace_pipe_ = make_pipe_layout(shaders::kLightingCompositeCompSpv, comp_pipe_layout_, &inplace_spec);
     exposure_pipe_ = make_pipe(shaders::kExposureCompSpv);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
     taa_pipe_ = make_pipe(shaders::kTaaResolveCompSpv);
@@ -265,6 +271,11 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(fxaa_pipe_);
     kill_pipe(taa_pipe_);
     scene_set_views_.fill(VK_NULL_HANDLE);
+    if (comp_pipe_layout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(ctx.device, comp_pipe_layout_, nullptr);
+        comp_pipe_layout_ = VK_NULL_HANDLE;
+    }
+    froxel_.shutdown(ctx);
     if (pipe_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(ctx.device, pipe_layout_, nullptr);
         pipe_layout_ = VK_NULL_HANDLE;
@@ -754,6 +765,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
     ensure_noise3d(cmd, ctx, desc);
+    froxel_.ensure_fallback(cmd);
+    if (exposure_reset_) froxel_.reset_history();
 
     VkDescriptorSet scene_set = get_or_bind_scene_set(ctx, scene_color_view);
 
@@ -846,6 +859,13 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.env_time[3] = 0.0f;
     }
 
+    const bool use_3d_froxel = want_vol && want_froxel && froxel_.ready() && (view_mat != nullptr);
+    const bool run_2d_vol    = want_vol && !use_3d_froxel;
+    if (use_3d_froxel) {
+        base.ext_slots[3] |= 32u;
+        base.tex_slots[3] = 0u;
+    }
+
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;
     slots[kPassVol]         = base; slots[kPassVol].aux_slots[2]         = vol_tex_.w;        slots[kPassVol].aux_slots[3]         = vol_tex_.h;
@@ -901,7 +921,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         queue_to_general(gtao_tex_.image);
         queue_to_general(gtao_blur_tex_.image);
     }
-    if (want_vol)       queue_to_general(vol_tex_.image);
+    if (run_2d_vol)     queue_to_general(vol_tex_.image);
     if (need_bloom_src) queue_to_general(bloom_tex_.image);
     if (want_bloom)     queue_to_general(bloom_blur_tex_.image);
     if (want_ssgi) {
@@ -916,8 +936,33 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     flush_barriers();
 
-    // Bind global bindless Set 0 once; individual passes only rebind Set 1.
+    // True 3D Froxel Volumetric Fog (160x90x64 RGBA16F): world-locked vapor + directional self-shadowing +
+    // temporal reprojection + Frostbite analytical integration.
     const VkDescriptorSet bindless_set = desc.set();
+    bool froxel_dispatched = false;
+    if (use_3d_froxel) {
+        auto srgb_to_lin = [](float v) { return std::pow(std::clamp(v, 0.0f, 1.0f), 2.2f); };
+        const float fog_lin[4] = {
+            srgb_to_lin(base.fog_color[0]), srgb_to_lin(base.fog_color[1]), srgb_to_lin(base.fog_color[2]),
+            base.fog_color[3]
+        };
+        const float scat_lin[4] = {
+            srgb_to_lin(base.scatter_color[0]), srgb_to_lin(base.scatter_color[1]), srgb_to_lin(base.scatter_color[2]),
+            base.scatter_color[3]
+        };
+        constexpr std::size_t kSlotFroxelInject = 11u;
+        constexpr std::size_t kSlotFroxelInteg  = 12u;
+        froxel_dispatched = froxel_.dispatch(
+            cmd, bindless_set, view_mat, base.inv_view, in.proj, base.sun_dir_view,
+            fog_lin, scat_lin, elapsed_sec, base.env_time[2], in.frame_index,
+            noise3d_tex_.slot, base.aux_slots[1], base.shadow_info[0], base.shadow_info[1],
+            (base.shadow_info[0] != 0u ? shadow_from_view : nullptr), rt_shadow_slot,
+            lights_bda, base.light_count,
+            &slots[kSlotFroxelInject], params_bda + kSlotFroxelInject * sizeof(LightingComputeParams),
+            &slots[kSlotFroxelInteg],  params_bda + kSlotFroxelInteg  * sizeof(LightingComputeParams));
+    }
+
+    // Bind global bindless Set 0 once; individual passes only rebind Set 1.
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
 
     // Stage 1: Enabled half/quarter-res passes + 1-WG adaptive exposure run in parallel across GPU CUs.
@@ -930,7 +975,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     };
 
     if (need_gtao_pass) run_pass(gtao_pipe_, gtao_set_, gtao_tex_.w, gtao_tex_.h, kPassGtao);
-    if (want_vol)       run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, kPassVol);
+    if (run_2d_vol)     run_pass(vol_pipe_, vol_set_, vol_tex_.w, vol_tex_.h, kPassVol);
     if (need_bloom_src) run_pass(bloom_pipe_, bloom_set_, bloom_tex_.w, bloom_tex_.h, kPassBloom);
     if (want_ssgi)      run_pass(ssgi_pipe_, ssgi_set_, ssgi_tex_.w, ssgi_tex_.h, kPassSsgi);
     {
@@ -957,16 +1002,26 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
 
     // Barrier batch: transition produced targets -> SHADER_READ_ONLY.
     if (need_gtao_pass) queue_to_read(gtao_blur_tex_.image);
-    if (want_vol)       queue_to_read(vol_tex_.image);
+    if (run_2d_vol)     queue_to_read(vol_tex_.image);
     if (want_bloom)     queue_to_read(bloom_blur_tex_.image);
     if (want_ssgi) {
         queue_to_read(ssgi_blur_tex_.image);
     }
 
+    auto run_comp = [&](VkPipeline pipe, VkDescriptorSet out_set) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        const VkDescriptorSet froxel_set = froxel_dispatched ? froxel_.sample_set() : froxel_.fallback_sample_set();
+        const std::array<VkDescriptorSet, 3> sets = {bindless_set, out_set, froxel_set};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, comp_pipe_layout_, 0, 3, sets.data(), 0, nullptr);
+        const VkDeviceAddress addr = params_bda + kPassComposite * sizeof(LightingComputeParams);
+        vkCmdPushConstants(cmd, comp_pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(addr), &addr);
+        vkCmdDispatch(cmd, (scene_w + 7u) / 8u, (scene_h + 7u) / 8u, 1u);
+    };
+
     if (want_fxaa) {
         flush_barriers();
-        // Stage 3: Unified full-res composite reading src_color_slot -> writing lit_tmp_tex_.
-        run_pass(comp_pipe_, lit_tmp_set_, scene_w, scene_h, kPassComposite);
+        // Stage 3: Unified full-res composite reading src_color_slot + 3D froxel volume -> writing lit_tmp_tex_.
+        run_comp(comp_pipe_, lit_tmp_set_);
 
         // Stage 4: Pre-HUD Edge Anti-Aliasing (FXAA 3.11) -> scene_color.
         queue_to_read(lit_tmp_tex_.image);
@@ -976,20 +1031,21 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                      use_hdr_src ? 0 : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         flush_barriers();
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
         run_pass(fxaa_pipe_, scene_set, scene_w, scene_h, kPassFxaa);
     } else if (use_hdr_src) {
         // HDR input -> composite & tonemap directly into RGBA8 scene_color (no in-place read needed!).
         push_barrier(scene_color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                      0, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         flush_barriers();
-        run_pass(comp_pipe_, scene_set, scene_w, scene_h, kPassComposite);
+        run_comp(comp_pipe_, scene_set);
     } else {
         // FXAA off, LDR input: composite in place directly on scene_color!
         push_barrier(scene_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         flush_barriers();
-        run_pass(comp_inplace_pipe_, scene_set, scene_w, scene_h, kPassComposite);
+        run_comp(comp_inplace_pipe_, scene_set);
     }
     return true;
 }
