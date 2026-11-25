@@ -58,9 +58,9 @@ constexpr BiomePreset kBiomePresets[] = {
     // Jungle (Jungle & Old Jungle)
     {{0.70f, 0.82f, 0.78f}, 0.64f, {0.70f, 0.82f, 0.78f}, 0.00046f, {0.96f, 0.98f, 0.82f}, 0.30f,
      0.80f, 0.25f, 0.15f, 0.15f, {0.38f, 0.56f, 0.38f}, 0.10f, 0.20f, 44.0f, 0.54f, 0.22f, 0.08f},
-    // Swamp (Swamp & Old Swamp)
-    {{0.70f, 0.76f, 0.88f}, 0.66f, {0.60f, 0.68f, 0.78f}, 0.00066f, {0.80f, 0.88f, 0.96f}, 0.24f,
-     0.78f, 0.26f, 0.14f, 0.12f, {0.30f, 0.40f, 0.48f}, 0.09f, 0.21f, 46.0f, 0.46f, 0.26f, 0.05f},
+    // Swamp (Swamp & Old Swamp) — keep moody without double-fogging over PSP's native Swamp fog.
+    {{0.68f, 0.74f, 0.84f}, 0.66f, {0.42f, 0.50f, 0.58f}, 0.00028f, {0.78f, 0.86f, 0.94f}, 0.18f,
+     0.80f, 0.22f, 0.10f, 0.12f, {0.28f, 0.36f, 0.44f}, 0.08f, 0.14f, 46.0f, 0.46f, 0.26f, 0.05f},
     // Volcano (Volcano, Old Volcano & Battleground)
     {{0.80f, 0.66f, 0.62f}, 0.64f, {0.60f, 0.34f, 0.22f}, 0.00048f, {1.00f, 0.60f, 0.28f}, 0.28f,
      0.70f, 0.38f, 0.19f, 0.14f, {1.00f, 0.36f, 0.10f}, 0.18f, 0.16f, 30.0f, 0.48f, 0.40f, 0.08f},
@@ -684,7 +684,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     slots[kPassBloomBlur]   = base; slots[kPassBloomBlur].aux_slots[0]   = bloom_tex_.slot;   slots[kPassBloomBlur].aux_slots[2]   = bloom_blur_tex_.w; slots[kPassBloomBlur].aux_slots[3] = bloom_blur_tex_.h;
     slots[kPassSsgiBlur]    = base; slots[kPassSsgiBlur].aux_slots[0]    = ssgi_tex_.slot;    slots[kPassSsgiBlur].aux_slots[2]    = ssgi_blur_tex_.w;  slots[kPassSsgiBlur].aux_slots[3]  = ssgi_blur_tex_.h;
     slots[kPassFlash]       = base; slots[kPassFlash].aux_slots[0]       = bloom_tex_.slot;   slots[kPassFlash].aux_slots[2]       = 4u;                slots[kPassFlash].aux_slots[3]     = 2u;
-    slots[kPassComposite]   = base; slots[kPassComposite].ext_slots[1]   = want_ssgi ? flash_tex_.slot : 0u; slots[kPassComposite].aux_slots[2] = scene_w; slots[kPassComposite].aux_slots[3] = scene_h;
+    slots[kPassComposite]   = base; slots[kPassComposite].ext_slots[1]   = 0u; slots[kPassComposite].aux_slots[2] = scene_w; slots[kPassComposite].aux_slots[3] = scene_h;
     slots[kPassFxaa]        = base; slots[kPassFxaa].aux_slots[0]        = lit_tmp_tex_.slot; slots[kPassFxaa].aux_slots[2]        = scene_w;           slots[kPassFxaa].aux_slots[3]      = scene_h;
     slots[kPassExposure]    = base; slots[kPassExposure].aux_slots[2]    = 1u;                slots[kPassExposure].aux_slots[3]    = 1u;
 
@@ -736,7 +736,6 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_ssgi) {
         queue_to_general(ssgi_tex_.image);
         queue_to_general(ssgi_blur_tex_.image);
-        queue_to_general(flash_tex_.image);
     }
     if (want_fxaa) queue_to_general(lit_tmp_tex_.image);
     push_barrier(exposure_tex_.image,
@@ -783,7 +782,6 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_bloom)     run_pass(glow_blur_pipe_, bloom_blur_set_, bloom_blur_tex_.w, bloom_blur_tex_.h, kPassBloomBlur);
     if (want_ssgi) {
         run_pass(glow_blur_pipe_, ssgi_blur_set_, ssgi_blur_tex_.w, ssgi_blur_tex_.h, kPassSsgiBlur);
-        run_pass(flash_pipe_, flash_set_, 4u, 2u, kPassFlash);
     }
 
     // Barrier batch: transition produced targets -> SHADER_READ_ONLY.
@@ -792,7 +790,6 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     if (want_bloom)     queue_to_read(bloom_blur_tex_.image);
     if (want_ssgi) {
         queue_to_read(ssgi_blur_tex_.image);
-        queue_to_read(flash_tex_.image);
     }
 
     if (want_fxaa) {

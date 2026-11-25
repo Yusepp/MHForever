@@ -1672,21 +1672,27 @@ void VkBackend::draw_batch() {
         cur_snap_.batches.push_back(rb);
     }
 
-    if (setup_.is_additive_vfx && batch_world_cnt_ > 0u && is_shown_target(setup_.target) &&
+    if (setup_.is_additive_vfx && batch_world_cnt_ >= 12u && is_shown_target(setup_.target) &&
         cur_vfx_lights_.size() < 32u) {
         const float inv_n = 1.0f / static_cast<float>(batch_world_cnt_);
         const float cx = batch_world_sum_[0] * inv_n;
         const float cy = batch_world_sum_[1] * inv_n;
         const float cz = batch_world_sum_[2] * inv_n;
-        const float cr = std::clamp(batch_col_sum_[0] * inv_n / 255.0f, 0.0f, 1.0f);
-        const float cg = std::clamp(batch_col_sum_[1] * inv_n / 255.0f, 0.0f, 1.0f);
-        const float cb = std::clamp(batch_col_sum_[2] * inv_n / 255.0f, 0.0f, 1.0f);
+        float cr = std::clamp(batch_col_sum_[0] * inv_n / 255.0f, 0.0f, 1.0f);
+        float cg = std::clamp(batch_col_sum_[1] * inv_n / 255.0f, 0.0f, 1.0f);
+        float cb = std::clamp(batch_col_sum_[2] * inv_n / 255.0f, 0.0f, 1.0f);
         const float cmax = std::max({cr, cg, cb});
         const float cmin = std::min({cr, cg, cb});
         const float sat = cmax > 1e-4f ? (cmax - cmin) / cmax : 0.0f;
-        if (cmax > 0.28f && (sat > 0.14f || cmax > 0.65f)) {
-            const float intensity = std::clamp(0.45f + cmax * 0.45f + sat * 0.35f, 0.45f, 1.15f);
-            const float radius = 280.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 0.9f, 160.0f);
+        // Require either vivid chromatic VFX or a multi-particle bright burst (catches white-vertex-color fireballs
+        // while ignoring tiny 2-triangle NPC speech bubbles / floating indicators!).
+        if ((cmax > 0.32f && sat > 0.16f) || (cmax > 0.45f && batch_world_cnt_ >= 24u)) {
+            if (sat < 0.10f) {
+                // Neutral-white additive bursts (e.g. textured fireballs/explosions) get a natural warm amber tint.
+                cr = 1.00f; cg = 0.72f; cb = 0.42f;
+            }
+            const float intensity = std::clamp(0.36f + cmax * 0.34f + sat * 0.25f, 0.36f, 0.88f);
+            const float radius = 260.0f + std::min<float>(static_cast<float>(batch_world_cnt_) * 1.1f, 220.0f);
             bool merged = false;
             for (auto &ex : cur_vfx_lights_) {
                 const float dx = ex.world_pos[0] - cx;

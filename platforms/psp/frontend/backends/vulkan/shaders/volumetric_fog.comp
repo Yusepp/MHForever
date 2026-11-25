@@ -74,7 +74,8 @@ void main() {
     float max_dist = is_sky ? 1400.0 : min(linear_eye_z(p, d0), 1600.0);
 
     // 1. Physically motivated Rayleigh Aerial Perspective + World-up Atmospheric Valley Mist.
-    float fog_start = p.sun_dir_view.w > 0.5 ? 65.0 : 95.0;
+    // Start well beyond foreground combat (PSP zones like Swamp already have native near fog).
+    float fog_start = p.sun_dir_view.w > 0.5 ? 160.0 : 260.0;
     float eff_dist = max(max_dist - fog_start, 0.0);
     // Mist settles naturally toward the world floor (Swamp, Great Forest, Tower cloud-sea, Snowy peaks)
     // and thins cleanly toward the sky regardless of camera pitch!
@@ -82,8 +83,8 @@ void main() {
     float height_mod = clamp(1.12 - ray_up * 0.55, 0.42, 1.40);
     float optical_depth = eff_dist * p.fog_color.a * height_mod;
     float transmittance = is_sky ? 1.0 : exp(-optical_depth);
-    // Keep foreground and mid-ground clear so combat visibility is never compromised.
-    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.74);
+    // Keep foreground and mid-ground crisp so combat contrast is never washed out.
+    transmittance = mix(1.0, transmittance, is_sky ? 0.0 : 0.46);
 
     // Subtle Rayleigh sky-blue aerial perspective on distant outdoor mountains/cliffs.
     vec3 fog_rgb = p.fog_color.rgb;

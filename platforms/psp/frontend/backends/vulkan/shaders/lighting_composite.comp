@@ -217,26 +217,11 @@ void main() {
             col_lin += col_lin * hemi * (p.ground_bounce.a * (0.40 + 0.60 * ao));
         }
 
-        // 3. Gentle outdoor sun key + soft Blinn-Phong sheen + Fresnel rim (no fake terrain chrome/water!).
-        vec3 scatter_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
+        // 3. Gentle outdoor sun key (no global fake specular/fresnel sheen on grass, dirt, rock, or wood!).
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
         float sun_vis = ao * contact;
         float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_cave ? 0.45 : 1.0);
-        col_lin *= clamp(key_boost, 0.88, 1.15);
-
-        float ndotv = clamp(dot(N, V), 0.0, 1.0);
-        float fresnel = pow(1.0 - ndotv, 3.0);
-        if (p.spec_contact.x > 0.001 && !is_cave) {
-            vec3 H = normalize(L + V);
-            float ndoth = clamp(dot(N, H), 0.0, 1.0);
-            float luma_lin = dot(albedo_est, vec3(0.2126, 0.7152, 0.0722));
-            float spec = pow(ndoth, max(p.spec_contact.y, 16.0)) * (0.25 + 0.75 * fresnel) * ndotl;
-            col_lin += scatter_lin * (spec * p.spec_contact.x * 0.85 * sun_vis * (0.30 + 0.70 * luma_lin));
-        }
-        if (p.bloom_rim.z > 0.001 && !is_cave) {
-            float sun_align = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
-            col_lin += scatter_lin * (fresnel * sun_align * p.bloom_rim.z * 0.80 * sun_vis);
-        }
+        col_lin *= clamp(key_boost, 0.88, 1.14);
 
         // 3b. World-space Tiled Dynamic Point Lights (highlight-preserving soft-add: never blows out bright snow,
         // while vividly lighting dark caves, night quests, torches, fireballs, and elemental combat hits!).
@@ -264,18 +249,13 @@ void main() {
             col_lin += dyn_accum * headroom;
         }
 
-        // 4. Quarter-res SSGI-lite Colored Bounce + Coarse 4x2 Dynamic Emissive Flash.
+        // 4. Quarter-res SSGI-lite Colored Bounce (coarse 4x2 screen-space flash smear removed in favor of
+        // true world-space dynamic point lights above).
         if (p.ext_slots.x != 0u && p.world_up_view.w > 0.001) {
             vec3 ssgi = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.x],
                                                              u_samplers[p.aux_slots.y]),
                                                    uv).rgb);
             col_lin += ssgi * (0.30 + 0.70 * albedo_est) * (p.world_up_view.w * (0.45 + 0.55 * ao));
-        }
-        if (p.ext_slots.y != 0u) {
-            vec3 flash = srgb_to_linear_hdr(texture(sampler2D(u_textures[p.ext_slots.y],
-                                                              u_samplers[p.aux_slots.y]),
-                                                    uv).rgb);
-            col_lin += flash * (0.25 + 0.75 * albedo_est) * (0.32 * (0.45 + 0.55 * ao));
         }
     }
 
