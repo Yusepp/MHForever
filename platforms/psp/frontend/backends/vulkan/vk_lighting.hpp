@@ -64,7 +64,7 @@ struct alignas(16) LightingComputeParams {
     std::uint32_t tex_slots[4]{}; // x = color_slot, y = depth_slot, z = gtao_slot, w = vol_slot
     std::uint32_t aux_slots[4]{}; // x = bloom_slot, y = linear_sampler, z = out_w, w = out_h
     std::uint32_t ext_slots[4]{}; // x = ssgi_slot, y = gtao_raw/flash_slot, z = biome_id, w = flags (bit0=cave, bit1=vig, bit2=fxaa)
-    std::uint32_t phase1_slots[4]{}; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags (bit0=hdr, bit1=exp_reset), w = 0
+    std::uint32_t phase1_slots[4]{}; // x = gbuf_normal_slot, y = exposure_slot, z = hdr_flags (bit0=hdr, bit1=exp_reset), w = ground weather (0 absent, 1..1025)
     VkDeviceAddress lights_bda{0};
     std::uint32_t light_count{0};
     std::uint32_t lights_pad{0};
@@ -89,6 +89,7 @@ struct alignas(16) TaaComputeParams {
 static_assert(sizeof(TaaComputeParams) == 128);
 
 struct LightingFrameInput {
+    SceneCamera fog_camera{};
     static constexpr std::size_t kMaxViewLights = 64;
     float proj[16]{};         // active 3D perspective projection matrix (column-major)
     float view_rot[9]{1.0f, 0.0f, 0.0f,
@@ -102,6 +103,7 @@ struct LightingFrameInput {
     float psp_fog_rgb[3]{0.72f, 0.78f, 0.86f};
     float psp_fog_intensity = 0.0f; // live PSP fog density at mid-range (0 = clear area, 1 = dense/surging fog)
     bool has_psp_fog = false;
+    float translucent_fog_signal = 0.0f;
     std::uint64_t frame_index = 0;
     FogActor fog_actors[FroxelFog::kMaxActors]{};
     std::uint32_t fog_actor_count = 0u;

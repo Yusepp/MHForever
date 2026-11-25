@@ -340,7 +340,7 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
                          const float view_mat[16], const float inv_view[16],
                          const float proj[16], const float sun_dir_view[4],
                          const float fog_color_lin[4], const float scatter_color_lin[4],
-                         float elapsed_sec, float vapor_strength, std::uint64_t frame_idx,
+                         float elapsed_sec, float vapor_strength, std::uint64_t frame_idx, bool ground_mist_only, std::uint16_t ground_area,
                          std::uint32_t noise3d_slot, std::uint32_t linear_sampler,
                          std::uint32_t shadow_map_slot, std::uint32_t nearest_sampler,
                          const float *shadow_from_view, std::uint32_t rt_shadow_slot,
@@ -367,12 +367,17 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
     // 0. Detect zone teleports & lock static ground-mist floor to the area's marsh floor.
     const float cx = inv_view[12], cy = inv_view[13], cz = inv_view[14];
     bool camera_cut = !history_valid_;
+    if (ground_area != ground_area_) {
+        reset_history();
+        ground_area_ = ground_area;
+        camera_cut = true;
+    }
     if (zone_floor_valid_) {
         const float dx = cx - last_cam_world_[0];
         const float dy = cy - last_cam_world_[1];
         const float dz = cz - last_cam_world_[2];
         const float d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > 4500.0f * 4500.0f) {
+        if (ground_area == 0 && d2 > 4500.0f * 4500.0f) {
             zone_floor_valid_ = false;
             zone_floor_frames_ = 0u;
             fluid_valid_ = false;
@@ -398,12 +403,14 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
     }
     const float center_x = (primary_idx >= 0) ? actors[primary_idx].x : cx;
     const float center_z = (primary_idx >= 0) ? actors[primary_idx].z : cz;
-    const float target_floor_y = (primary_idx >= 0) ? actors[primary_idx].foot_y : (cy - 175.0f);
+    const float target_floor_y = ground_area != 0 && n_act != 0
+                                     ? actors[0].foot_y
+                                     : (primary_idx >= 0 ? actors[primary_idx].foot_y : cy - 175.0f);
     if (!zone_floor_valid_) {
         zone_floor_y_ = target_floor_y;
         zone_floor_valid_ = true;
         zone_floor_frames_ = 1u;
-    } else if (primary_idx >= 0) {
+    } else if (ground_area == 0 && primary_idx >= 0) {
         if (zone_floor_frames_ < 10u) {
             zone_floor_y_ = zone_floor_y_ * 0.65f + target_floor_y * 0.35f;
             ++zone_floor_frames_;
@@ -565,6 +572,7 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
     ip.world_env[3] = static_cast<float>(frame_idx & 0xFFFFu);
     ip.slots[0] = noise3d_slot; ip.slots[1] = linear_sampler; ip.slots[2] = shadow_map_slot; ip.slots[3] = nearest_sampler;
     ip.rt_and_flags[0] = rt_shadow_slot; ip.rt_and_flags[1] = camera_cut ? 1u : 0u; ip.rt_and_flags[2] = light_count;
+    ip.rt_and_flags[3] = ground_mist_only ? 1u : 0u;
     ip.lights_bda = lights_bda;
     std::memcpy(inject_cpu, &ip, sizeof(ip));
 

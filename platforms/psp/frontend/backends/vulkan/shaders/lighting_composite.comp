@@ -435,8 +435,14 @@ void main() {
         float floor_y = p.ground_fog_info.y;
         float fog_int = clamp(p.env_time.z, 0.0, 1.40);
         float surge = smoothstep(0.48, 1.05, fog_int);
-        float max_h_cm = mix(56.0, 108.0, clamp(fog_int * 0.85, 0.0, 1.0));
-        float dens_scale = mix(0.24, 0.44, clamp(fog_int * 0.85, 0.0, 1.0));
+        bool swamp = p.ext_slots.z == 11u;
+        if (swamp && p.phase1_slots.w != 0u) {
+            surge = float(p.phase1_slots.w - 1u) / 1024.0;
+        }
+        float max_h_cm = swamp ? mix(20.0, 75.0, surge)
+                               : mix(56.0, 108.0, clamp(fog_int * 0.85, 0.0, 1.0));
+        float dens_scale = swamp ? mix(0.12, 0.32, surge)
+                                 : mix(0.24, 0.44, clamp(fog_int * 0.85, 0.0, 1.0));
 
         if (abs(ray_w.y) > 0.008) {
             vec2 orig_xz = p.ground_fog_info.xz;
@@ -455,6 +461,16 @@ void main() {
             }
             uint nslot = p.shadow_info.w;
             uint lsamp = p.aux_slots.y;
+
+            // Vary the crest gently across the basin using a stationary world-space sample.
+            if (swamp && nslot != 0u) {
+                float floor_t = (floor_y - cam_w.y) / ray_w.y;
+                if (floor_t > 28.0 && floor_t < 4800.0) {
+                    vec2 floor_xz = (cam_w + ray_w * floor_t).xz;
+                    float crest = sample_vapor_noise(nslot, lsamp, vec3(floor_xz * 0.0015, 0.37));
+                    max_h_cm *= mix(0.84, 1.0, crest);
+                }
+            }
 
             const int kPlanes = 8;
             vec3 g_scatter = vec3(0.0);

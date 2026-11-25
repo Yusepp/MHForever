@@ -92,6 +92,7 @@ public:
     void set_aa_mode(int mode);
     // Publishes game-semantic world-space dynamic lights (e.g., elemental hit flashes, monster auras)
     // for the Vulkan renderer; safe to call from the host poll thread.
+    void set_scene_camera(const SceneCamera &camera);
     void set_semantic_frame(const SemanticSceneFrame &frame);
     // Turns the hunting horn's songs on (an enhancement, off unless called) at the place the player chose; the Game tab
     // of the in-game menu changes the place or lets the player drag them anywhere, and the controls file keeps the new

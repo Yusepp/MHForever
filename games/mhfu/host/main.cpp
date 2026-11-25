@@ -364,8 +364,10 @@ void update_guild_quest_scaling([[maybe_unused]] Runtime &rt) {
 // machines with few cores, the projected shadows most. Hooked at its start: the host sleeps until an interrupt may be
 // due, services it (the guest thread it wakes may set the flag) and looks again; the game's own loop then finds the
 // flag set and returns.
+void sample_mist_ground(Runtime &rt, const Context &ctx);
 constexpr bool kDrawWaitMapped = region::mh_draw_done.has_value();
-void on_draw_wait([[maybe_unused]] Runtime &rt, Context &) {
+void on_draw_wait([[maybe_unused]] Runtime &rt, Context &ctx) {
+    if constexpr (kFucomplete) sample_mist_ground(rt, ctx);
     if constexpr (kDrawWaitMapped) {
         while (rt.memory().load8(*region::mh_draw_done) == 0) {
             mhf::psp::abi::wait_for_interrupt();
@@ -886,6 +888,170 @@ void on_camera_aspect_reset(Runtime &, Context &ctx) { set_camera_aspect(ctx, ct
 // is left out) and the top and bottom close in. With a wider shape than 480:272 the planes are made again as the PSP
 // has them, the sides then widened by as much as the picture: everything keeps the margin it has on the PSP.
 constexpr std::uint32_t kCameraCullLeft = 3408, kCameraCullRight = 3424, kCameraCullTop = 3440, kCameraCullBottom = 3456;
+struct MistGroundSample {
+    std::array<float, 3> point{};
+    std::uint16_t area = 0;
+};
+
+std::optional<MistGroundSample> g_mist_ground;
+
+void trace_swamp_effect(Runtime &rt, const Context &ctx, unsigned effect) {
+    static const bool profile = [] {
+        const char *value = std::getenv("MHF_VK_PROFILE");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!profile || !g_monster_tracker.in_active_quest() || g_monster_tracker.player_area() != 71u) return;
+    auto &memory = rt.memory();
+    const auto object = ctx.gpr[4];
+    if (object == 0 || !memory.contains(object, 104u)) return;
+    const auto flags = memory.load32(object + 40u);
+    const auto state = memory.load32(object + 92u);
+    const auto phase = memory.load32(object + 96u);
+    const auto value = memory.load32(object + 100u);
+    std::fprintf(stderr, "[mhfu][swamp-effect] ms=%llu type=%u instance=%08x flags=%08x "
+                         "state=%08x phase=%08x value=%08x\n",
+                 static_cast<unsigned long long>(rt.now_us() / 1000u), effect, object, flags, state, phase, value);
+}
+
+constexpr std::uint16_t kSwampWeatherArea = 71u;
+float g_swamp_whitening = 0.0f;
+std::uint64_t g_swamp_whitening_sample_us = 0;
+
+void on_swamp_effect13_update(Runtime &rt, Context &ctx) {
+    trace_swamp_effect(rt, ctx, 13u);
+    if (!g_monster_tracker.in_active_quest() || g_monster_tracker.player_area() != kSwampWeatherArea) return;
+    const auto effect = ctx.gpr[4];
+    auto &memory = rt.memory();
+    if (effect == 0 || !memory.contains(effect + 0x64u, 4)) return;
+    const float ramp = std::bit_cast<float>(memory.load32(effect + 0x64u));
+    if (!std::isfinite(ramp) || ramp < 0.0f || ramp > 0.41f) return;
+    g_swamp_whitening = std::min(ramp / 0.4f, 1.0f);
+    g_swamp_whitening_sample_us = rt.now_us();
+}
+void on_swamp_effect19_update(Runtime &rt, Context &ctx) { trace_swamp_effect(rt, ctx, 19u); }
+
+void on_stage_fog_draw(Runtime &rt, Context &ctx) {
+    static const bool profile = [] {
+        const char *value = std::getenv("MHF_VK_PROFILE");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!profile || !g_monster_tracker.in_active_quest()) return;
+    const auto stage = ctx.gpr[4];
+    auto &memory = rt.memory();
+    if (stage == 0 || !memory.contains(stage, 0x454u)) return;
+    const std::array state{stage, static_cast<std::uint32_t>(g_monster_tracker.player_area()),
+                           memory.load32(stage + 0x448), memory.load32(stage + 0x44c),
+                           memory.load32(stage + 0x450), memory.load32(stage + 0x3a0),
+                           memory.load32(stage + 0x444)};
+    static std::array<std::uint32_t, 7> previous{};
+    if (state == previous) return;
+    previous = state;
+    std::fprintf(stderr, "[mhfu][stage-fog] ms=%llu area=%u begin=%.2f end=%.2f "
+                         "color=%08x flash=%u timer=%u effect_mode=%u\n",
+                 static_cast<unsigned long long>(rt.now_us() / 1000u), state[1],
+                 std::bit_cast<float>(state[2]), std::bit_cast<float>(state[3]), state[4],
+                 state[5] & 0xffffu, state[5] >> 16u, state[6]);
+}
+
+void sample_mist_ground(Runtime &rt, const Context &ctx) {
+    g_mist_ground.reset();
+    const auto area = g_monster_tracker.player_area();
+    if (!g_monster_tracker.in_active_quest() || area == 0) return;
+
+    auto &memory = rt.memory();
+    static const bool profile = [] {
+        const char *value = std::getenv("MHF_VK_PROFILE");
+        return value != nullptr && value[0] == '1';
+    }();
+#if MHF_MHFU_FUC
+    if (!region::mh_hit_manager || !region::mh_ground_height_query ||
+        !memory.contains(*region::mh_hit_manager, 4)) return;
+    const auto *overlay = rt.active_overlay_at(*region::mh_ground_height_query);
+    if (!overlay || std::string_view(overlay->name).find("game_sub") == std::string_view::npos) return;
+    const auto manager = memory.load32(*region::mh_hit_manager);
+    if (manager == 0 || !memory.contains(manager, 4)) return;
+    auto point = g_monster_tracker.player_pos();
+    if (!std::all_of(point.begin(), point.end(), [](float v) { return std::isfinite(v); })) return;
+
+    static std::optional<std::uint32_t> scratch;
+    if (!scratch) scratch = rt.allocate_kernel_block("mist-ground-query", 32);
+    if (!scratch) return;
+    const auto aligned = (*scratch + 15u) & ~15u;
+    memory.store32(aligned, std::bit_cast<std::uint32_t>(point[0]));
+    memory.store32(aligned + 4, std::bit_cast<std::uint32_t>(point[1] + 40.0f));
+    memory.store32(aligned + 8, std::bit_cast<std::uint32_t>(point[2]));
+    memory.store32(aligned + 12, std::bit_cast<std::uint32_t>(1.0f));
+
+    auto query = ctx;
+    query.gpr[4] = manager;
+    query.gpr[5] = aligned;
+    rt.call(query, *region::mh_ground_height_query);
+    const float ground = query.fpr[0];
+    if (!std::isfinite(ground) || std::fabs(ground - point[1]) > 120.0f) return;
+    if (profile) {
+        static unsigned samples = 0;
+        if (++samples % 60u == 0u) {
+            std::fprintf(stderr, "[mhfu][mist-ground] area=%u feet=%.2f collision=%.2f\n", area, point[1], ground);
+        }
+    }
+    point[1] = ground;
+    g_mist_ground = MistGroundSample{point, area};
+#else
+    (void)ctx;
+#endif
+}
+
+// FUComplete keeps the area-space view and its inverse in the active camera, before
+// camera-relative transforms are submitted to the GE.
+void publish_fog_camera(Runtime &rt, mhf::psp::Frontend &frontend) {
+    mhf::psp::SceneCamera pose{};
+    constexpr std::uint32_t view_offset = 2944;
+    constexpr std::uint32_t inverse_offset = 3136;
+    auto &memory = rt.memory();
+    if (!g_cameras.empty()) {
+        const auto camera = g_cameras.back();
+        if (memory.contains(camera + view_offset, inverse_offset + 64u - view_offset)) {
+            std::array<float, 16> inverse{};
+            for (std::size_t i = 0; i < pose.world_to_eye.size(); ++i) {
+                const auto byte = static_cast<std::uint32_t>(i) * 4u;
+                pose.world_to_eye[i] = std::bit_cast<float>(memory.load32(camera + view_offset + byte));
+                inverse[i] = std::bit_cast<float>(memory.load32(camera + inverse_offset + byte));
+            }
+            pose.valid = true;
+            for (std::size_t col = 0; col < 4; ++col) {
+                for (std::size_t row = 0; row < 4; ++row) {
+                    float value = 0.0f;
+                    for (std::size_t k = 0; k < 4; ++k) {
+                        value += pose.world_to_eye[4 * k + row] * inverse[4 * col + k];
+                    }
+                    pose.valid &= std::fabs(value - (row == col ? 1.0f : 0.0f)) < 0.02f;
+                }
+            }
+        }
+    }
+    if (pose.valid && g_monster_tracker.in_active_quest() && g_monster_tracker.player_area() != 0u) {
+        pose.hunter_feet = g_monster_tracker.player_pos();
+        pose.ground_area = g_monster_tracker.player_area();
+        const auto now = rt.now_us();
+        if (pose.ground_area == kSwampWeatherArea && g_swamp_whitening_sample_us != 0 &&
+            now >= g_swamp_whitening_sample_us && now - g_swamp_whitening_sample_us < 250'000u) {
+            pose.ground_mist_weather = g_swamp_whitening;
+        } else {
+            g_swamp_whitening_sample_us = 0;
+            if (pose.ground_area == kSwampWeatherArea) pose.ground_mist_weather = 0.0f;
+        }
+        if (g_mist_ground && g_mist_ground->area == g_monster_tracker.player_area()) {
+            const auto &sample = g_mist_ground->point;
+            if (std::hypot(sample[0] - pose.hunter_feet[0], sample[2] - pose.hunter_feet[2]) <= 40.0f) {
+                pose.hunter_feet[1] = sample[1];
+            }
+        }
+        pose.has_hunter_feet = std::all_of(pose.hunter_feet.begin(), pose.hunter_feet.end(),
+                                           [](float value) { return std::isfinite(value); });
+    }
+    frontend.set_scene_camera(pose);
+}
+
 void on_camera_aspect_culling(Runtime &rt, Context &ctx) {
     auto &memory = rt.memory();
     const std::uint32_t camera = ctx.gpr[16]; // s0
@@ -1424,6 +1590,12 @@ int main(int argc, char **argv) {
             runtime.register_hook("mh_enemy_stagger_store", &on_enemy_stagger_store);
         } else if (guild_quest_scaling) {
             std::fprintf(stderr, "[mhfu] --guild-quest-scaling: not mapped for this release, ignored\n");
+        }
+        if constexpr (kFucomplete) {
+            runtime.register_hook("mh_stage_fog_draw", &on_stage_fog_draw);
+            runtime.register_hook("mh_swamp_effect13_update", &on_swamp_effect13_update);
+            runtime.register_hook("mh_swamp_effect19_update", &on_swamp_effect19_update);
+            runtime.register_hook("mh_stage_flash_draw", &on_stage_fog_draw);
         }
         runtime.register_hook("mh_draw_wait", &on_draw_wait); // sleeps through the game's wait for its drawing
         if (smithy_layout) smithy_browse = true; // the layout scrolls the list with Info open
@@ -2018,6 +2190,7 @@ int main(int argc, char **argv) {
             // Widescreen: the shape the frontend works out from the window reaches the game's camera at every poll.
             extra = [rt = &runtime, fe = &frontend, previous = std::move(extra)]() {
                 keep_camera_aspect(*rt, fe->game_aspect());
+                if constexpr (kFucomplete) publish_fog_camera(*rt, *fe);
                 if (previous) previous();
             };
             frontend.attach(runtime, extra);

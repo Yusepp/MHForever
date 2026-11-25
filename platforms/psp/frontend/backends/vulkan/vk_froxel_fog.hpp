@@ -103,7 +103,7 @@ public:
                   const float view_mat[16], const float inv_view[16],
                   const float proj[16], const float sun_dir_view[4],
                   const float fog_color_lin[4], const float scatter_color_lin[4],
-                  float elapsed_sec, float vapor_strength, std::uint64_t frame_idx,
+                  float elapsed_sec, float vapor_strength, std::uint64_t frame_idx, bool ground_mist_only, std::uint16_t ground_area,
                   std::uint32_t noise3d_slot, std::uint32_t linear_sampler,
                   std::uint32_t shadow_map_slot, std::uint32_t nearest_sampler,
                   const float *shadow_from_view, std::uint32_t rt_shadow_slot,
@@ -177,6 +177,7 @@ private:
     float prev_p11_ = 1.76f;
     float zone_floor_y_ = 0.0f;
     bool zone_floor_valid_ = false;
+    std::uint16_t ground_area_ = 0;
     std::uint32_t zone_floor_frames_ = 0u;
     float last_cam_world_[3]{};
     int fluid_cell_origin_[2]{0, 0};

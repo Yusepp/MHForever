@@ -81,7 +81,7 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
     // makes its culling planes, in every release. --guild-quest-scaling: three call patches in game_task.ovl.
     std::set<std::string> smithy_patches, camera_patches, aspect_patches, gathering_patches, modern_carving_patches,
         carve_invuln_patches, guild_scaling_patches, quest_patches;
-    std::set<std::string> sharpness_patches;
+    std::set<std::string> sharpness_patches, stage_weather_patches;
     const std::uint32_t modern_clear = disc_id == "ULES01213" ? 0x09A67DC0u
                                        : disc_id == "ULUS10391" ? 0x09A67EC0u
                                                                 : 0x09A630C0u;
@@ -136,6 +136,12 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
         } else if (p.patch.name.starts_with("mh_quest_markers_")) {
             MHF_CHECK(p.module == "lobby_task.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
             quest_patches.insert(p.patch.name);
+        } else if (p.patch.name == "mh_swamp_effect13_update" || p.patch.name == "mh_swamp_effect19_update") {
+            MHF_CHECK(p.module == "game_sub.ovl" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+            stage_weather_patches.insert(p.patch.name);
+        } else if (p.patch.name == "mh_stage_fog_draw" || p.patch.name == "mh_stage_flash_draw") {
+            MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
+            stage_weather_patches.insert(p.patch.name);
         } else if (p.patch.name == "mh_minimap_enemy_color") {
             MHF_CHECK(p.module == "executable" && p.patch.kind == mhf::psp::recomp::InstructionPatch::Kind::Call);
         } else {
@@ -143,6 +149,8 @@ void check_release(const std::string &disc_id, const std::vector<std::string> &o
             (p.patch.name.starts_with("mh_camera_aspect_") ? aspect_patches : camera_patches).insert(p.patch.name);
         }
     }
+    MHF_CHECK(stage_weather_patches == (disc_id == "ULJM05500-FUC"
+                 ? std::set<std::string>{"mh_stage_fog_draw", "mh_stage_flash_draw", "mh_swamp_effect13_update", "mh_swamp_effect19_update"} : std::set<std::string>{}));
     MHF_CHECK(sharpness_patches == std::set<std::string>({"mh_sharpness_sword", "mh_sharpness_glow"}));
     MHF_CHECK(gathering_patches == std::set<std::string>{"mh_gathering_prompt_update"});
     MHF_CHECK(modern_carving_patches == std::set<std::string>({"mh_modern_carving_animation_clear",

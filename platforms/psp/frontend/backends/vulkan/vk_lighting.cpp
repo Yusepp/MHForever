@@ -831,15 +831,16 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     }
     base.shadow_info[2] = rt_shadow_slot;
     base.shadow_info[3] = noise3d_tex_.slot;
-    if (view_mat != nullptr) {
+    const float *fog_view = in.fog_camera.valid ? in.fog_camera.world_to_eye.data() : view_mat;
+    if (fog_view != nullptr) {
         // Rigid column-major inverse: [R | t; 0 1] -> [R^T | -R^T t; 0 1]
-        base.inv_view[0] = view_mat[0]; base.inv_view[1] = view_mat[4]; base.inv_view[2]  = view_mat[8];  base.inv_view[3]  = 0.0f;
-        base.inv_view[4] = view_mat[1]; base.inv_view[5] = view_mat[5]; base.inv_view[6]  = view_mat[9];  base.inv_view[7]  = 0.0f;
-        base.inv_view[8] = view_mat[2]; base.inv_view[9] = view_mat[6]; base.inv_view[10] = view_mat[10]; base.inv_view[11] = 0.0f;
-        const float tx = view_mat[12], ty = view_mat[13], tz = view_mat[14];
-        base.inv_view[12] = -(view_mat[0] * tx + view_mat[1] * ty + view_mat[2] * tz);
-        base.inv_view[13] = -(view_mat[4] * tx + view_mat[5] * ty + view_mat[6] * tz);
-        base.inv_view[14] = -(view_mat[8] * tx + view_mat[9] * ty + view_mat[10] * tz);
+        base.inv_view[0] = fog_view[0]; base.inv_view[1] = fog_view[4]; base.inv_view[2]  = fog_view[8];  base.inv_view[3]  = 0.0f;
+        base.inv_view[4] = fog_view[1]; base.inv_view[5] = fog_view[5]; base.inv_view[6]  = fog_view[9];  base.inv_view[7]  = 0.0f;
+        base.inv_view[8] = fog_view[2]; base.inv_view[9] = fog_view[6]; base.inv_view[10] = fog_view[10]; base.inv_view[11] = 0.0f;
+        const float tx = fog_view[12], ty = fog_view[13], tz = fog_view[14];
+        base.inv_view[12] = -(fog_view[0] * tx + fog_view[1] * ty + fog_view[2] * tz);
+        base.inv_view[13] = -(fog_view[4] * tx + fog_view[5] * ty + fog_view[6] * tz);
+        base.inv_view[14] = -(fog_view[8] * tx + fog_view[9] * ty + fog_view[10] * tz);
         base.inv_view[15] = 1.0f;
         base.env_time[0] = elapsed_sec;
         base.env_time[1] = base.inv_view[13]; // camera world Y (cm)
@@ -874,6 +875,15 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         } else {
             vstr = (live_fog > 0.38f) ? std::clamp((live_fog - 0.38f) * 0.65f, 0.0f, 0.55f) : 0.0f;
         }
+        if (active_biome_ == BiomeKind::Swamp) {
+            const float weather = std::max(white_surge * live_fog, in.translucent_fog_signal);
+            const float response = std::clamp((weather - 0.15f) / 0.55f, 0.0f, 1.0f);
+            vstr = std::max(vstr, 1.10f * response);
+        }
+        const float weather = in.fog_camera.ground_mist_weather;
+        if (active_biome_ == BiomeKind::Swamp && weather >= 0.0f) {
+            base.phase1_slots[3] = 1u + static_cast<std::uint32_t>(std::round(weather * 1024.0f));
+        }
         base.env_time[2] = vstr;
         base.env_time[3] = 1.0f;
     } else {
@@ -881,7 +891,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.env_time[3] = 0.0f;
     }
 
-    const bool use_3d_froxel = want_vol && want_froxel && froxel_.ready() && (view_mat != nullptr);
+    const bool use_3d_froxel = want_vol && want_froxel && froxel_.ready() && (fog_view != nullptr);
     const bool run_2d_vol    = want_vol && !use_3d_froxel;
     if (use_3d_froxel) {
         base.ext_slots[3] |= 32u;
@@ -976,13 +986,17 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         constexpr std::size_t kSlotFroxelInteg  = 12u;
         constexpr std::size_t kSlotFroxelFluid  = 13u;
         float ground_info[4]{};
+        const bool has_hunter = in.fog_camera.has_hunter_feet && active_biome_ == BiomeKind::Swamp;
+        const auto &feet = in.fog_camera.hunter_feet;
+        const FogActor hunter{feet[0], feet[1], feet[2], 68.0f};
         froxel_dispatched = froxel_.dispatch(
-            cmd, bindless_set, view_mat, base.inv_view, in.proj, base.sun_dir_view,
-            fog_lin, scat_lin, elapsed_sec, base.env_time[2], in.frame_index,
+            cmd, bindless_set, fog_view, base.inv_view, in.proj, base.sun_dir_view,
+            fog_lin, scat_lin, elapsed_sec, base.env_time[2], in.frame_index, active_biome_ == BiomeKind::Swamp,
+            has_hunter ? in.fog_camera.ground_area : 0u,
             noise3d_tex_.slot, base.aux_slots[1], base.shadow_info[0], base.shadow_info[1],
             (base.shadow_info[0] != 0u ? shadow_from_view : nullptr), rt_shadow_slot,
             lights_bda, base.light_count,
-            in.fog_actors, in.fog_actor_count,
+            has_hunter ? &hunter : in.fog_actors, has_hunter ? 1u : in.fog_actor_count,
             &slots[kSlotFroxelInject], params_bda + kSlotFroxelInject * sizeof(LightingComputeParams),
             &slots[kSlotFroxelInteg],  params_bda + kSlotFroxelInteg  * sizeof(LightingComputeParams),
             &slots[kSlotFroxelFluid],  params_bda + kSlotFroxelFluid  * sizeof(LightingComputeParams),
@@ -997,11 +1011,11 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
             if (s_log_fog && (in.frame_index != s_last_fog_log) && ((in.frame_index % 60u) == 0u)) {
                 s_last_fog_log = in.frame_index;
                 std::fprintf(stderr,
-                             "[vk][fog] biome=%u live_fog=%.2f psp_rgb=(%.2f,%.2f,%.2f) vstr=%.2f actors=%u cam=(%.0f,%.0f,%.0f) floor_y=%.1f\n",
+                             "[vk][fog] biome=%u live_fog=%.2f psp_rgb=(%.2f,%.2f,%.2f) vstr=%.2f translucent=%.2f weather=%.2f actors=%u cam=(%.0f,%.0f,%.0f) floor_y=%.1f\n",
                              static_cast<unsigned>(active_biome_),
                              in.has_psp_fog ? in.psp_fog_intensity : -1.0f,
                              in.psp_fog_rgb[0], in.psp_fog_rgb[1], in.psp_fog_rgb[2],
-                             base.env_time[2], in.fog_actor_count,
+                             base.env_time[2], in.translucent_fog_signal, in.fog_camera.ground_mist_weather, in.fog_actor_count,
                              base.inv_view[12], base.inv_view[13], base.inv_view[14], ground_info[1]);
             }
         }

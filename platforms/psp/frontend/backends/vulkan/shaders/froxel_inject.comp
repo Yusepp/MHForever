@@ -39,7 +39,7 @@ struct FroxelParams {
     vec4 scatter_color;   // rgb = sun scatter color (linear), a = scatter_strength
     vec4 world_env;       // x = elapsed_sec, y = fixed_zone_floor_y, z = vapor_strength, w = frame_idx
     uvec4 slots;          // x = noise3d_slot, y = linear_sampler, z = shadow_map_slot, w = nearest_sampler
-    uvec4 rt_and_flags;   // x = rt_shadow_slot, y = reset_history, z = light_count, w = 0
+    uvec4 rt_and_flags;   // x = rt_shadow_slot, y = reset_history, z = light_count, w = ground_mist_only
     LightListBuf lights;
     uvec2 pad_bda;
 };
@@ -147,7 +147,7 @@ void main() {
     float near_fade = smoothstep(near_z + 120.0, near_z + 520.0, z_jit);
     float vapor_str = p.world_env.z;
     float base_air = 0.000014 * vapor_str * exp(-max(rel_y, 0.0) / 600.0);
-    float bank_dens = 0.00028 * billow * height_mask * vapor_str;
+    float bank_dens = p.rt_and_flags.w != 0u ? 0.0 : 0.00028 * billow * height_mask * vapor_str;
     float sigma_t = (base_air + bank_dens) * near_fade;
 
     // 2. Physical In-Scattering: Beer-Lambert Directional Self-Shadowing + Silver-Lining Sun Shafts + Point Lights!

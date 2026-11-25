@@ -16,6 +16,15 @@ struct SemanticPointLight {
     float intensity{1.0f};
 };
 
+struct SceneCamera {
+    std::array<float, 16> world_to_eye{};
+    bool valid = false;
+    std::array<float, 3> hunter_feet{};
+    bool has_hunter_feet = false;
+    std::uint16_t ground_area = 0;
+    float ground_mist_weather = -1.0f; // 0..1 when supplied by the game host
+};
+
 struct SemanticSceneFrame {
     static constexpr std::size_t kMaxLights = 32;
     std::uint32_t light_count{0};

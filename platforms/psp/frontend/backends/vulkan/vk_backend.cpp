@@ -1171,7 +1171,8 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             cur_light_in_.light0_dir[2] = f24(ge.reg(0x65u));
             cur_light_in_.has_light0 = true;
         }
-        if ((ge.reg(kFogEnable) & 1u) != 0 && (ge.reg(kAlphaBlendEnable) & 1u) == 0) {
+        if (!clear && (ge.reg(kFogEnable) & 1u) != 0) {
+            const bool translucent = (ge.reg(kAlphaBlendEnable) & 1u) != 0;
             auto f24 = [](std::uint32_t v) noexcept -> float {
                 std::uint32_t bits = (v & 0xFFFFFFu) << 8u;
                 float f = 0.0f;
@@ -1187,12 +1188,20 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 const float v_far = std::clamp((-2600.0f + fog1) * fog2, 0.0f, 1.0f);
                 const float pull_in = std::clamp((5500.0f - fog1) / 3800.0f, 0.0f, 1.0f);
                 const float dens = std::max(1.0f - v_far, pull_in * 0.75f);
-                if (!cur_light_in_.has_psp_fog || dens > cur_light_in_.psp_fog_intensity) {
+                if (translucent) {
+                    if ((ge.reg(kZTestEnable) & 1u) != 0 && !setup_.is_additive_vfx) {
+                        float rgb[3]{};
+                        unpack_rgb(ge.reg(kFogColor), rgb);
+                        const float neutral = std::min({rgb[0], rgb[1], rgb[2]});
+                        const float signal = std::clamp((neutral - 0.35f) / 0.35f, 0.0f, 1.0f) * dens;
+                        cur_light_in_.translucent_fog_signal = std::max(cur_light_in_.translucent_fog_signal, signal);
+                    }
+                } else if (!cur_light_in_.has_psp_fog || dens > cur_light_in_.psp_fog_intensity) {
                     unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
                     cur_light_in_.psp_fog_intensity = dens;
                     cur_light_in_.has_psp_fog = true;
                 }
-            } else if (!cur_light_in_.has_psp_fog) {
+            } else if (!translucent && !cur_light_in_.has_psp_fog) {
                 unpack_rgb(ge.reg(kFogColor), cur_light_in_.psp_fog_rgb);
                 cur_light_in_.has_psp_fog = true;
             }
@@ -1960,6 +1969,10 @@ void VkBackend::draw_started(const gpu::DrawInfo &draw) {
         const bool need_proj = (cur_light_in_.proj[0] == 0.0f);
         const bool upgrade_from_sky = has_cur_view_mat_ && (cur_vtx < 1.0f) && (new_vtx >= 1.0f);
         if (need_proj || upgrade_from_sky) {
+            {
+                std::lock_guard<std::mutex> lock(live_->semantic_mutex);
+                cur_light_in_.fog_camera = live_->scene_camera;
+            }
             std::copy_n(sum.projection.data(), 16, cur_light_in_.proj);
             cur_light_in_.vz_scale = draw.viewport[2];
             cur_light_in_.vz_center = draw.viewport[5];
@@ -3187,6 +3200,17 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE ||
         rt.color.bindless_slot == 0 || rt.depth.bindless_slot == 0) return;
 
+    if (prof_.enabled && want_vk_effect(LiveSettings::kVkEffectFroxelFog) && frame_number_ % 60u == 0u) {
+        std::fprintf(stderr,
+                     "[vk][fog-view] frame=%llu target=%s depth=%u reset=%d view=%d "
+                     "translation=(%.3f,%.3f,%.3f) proj=(%.5f,%.5f,%.5f,%.5f) vz=(%.2f,%.2f)\n",
+                     static_cast<unsigned long long>(frame_number_), &rt == &interp_rt_ ? "generated" : "native",
+                     rt.depth.bindless_slot, static_cast<int>(taa_reset), static_cast<int>(view_mat != nullptr),
+                     view_mat ? (*view_mat)[12] : 0.0f, view_mat ? (*view_mat)[13] : 0.0f,
+                     view_mat ? (*view_mat)[14] : 0.0f, in.proj[0], in.proj[5], in.proj[10], in.proj[14],
+                     in.vz_scale, in.vz_center);
+    }
+
     const int aa = effective_aa_mode();
     if (aa != last_aa_mode_) {
         lighting_.reset_taa_history();
@@ -3463,9 +3487,15 @@ void VkBackend::render_interpolated_subframe(float phase) {
     float exact_terrain_vz_scale = 32767.5f;
     float exact_terrain_vz_center = 32767.5f;
     std::uint32_t exact_terrain_vcount = 0u;
+    std::size_t exact_terrain_draw = 0u;
     const bool collect_rt_dyn = rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing);
     interp_dyn_xforms_.clear();
     const auto &rt_flags = blend_older_.draw_rt_flags;
+
+    const bool trace_fog_draws = prof_.enabled && frame_number_ % 60u == 0u &&
+                                 want_vk_effect(LiveSettings::kVkEffectFroxelFog);
+    std::size_t largest_scene_draw = 0u;
+    std::uint32_t largest_scene_count = 0u;
 
     for (std::size_t i = 0; i < ndraws; ++i) {
         const PreparedDraw &pd = prepared_draws_[i];
@@ -3565,6 +3595,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
         if (!older.skinned && older.perspective && pd.has_inv_world_old &&
             std::fabs(vp[0]) >= 100.0f && std::fabs(vp[1]) >= 50.0f) {
             const std::uint32_t vc = blend_older_.draw_raw_count[i];
+            if (trace_fog_draws && vc > largest_scene_count) {
+                largest_scene_draw = i;
+                largest_scene_count = vc;
+            }
             const float tx = used_world_to_eye[12];
             const float ty = used_world_to_eye[13];
             const float tz = used_world_to_eye[14];
@@ -3576,6 +3610,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 exact_terrain_vz_scale = vp[2];
                 exact_terrain_vz_center = vp[5];
                 exact_terrain_vcount = vc;
+                exact_terrain_draw = i;
             }
         }
     }
@@ -3637,7 +3672,33 @@ void VkBackend::render_interpolated_subframe(float phase) {
             ? exact_terrain_view
             : ((blend_older_.has_view_mat && has_cam_rt) ? interpolation::multiply(cam_rt, blend_older_.view_mat)
                                                          : blend_older_.view_mat);
+    if (prof_.enabled && want_vk_effect(LiveSettings::kVkEffectFroxelFog) && frame_number_ % 60u == 0u) {
+        std::fprintf(stderr,
+                     "[vk][fog-view-source] frame=%llu phase=%.3f source=%s terrain_draw=%zu vertices=%u cam_motion=%d\n",
+                     static_cast<unsigned long long>(frame_number_), static_cast<double>(phase),
+                     has_exact_terrain_view ? "terrain" : (have_interp_view ? "snapshot" : "missing"),
+                     exact_terrain_draw, exact_terrain_vcount, static_cast<int>(has_cam_rt));
+    }
+    if (trace_fog_draws && largest_scene_count != 0u) {
+        const auto log_draw = [&](std::size_t index, const char *role) {
+            const auto &draw = blend_older_.summaries[index];
+            std::fprintf(stderr,
+                         "[vk][fog-draw] frame=%llu phase=%.3f role=%s draw=%zu vertex=%08x "
+                         "world_t=(%.3f,%.3f,%.3f) view_t=(%.3f,%.3f,%.3f) world_y=(%.3f,%.3f,%.3f)\n",
+                         static_cast<unsigned long long>(frame_number_), static_cast<double>(phase), role,
+                         index, draw.vertex_address, draw.world[12], draw.world[13], draw.world[14],
+                         draw.view[12], draw.view[13], draw.view[14], draw.world[4], draw.world[5], draw.world[6]);
+        };
+        log_draw(largest_scene_draw, "largest");
+        if (has_exact_terrain_view && exact_terrain_draw != largest_scene_draw) {
+            log_draw(exact_terrain_draw, "selected");
+        }
+    }
     vk::LightingFrameInput interp_light_in = blend_older_.light_in;
+    if (interp_light_in.fog_camera.valid && has_cam_rt) {
+        interp_light_in.fog_camera.world_to_eye =
+            interpolation::multiply(cam_rt, interp_light_in.fog_camera.world_to_eye);
+    }
     if (has_exact_terrain_view) {
         std::copy_n(exact_terrain_proj, 16, interp_light_in.proj);
         interp_light_in.vz_scale = exact_terrain_vz_scale;

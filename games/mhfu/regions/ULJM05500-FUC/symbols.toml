@@ -32,6 +32,8 @@ mh_smithy_panel_draw          = 0x09A7ED60 # (List*): the panel the list shows (
 mh_smithy_model_update        = 0x09AB2060 # (Model*): the smithy's weapon model; the left stick turns it
 
 [data]
+mh_hit_manager = 0x09D14FE0 # HitManager* singleton in the gameplay sub overlay
+mh_ground_height_query = 0x09C389F0 # game_sub.ovl: (HitManager*, aligned world point) -> ground Y in f0
 # Original icon atlases in DATA.BIN (same images in stock 2nd G and FUComplete v1.4.0).
 mh_gathering_hud_file = 18 # HUD atlas is image 1
 mh_gathering_items_file = 5323 # item atlas is image 0
@@ -97,6 +99,10 @@ system_active_overlays  = 0x00F7A3C0 # u16[6] inside System, active DATA.BIN fil
 # move (and paging) while the R panel is open (a test of flag 0x20; immediate 0 never finds it set) and while
 # Info is open (a branch on the Info level, never taken).
 [patches]
+mh_swamp_effect13_update = "game_sub.ovl 0x09CBC990 call"
+mh_swamp_effect19_update = "game_sub.ovl 0x09CBFD00 call"
+mh_stage_fog_draw = "executable 0x088CD4E0 call" # StageBase::emit_fog entry
+mh_stage_flash_draw = "executable 0x088CE668 call" # StageBase::draw_flash entry
 # The cockpit draws the stock sword and its pulsing glow in two distinct calls.
 mh_sharpness_sword = "executable 0x08841404 call"
 mh_sharpness_glow = "executable 0x0884151C call"

@@ -126,6 +126,7 @@ struct LiveSettings {
     // Optional game-supplied world-space dynamic lights (updated from the host poll, read by Vulkan).
     mutable std::mutex semantic_mutex;
     SemanticSceneFrame semantic_frame{};
+    SceneCamera scene_camera{};
 };
 
 namespace gpu_common {
