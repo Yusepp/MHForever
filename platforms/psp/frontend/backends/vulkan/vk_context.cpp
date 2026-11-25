@@ -467,7 +467,7 @@ bool Context::init(SDL_Window *win) {
     vkCreatePipelineCache(device, &pcci, nullptr, &pipeline_cache);
 
     std::fprintf(stderr,
-                 "[vk] %s (Vulkan %u.%u.%u, EDS3=%s, BC=%s, MSAA4x=%s, MemBudget=%s, DedicatedTransfer=%s, AsyncCompute=%s, "
+                 "[vk] %s (Vulkan %u.%u.%u, EDS3=%s, BC=%s, MSAA4x=%s, RayQuery=%s, MemBudget=%s, DedicatedTransfer=%s, AsyncCompute=%s, "
                  "FifoLatestReady=%s, PresentWait=%s)\n",
                  caps.device_name.c_str(),
                  VK_API_VERSION_MAJOR(caps.api_version), VK_API_VERSION_MINOR(caps.api_version),
@@ -475,6 +475,7 @@ bool Context::init(SDL_Window *win) {
                  caps.extended_dynamic_state3 ? "yes" : "no",
                  caps.bc_compression ? "yes" : "no",
                  caps.msaa_4x ? "yes" : "no",
+                 caps.ray_query ? "yes" : "no",
                  caps.memory_budget ? "yes" : "no",
                  families.has_dedicated_transfer() ? "yes" : "no",
                  families.has_dedicated_compute() ? "yes" : "no",

@@ -63,27 +63,34 @@ void main() {
     vec3 P_psp = vec3(ndc.x * p.proj_info.x * z, -ndc.y * p.proj_info.y * z, -z);
     vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
 
-    // Jittered soft-sun ray direction (1 ray per half-res pixel, IGN-rotated for clean spatial denoise).
+    // 4-ray stratified Poisson soft-sun cone with temporally-stable IGN rotation (zero boiling, smooth penumbra!).
     vec3 L = normalize(p.sun_dir_world.xyz);
     vec3 up_ref = (abs(L.y) > 0.96) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
     vec3 T = normalize(cross(up_ref, L));
     vec3 B = cross(L, T);
-    float h1 = ign(vec2(gid) + vec2(float(p.out_slots.w & 7u) * 5.588238, 0.0));
-    float h2 = ign(vec2(gid) + vec2(0.0, float(p.out_slots.w & 7u) * 7.131591));
-    float ang = h1 * 6.2831853;
-    float rad = sqrt(h2) * p.sun_dir_world.w;
-    vec3 ray_dir = normalize(L + (T * cos(ang) + B * sin(ang)) * rad);
+    float ang = ign(vec2(gid)) * 6.2831853;
+    float ca = cos(ang), sa = sin(ang);
+    const vec2 kDisk4[4] = vec2[4](
+        vec2(-0.55,  0.32), vec2( 0.62,  0.24),
+        vec2(-0.22, -0.68), vec2( 0.44, -0.52)
+    );
 
-    // Small bias along ray_dir to avoid self-intersection on flat terrain triangles.
-    vec3 origin = P_world + ray_dir * 7.5;
+    float lit = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec2 d = kDisk4[i];
+        vec2 rot = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) * p.sun_dir_world.w;
+        vec3 ray_dir = normalize(L + T * rot.x + B * rot.y);
+        vec3 origin = P_world + ray_dir * 7.5;
 
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(
-        rq, u_tlas,
-        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-        0xFF, origin, 0.0, ray_dir, 4500.0);
-    while (rayQueryProceedEXT(rq)) {}
-
-    float vis = (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
-    imageStore(u_rt_shadow_out, gid, vec4(vis, 0.0, 0.0, 1.0));
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(
+            rq, u_tlas,
+            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+            0xFF, origin, 0.0, ray_dir, 4500.0);
+        while (rayQueryProceedEXT(rq)) {}
+        if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+            lit += 0.25;
+        }
+    }
+    imageStore(u_rt_shadow_out, gid, vec4(lit, 0.0, 0.0, 1.0));
 }

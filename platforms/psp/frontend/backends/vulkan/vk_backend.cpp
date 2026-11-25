@@ -410,6 +410,7 @@ private:
     std::vector<vk::ShadowBatch> cur_shadow_batches_;
     std::vector<vk::RtVertex> cur_rt_static_verts_;
     std::vector<vk::RtVertex> cur_rt_dyn_verts_;
+    std::vector<vk::RtVertex> interp_rt_dyn_verts_;
     std::uint32_t cur_shadow_batch_start_ = 0u;
     bool setup_is_shadow_caster_ = false;
     bool setup_is_rt_caster_ = false;
@@ -3441,14 +3442,40 @@ void VkBackend::render_interpolated_subframe(float phase) {
         taa_have_prev_ = true;
     }
 
-    // Update Partitioned RT BVH or 2048x2048 Sun Shadow Map ONCE per 30 Hz game frame (phase <= 0).
+    // Update Partitioned RT BVH (static BLAS cached once per zone; dynamic character BLAS smoothly interpolated
+    // every subframe at 120/180 Hz so hunter/monster shadows glide with zero 30 Hz vibration!), OR render the
+    // 2048x2048 Sun Shadow Map once per 30 Hz game frame (phase <= 0).
     const interpolation::Matrix interp_view =
         (has_last_view_mat_ && has_cam_rt) ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
-    if (phase <= 0.0f && has_last_view_mat_) {
+    if (has_last_view_mat_) {
         if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing) && !lighting_.active_is_cave()) {
-            rt_shadows_.update_bvh(f.cmd, ctx_, blend_older_.rt_static_verts, blend_older_.rt_dyn_verts);
+            const auto &old_dyn = blend_older_.rt_dyn_verts;
+            const auto &new_dyn = blend_newer_.rt_dyn_verts;
+            const std::vector<vk::RtVertex> *dyn_ptr = &old_dyn;
+            if (scene_phase > 0.001f && !old_dyn.empty() && old_dyn.size() == new_dyn.size()) {
+                const std::size_t n = old_dyn.size();
+                interp_rt_dyn_verts_.resize(n);
+                const float inv_p = 1.0f - scene_phase;
+                for (std::size_t i = 0; i < n; ++i) {
+                    const float dx = new_dyn[i].x - old_dyn[i].x;
+                    const float dy = new_dyn[i].y - old_dyn[i].y;
+                    const float dz = new_dyn[i].z - old_dyn[i].z;
+                    // Guard against sudden teleports/camera cuts (> 150 cm in 1/30s).
+                    if (dx * dx + dy * dy + dz * dz < 150.0f * 150.0f) {
+                        interp_rt_dyn_verts_[i] = {
+                            old_dyn[i].x * inv_p + new_dyn[i].x * scene_phase,
+                            old_dyn[i].y * inv_p + new_dyn[i].y * scene_phase,
+                            old_dyn[i].z * inv_p + new_dyn[i].z * scene_phase,
+                        };
+                    } else {
+                        interp_rt_dyn_verts_[i] = old_dyn[i];
+                    }
+                }
+                dyn_ptr = &interp_rt_dyn_verts_;
+            }
+            rt_shadows_.update_bvh(f.cmd, ctx_, blend_older_.rt_static_verts, *dyn_ptr);
             sun_shadows_.invalidate();
-        } else {
+        } else if (phase <= 0.0f) {
             rt_shadows_.invalidate();
             render_sun_shadow_pass(interp_view, last_light_in_, blend_older_.shadow_verts, blend_older_.shadow_batches);
         }

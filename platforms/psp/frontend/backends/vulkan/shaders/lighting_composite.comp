@@ -210,20 +210,20 @@ void main() {
 
         float sun_shadow = 1.0;
         if (!is_cave && p.shadow_info.z != 0u) {
-            // Ultra Hardware Ray-Traced Sun Shadows (VK_KHR_ray_query): 3x3 depth-aware bilateral upsample
-            // of half-res R8_UNORM RT visibility for smooth soft penumbra with crisp silhouette edges!
+            // Ultra Hardware Ray-Traced Sun Shadows (VK_KHR_ray_query): 5x5 depth-aware bilateral upsample
+            // of half-res 4-spp R8_UNORM RT visibility for grain-free soft penumbra & crisp silhouettes!
             ivec2 rts = textureSize(u_textures[p.shadow_info.z], 0);
             ivec2 rtmax = rts - ivec2(1);
             ivec2 rbase = clamp(ip / 2, ivec2(0), rtmax);
             float rt_sum = 0.0;
             float rt_w = 0.0;
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
                     ivec2 rc = clamp(rbase + ivec2(dx, dy), ivec2(0), rtmax);
                     ivec2 fc = clamp(rc * 2, ivec2(0), full_max);
                     float ds = texelFetch(u_textures[dslot], fc, 0).r;
                     float dw = exp(-abs(ds - d_here) * 3200.0);
-                    float sw = (dx == 0 && dy == 0) ? 1.5 : ((dx == 0 || dy == 0) ? 1.0 : 0.65);
+                    float sw = exp(-float(dx * dx + dy * dy) * 0.35);
                     float w = dw * sw + 1e-4;
                     rt_sum += texelFetch(u_textures[p.shadow_info.z], rc, 0).r * w;
                     rt_w += w;
