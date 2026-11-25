@@ -18,6 +18,8 @@ struct DrawParams {
     uint tex_func_bits;
     uint alpha_bits;
     vec4 jitter_and_lod;
+    uvec4 pbr_slots;     // x = _n normal, y = _r rough/metal, z = _e emissive, w = 0
+    vec4 sun_dir_view;   // xyz = view-space sun dir (+Y up), w = outdoor (1 or 0)
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer DrawParamsBuf {
@@ -104,6 +106,65 @@ void main() {
             c.rgb = max(c.rgb + v_spec, vec3(0.0));
         } else {
             c.rgb = min(c.rgb + v_spec, vec3(1.0));
+        }
+        // Optional Moddable PBR Material Packs (_n normal, _r roughness/metallic, _e emissive):
+        // Uniform-branched to 0.00ms cost when absent on standard PPSSPP/original PSP textures!
+        if (kSpecTextured != 0u && ((p.pbr_slots.x | p.pbr_slots.y | p.pbr_slots.z) != 0u)) {
+            vec3 N = (v_has_normal > 0.5) ? normalize(v_normal) : vec3(0.0, 0.0, 1.0);
+            vec3 L = normalize(p.sun_dir_view.xyz);
+            vec3 V = vec3(0.0, 0.0, 1.0);
+            float base_ndotl = clamp(dot(N, L), 0.0, 1.0);
+
+            if (p.pbr_slots.x != 0u) {
+                vec3 tn = texture(sampler2D(u_textures[p.pbr_slots.x],
+                                            u_samplers[p.sampler_idx]), v_uv, p.jitter_and_lod.z).xyz * 2.0 - 1.0;
+                // Screen-space cotangent frame (requires zero PSP vertex tangents).
+                vec3 dp1 = dFdx(vec3(gl_FragCoord.xy, gl_FragCoord.z * 65535.0));
+                vec3 dp2 = dFdy(vec3(gl_FragCoord.xy, gl_FragCoord.z * 65535.0));
+                vec2 duv1 = dFdx(v_uv);
+                vec2 duv2 = dFdy(v_uv);
+                vec3 dp2perp = cross(dp2, N);
+                vec3 dp1perp = cross(N, dp1);
+                vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+                vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+                float invmax = inversesqrt(max(dot(T, T), dot(B, B)) + 1e-8);
+                N = normalize(T * (tn.x * invmax) + B * (tn.y * invmax) + N * max(tn.z, 0.05));
+                float pbr_ndotl = clamp(dot(N, L), 0.0, 1.0);
+                // Modulate diffuse relief cleanly relative to the base vertex normal.
+                float relief = clamp((pbr_ndotl + 0.35) / (base_ndotl + 0.35), 0.65, 1.35);
+                c.rgb *= mix(1.0, relief, 0.72);
+            }
+
+            if (p.pbr_slots.y != 0u) {
+                vec4 rm = texture(sampler2D(u_textures[p.pbr_slots.y],
+                                            u_samplers[p.sampler_idx]), v_uv, p.jitter_and_lod.z);
+                float rough = clamp(rm.g, 0.08, 1.0);
+                // Support both glTF ORM (G=rough, B=metal) and grayscale roughness maps (R==G==B -> metal=0).
+                float is_gray = step(abs(rm.r - rm.g) + abs(rm.g - rm.b), 0.015);
+                float metal = mix(clamp(rm.b, 0.0, 1.0), 0.0, is_gray);
+                vec3 H = normalize(L + V);
+                float ndotl = clamp(dot(N, L), 0.0, 1.0);
+                float ndotv = max(dot(N, V), 0.02);
+                float ndoth = clamp(dot(N, H), 0.0, 1.0);
+                float vdoth = clamp(dot(V, H), 0.0, 1.0);
+                float a = rough * rough;
+                float a2 = a * a;
+                float denom = ndoth * ndoth * (a2 - 1.0) + 1.0;
+                float D = a2 / (3.14159265 * denom * denom + 1e-5);
+                vec3 F0 = mix(vec3(0.04), clamp(c.rgb, vec3(0.02), vec3(1.0)), metal);
+                vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - vdoth, 5.0);
+                float k = (rough + 1.0) * (rough + 1.0) * 0.125;
+                float G = (ndotl / (ndotl * (1.0 - k) + k)) * (ndotv / (ndotv * (1.0 - k) + k));
+                vec3 spec_brdf = (D * G * F) / max(4.0 * ndotl * ndotv, 0.08);
+                float env_scale = mix(0.32, 0.75, p.sun_dir_view.w);
+                c.rgb = c.rgb * (1.0 - metal * 0.45) + min(spec_brdf * ndotl * env_scale, vec3(1.35));
+            }
+
+            if (p.pbr_slots.z != 0u) {
+                vec3 em = texture(sampler2D(u_textures[p.pbr_slots.z],
+                                            u_samplers[p.sampler_idx]), v_uv, p.jitter_and_lod.z).rgb;
+                c.rgb += em * (kSpecHdr != 0u ? 1.45 : 0.85);
+            }
         }
         if ((bits & 0x80u) != 0u) {
             c.rgb = mix(p.fog_and_zmin.rgb, c.rgb, clamp(v_fog, 0.0, 1.0));

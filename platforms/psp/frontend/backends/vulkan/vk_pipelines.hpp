@@ -11,7 +11,7 @@
 
 namespace mhf::psp::vk {
 
-// Matches GLSL DrawParams in ge_draw.vert / ge_draw.frag (96 bytes, scalar layout).
+// Matches GLSL DrawParams in ge_draw.vert / ge_draw.frag (128 bytes, scalar layout).
 struct alignas(16) DrawParams {
     float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     float env_and_flags[4]{0.0f, 0.0f, 0.0f, 0.0f};
@@ -23,8 +23,10 @@ struct alignas(16) DrawParams {
     std::uint32_t tex_func_bits{0};
     std::uint32_t alpha_bits{1};
     float jitter_and_lod[4]{0.0f, 0.0f, 0.0f, 0.0f}; // xy = NDC jitter (TAA), z = mip LOD bias, w = unused
+    std::uint32_t pbr_slots[4]{0, 0, 0, 0};          // x = _n normal, y = _r rough/metal, z = _e emissive, w = 0
+    float sun_dir_view[4]{0.34f, 0.78f, 0.52f, 1.0f}; // xyz = view-space sun dir (+Y up), w = outdoor (1 or 0)
 };
-static_assert(sizeof(DrawParams) == 96);
+static_assert(sizeof(DrawParams) == 128);
 
 struct PresentPush {
     float uv_max[2]{1.0f, 1.0f};

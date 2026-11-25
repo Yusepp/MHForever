@@ -18,6 +18,22 @@
 
 namespace mhf::psp::vk {
 
+struct PackPbrSlots {
+    std::uint32_t normal_slot = 0;      // _n tangent-space normal map
+    std::uint32_t rough_metal_slot = 0; // _r roughness (G) / metallic (B) map
+    std::uint32_t emissive_slot = 0;    // _e emissive glow map
+};
+
+struct PackCompanionGpu {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation alloc = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    std::uint32_t bindless_slot = 0;
+    std::size_t vram_bytes = 0;
+    std::string file_path; // empty if absent on disk
+    bool probed = false;
+};
+
 struct PackGpuImage {
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation alloc = VK_NULL_HANDLE;
@@ -26,6 +42,7 @@ struct PackGpuImage {
     std::uint32_t mip_levels = 1;
     std::size_t vram_bytes = 0;
     std::uint64_t last_used = 0;
+    PackCompanionGpu pbr[3]{}; // 0 = _n, 1 = _r, 2 = _e
 };
 
 class PackStreamer {
@@ -47,10 +64,13 @@ public:
                                                 std::uint64_t retire_timeline,
                                                 std::uint64_t frame_num, bool &has_mips,
                                                 textures::Filter &filter_out,
-                                                bool &pending_out);
+                                                bool &pending_out,
+                                                PackPbrSlots *pbr_out = nullptr);
 
-    // Updates LRU timestamp for a pack texture hit via an external slot cache.
-    void touch(std::uint32_t bindless_slot, std::uint64_t frame_num) noexcept;
+    // Updates LRU timestamp for a pack texture hit via an external slot cache, and optionally
+    // polls/returns its companion PBR slots (_n, _r, _e) once resident.
+    void touch(std::uint32_t bindless_slot, std::uint64_t frame_num,
+               PackPbrSlots *pbr_out = nullptr) noexcept;
 
     // Frees staging buffers and evicted pack images whose GPU submissions have completed.
     void collect_staging(const Context &ctx, std::uint64_t completed_timeline);
@@ -75,6 +95,10 @@ private:
 
     bool upload_image_async(const Context &ctx, BindlessDescriptors &desc, VkCommandBuffer cmd,
                             std::uint64_t retire_timeline, const textures::Image &img, PackGpuImage &out);
+    void probe_and_stream_pbr(const Context &ctx, BindlessDescriptors &desc,
+                              const std::string &base_id, const std::filesystem::path &base_file,
+                              const std::function<VkCommandBuffer()> &begin_upload_cmd,
+                              std::uint64_t retire_timeline, PackGpuImage &entry);
 
     std::unique_ptr<textures::Pack> pack_;
     std::unique_ptr<textures::Pack> builtin_pack_;

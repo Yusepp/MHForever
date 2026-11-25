@@ -13,6 +13,8 @@ struct DrawParams {
     uint tex_func_bits; // bits 0..2: tex_func, bit 3: tex_rgba, bit 4: tex_double, bit 5: clear, bit 6: tex_enable, bit 7: fog_enable, bit 8: zrange_enable
     uint alpha_bits;    // bits 0..2: alpha_func, bits 8..15: alpha_ref, bits 16..23: alpha_mask
     vec4 jitter_and_lod; // xy = NDC jitter (TAA), z = mip LOD bias, w = unused
+    uvec4 pbr_slots;     // x = _n normal, y = _r rough/metal, z = _e emissive, w = 0
+    vec4 sun_dir_view;   // xyz = view-space sun dir (+Y up), w = outdoor (1 or 0)
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer DrawParamsBuf {

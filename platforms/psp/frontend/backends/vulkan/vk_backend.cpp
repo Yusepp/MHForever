@@ -166,6 +166,7 @@ struct CachedTexture {
 struct DrawSetup {
     DrawKey key{};
     std::uint32_t tex_slot = 0;
+    vk::PackPbrSlots pbr_slots{};
     float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     bool through = false;
     bool linear_override = false;
@@ -422,6 +423,7 @@ private:
     std::unordered_map<std::uint64_t, CachedTexture> textures_;
     struct FrameTexBinding {
         std::uint32_t tex_slot = 0;
+        vk::PackPbrSlots pbr_slots{};
         bool texture_mips = false;
         bool linear_override = false;
         bool is_killcam = false;
@@ -429,6 +431,7 @@ private:
     };
     struct PackCacheEntry {
         std::uint32_t slot = 0;
+        vk::PackPbrSlots pbr_slots{};
         bool has_mips = false;
         bool linear_override = false;
         bool pending = false;
@@ -1212,6 +1215,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             if (const auto fit = frame_tex_cache_.find(param_key); fit != frame_tex_cache_.end()) {
                 if (prof_.enabled) ++prof_.tex_hits;
                 setup_.tex_slot = fit->second.tex_slot;
+                setup_.pbr_slots = fit->second.pbr_slots;
                 setup_.texture_mips = fit->second.texture_mips;
                 setup_.linear_override = fit->second.linear_override;
                 setup_.is_killcam = fit->second.is_killcam;
@@ -1252,6 +1256,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                         textures::Filter pfilter = textures::Filter::Auto;
                         bool has_mips = false;
                         bool pending = false;
+                        vk::PackPbrSlots pbr_slots{};
                         const std::uint32_t slot = pack_streamer_.lookup_or_queue(
                             ctx_, descriptors_, facts,
                             [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
@@ -1261,9 +1266,10 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                                 return frames_[frame_slot_].cmd;
                             },
                             ctx_.graphics_timeline_value + 1u,
-                            frame_number_, has_mips, pfilter, pending);
+                            frame_number_, has_mips, pfilter, pending, &pbr_slots);
                         PackCacheEntry entry{};
                         entry.slot = slot;
+                        entry.pbr_slots = pbr_slots;
                         entry.has_mips = has_mips;
                         entry.linear_override = (pfilter == textures::Filter::Linear);
                         entry.pending = pending;
@@ -1273,8 +1279,9 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                     }
                     if (pit != pack_cache_.end() && pit->second.slot != 0) {
                         pack_slot = pit->second.slot;
-                        if (!need_query) pack_streamer_.touch(pack_slot, frame_number_);
+                        if (!need_query) pack_streamer_.touch(pack_slot, frame_number_, &pit->second.pbr_slots);
                         setup_.tex_slot = pack_slot;
+                        setup_.pbr_slots = pit->second.pbr_slots;
                         setup_.texture_mips = pit->second.has_mips;
                         setup_.linear_override = pit->second.linear_override;
                     }
@@ -1337,6 +1344,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 }
                 FrameTexBinding bind{};
                 bind.tex_slot = setup_.tex_slot;
+                bind.pbr_slots = setup_.pbr_slots;
                 bind.texture_mips = setup_.texture_mips;
                 bind.linear_override = setup_.linear_override;
                 bind.is_killcam = setup_.is_killcam;
@@ -1398,6 +1406,28 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     dp.jitter_and_lod[1] = jitter_ndc_y;
     dp.jitter_and_lod[2] = mip_lod_bias;
     dp.jitter_and_lod[3] = 0.0f;
+    if (textured && !clear && !setup.through &&
+        (setup.pbr_slots.normal_slot != 0u || setup.pbr_slots.rough_metal_slot != 0u ||
+         setup.pbr_slots.emissive_slot != 0u)) {
+        dp.pbr_slots[0] = setup.pbr_slots.normal_slot;
+        dp.pbr_slots[1] = setup.pbr_slots.rough_metal_slot;
+        dp.pbr_slots[2] = setup.pbr_slots.emissive_slot;
+        dp.pbr_slots[3] = 0u;
+        float sw[3]{0.34f, 0.78f, 0.52f};
+        const vk::LightingFrameInput &lin = has_cur_view_mat_ ? cur_light_in_ : last_light_in_;
+        lighting_.resolve_sun_dir_world(lin, sw);
+        if (lin.has_view_rot) {
+            const float *r = lin.view_rot;
+            dp.sun_dir_view[0] = r[0] * sw[0] + r[1] * sw[1] + r[2] * sw[2];
+            dp.sun_dir_view[1] = r[3] * sw[0] + r[4] * sw[1] + r[5] * sw[2];
+            dp.sun_dir_view[2] = r[6] * sw[0] + r[7] * sw[1] + r[8] * sw[2];
+        } else {
+            dp.sun_dir_view[0] = sw[0];
+            dp.sun_dir_view[1] = sw[1];
+            dp.sun_dir_view[2] = sw[2];
+        }
+        dp.sun_dir_view[3] = lighting_.active_is_cave() ? 0.0f : 1.0f;
+    }
     std::memcpy(pslice.ptr, &dp, sizeof(dp));
 
     vk::GePipelineKey pkey{};
