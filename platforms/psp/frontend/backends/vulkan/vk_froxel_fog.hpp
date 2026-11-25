@@ -1,13 +1,15 @@
 #pragma once
 
-// Hybrid True 3D Volumetric Fog + Ocarina-of-Time-Remake Interactive Ground Mist:
-// - Pass 0 (froxel_fluid.comp): 128x128 world-snapped RGBA16F semi-Lagrangian fluid advection
-//   driven by skinned actors (hunter + monsters) parting & swirling the ground mist!
-// - Pass 1 (froxel_inject.comp): 160x90x64 VK_IMAGE_TYPE_3D (RGBA16F) frustum volume for upper-air
-//   valley atmosphere, RT/shadow-map god-ray shafts & dynamic point lights + temporal reprojection.
-// - Pass 2 (froxel_integrate.comp): Frostbite closed-form analytical Z-integration along 64 slices.
-// - Set 2 exposes both u_froxel_vol (binding 0, sampler3D) and u_ground_fluid (binding 1, sampler2D)
-//   to lighting_composite.comp for full-res ground-mist slab ray-marching + 1-tap 3D froxel lookup!
+// Hybrid True 3D Volumetric Fog + True 2D GPU Navier-Stokes Interactive Ground Mist:
+// - 256x256 world-snapped GPU Navier-Stokes solver (32m x 32m, 12.5 cm/texel, stepped at 30 Hz):
+//     1. fluid_advect.comp   : Selle MacCormack advection + Bridson curl-noise + actor wakes
+//     2. fluid_vort_div.comp : Fedkiw vorticity confinement + velocity divergence
+//     3. fluid_jacobi.comp   : Harris GPU Gems Jacobi pressure Poisson solver (12 iterations)
+//     4. fluid_project.comp  : Stam Helmholtz-Hodge incompressible projection (div u == 0)
+// - 160x90x64 3D Froxel Volume (froxel_inject.comp + froxel_integrate.comp) for upper-air valley
+//   atmosphere, RT/shadow-map god-ray shafts & dynamic point lights.
+// - Set 2 exposes u_froxel_vol (binding 0, sampler3D) and u_ground_fluid (binding 1, sampler2D)
+//   to lighting_composite.comp for 8-plane stacked static world-space ground-mist rendering!
 
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
@@ -65,8 +67,9 @@ public:
     static constexpr float kNearZ = 70.0f;
     static constexpr float kFarZ = 2200.0f;
 
-    static constexpr std::uint32_t kFluidSize = 128u;
-    static constexpr float kFluidWorldSize = 2400.0f; // 24m x 24m world-locked interactive mist grid (18.75 cm/texel)
+    static constexpr std::uint32_t kFluidSize = 256u;
+    static constexpr float kFluidWorldSize = 3200.0f; // 32m x 32m world-locked Navier-Stokes grid (12.5 cm/texel)
+    static constexpr int kJacobiIters = 12;
     static constexpr std::size_t kMaxActors = 8u;
 
     bool init(const Context &ctx, VkDescriptorSetLayout bindless_layout);
@@ -74,8 +77,10 @@ public:
 
     [[nodiscard]] bool ready() const noexcept {
         return inject_pipe_ != VK_NULL_HANDLE && integrate_pipe_ != VK_NULL_HANDLE &&
-               fluid_pipe_ != VK_NULL_HANDLE && integ_vol_.view != VK_NULL_HANDLE &&
-               sampler3d_ != VK_NULL_HANDLE && sampler2d_ != VK_NULL_HANDLE;
+               advect_pipe_ != VK_NULL_HANDLE && vort_div_pipe_ != VK_NULL_HANDLE &&
+               jacobi_pipe_ != VK_NULL_HANDLE && project_pipe_ != VK_NULL_HANDLE &&
+               integ_vol_.view != VK_NULL_HANDLE && sampler3d_ != VK_NULL_HANDLE &&
+               sampler2d_ != VK_NULL_HANDLE;
     }
     [[nodiscard]] VkDescriptorSetLayout sample_set_layout() const noexcept { return sample_set_layout_; }
     [[nodiscard]] VkDescriptorSet sample_set() const noexcept { return sample_sets_[last_fluid_idx_]; }
@@ -84,6 +89,7 @@ public:
     void reset_history() noexcept {
         history_valid_ = false;
         zone_floor_valid_ = false;
+        zone_floor_frames_ = 0u;
         fluid_valid_ = false;
         prev_actor_count_ = 0u;
     }
@@ -91,7 +97,7 @@ public:
     // Ensures fallback 3D + 2D fluid textures are cleared & in SHADER_READ_ONLY_OPTIMAL even when fog is OFF.
     void ensure_fallback(VkCommandBuffer cmd);
 
-    // Dispatches Pass 0 (128x128 world-locked fluid advection), Pass 1 (3D froxel inject), and Pass 2 (Z-integrate).
+    // Dispatches 256x256 Navier-Stokes solver (at 30 Hz), 3D froxel inject, and Frostbite Z-integration.
     // Writes `out_ground_info[4]` = {fluid_origin_x, ground_floor_y, fluid_origin_z, kFluidWorldSize}.
     bool dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
                   const float view_mat[16], const float inv_view[16],
@@ -120,31 +126,44 @@ private:
     bool create_vol3d(const Context &ctx, VolTex &v, std::uint32_t w, std::uint32_t h, std::uint32_t d,
                       VkImageUsageFlags usage);
     bool create_tex2d(const Context &ctx, VolTex &v, std::uint32_t w, std::uint32_t h,
-                      VkImageUsageFlags usage);
+                      VkFormat fmt, VkImageUsageFlags usage);
 
     VkSampler sampler3d_ = VK_NULL_HANDLE;
     VkSampler sampler2d_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout work_set_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout fluid_set_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout sample_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout work_set_layout_ = VK_NULL_HANDLE;     // 1 storage + 1 sampler
+    VkDescriptorSetLayout vort_div_layout_ = VK_NULL_HANDLE;     // 2 storage + 1 sampler
+    VkDescriptorSetLayout project_layout_ = VK_NULL_HANDLE;      // 1 storage + 2 samplers
+    VkDescriptorSetLayout sample_set_layout_ = VK_NULL_HANDLE;   // 2 samplers (3D froxel + 2D fluid)
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
+
     VkDescriptorSet inject_sets_[2]{};
     VkDescriptorSet integ_sets_[2]{};
-    VkDescriptorSet fluid_sets_[2]{};
+    VkDescriptorSet advect_sets_[2]{};
+    VkDescriptorSet vort_div_sets_[2]{};
+    VkDescriptorSet jacobi_sets_[2]{};
+    VkDescriptorSet project_sets_[2]{};
     VkDescriptorSet sample_sets_[2]{};
     VkDescriptorSet fallback_sample_set_ = VK_NULL_HANDLE;
 
     VkPipelineLayout inject_pipe_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout integ_pipe_layout_ = VK_NULL_HANDLE;
-    VkPipelineLayout fluid_pipe_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout advect_pipe_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout vort_div_pipe_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout jacobi_pipe_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout project_pipe_layout_ = VK_NULL_HANDLE;
+
     VkPipeline inject_pipe_ = VK_NULL_HANDLE;
     VkPipeline integrate_pipe_ = VK_NULL_HANDLE;
-    VkPipeline fluid_pipe_ = VK_NULL_HANDLE;
+    VkPipeline advect_pipe_ = VK_NULL_HANDLE;
+    VkPipeline vort_div_pipe_ = VK_NULL_HANDLE;
+    VkPipeline jacobi_pipe_ = VK_NULL_HANDLE;
+    VkPipeline project_pipe_ = VK_NULL_HANDLE;
 
     VolTex scatter_vol_[2]{};
     VolTex integ_vol_{};
     VolTex fallback_vol_{};
-    VolTex fluid_vol_[2]{};
+    VolTex fluid_state_[2]{}; // 256x256 RGBA16F: RG=vel, B=smoke density, A=|vorticity|
+    VolTex fluid_press_[2]{}; // 256x256 RG16F:   R=pressure, G=divergence
     VolTex fallback_fluid_{};
 
     int ping_ = 0;
@@ -158,6 +177,7 @@ private:
     float prev_p11_ = 1.76f;
     float zone_floor_y_ = 0.0f;
     bool zone_floor_valid_ = false;
+    std::uint32_t zone_floor_frames_ = 0u;
     float last_cam_world_[3]{};
     int fluid_cell_origin_[2]{0, 0};
     float last_elapsed_sec_ = 0.0f;

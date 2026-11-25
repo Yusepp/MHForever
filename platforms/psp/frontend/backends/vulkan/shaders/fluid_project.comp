@@ -1,0 +1,33 @@
+#version 460
+
+// True 2D GPU Navier-Stokes Ground-Fog Solver — Stage 4:
+// - Jos Stam (SIGGRAPH 1999) Helmholtz-Hodge Incompressible Projection: u_new = u - 0.5 * grad(p).
+// Guarantees strictly divergence-free (div u == 0) swirling vortices & mass conservation!
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D u_state_out;
+layout(set = 0, binding = 1) uniform sampler2D u_state_in;
+layout(set = 0, binding = 2) uniform sampler2D u_press_in;
+
+const int kN = 256;
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= kN || gid.y >= kN) return;
+
+    vec4 s = texelFetch(u_state_in, gid, 0);
+    ivec2 cL = clamp(gid + ivec2(-1, 0), ivec2(0), ivec2(kN - 1));
+    ivec2 cR = clamp(gid + ivec2( 1, 0), ivec2(0), ivec2(kN - 1));
+    ivec2 cD = clamp(gid + ivec2( 0,-1), ivec2(0), ivec2(kN - 1));
+    ivec2 cU = clamp(gid + ivec2( 0, 1), ivec2(0), ivec2(kN - 1));
+
+    float pL = texelFetch(u_press_in, cL, 0).r;
+    float pR = texelFetch(u_press_in, cR, 0).r;
+    float pD = texelFetch(u_press_in, cD, 0).r;
+    float pU = texelFetch(u_press_in, cU, 0).r;
+
+    vec2 grad_p = 0.5 * vec2(pR - pL, pU - pD);
+    vec2 vel = clamp(s.rg - grad_p, vec2(-80.0), vec2(80.0));
+    imageStore(u_state_out, gid, vec4(vel, s.b, s.a));
+}

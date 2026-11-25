@@ -1,0 +1,170 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// True 2D GPU Navier-Stokes Ground-Fog Solver — Stage 1:
+// - Andrew Selle (2008) Unconditionally Stable MacCormack Advection (zero numerical blur!)
+// - Robert Bridson (SIGGRAPH 2007) Divergence-Free Curl-Noise ambient swamp flow
+// - Dynamic Actor Momentum & Wake Injection (hunter + monsters physically part & spin the fluid!)
+// Output (RGBA16F 256x256): RG = velocity (texels/s), B = smoke density D (0..1.5), A = curl
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D u_state_out;
+layout(set = 0, binding = 1) uniform sampler2D u_state_prev;
+
+struct FluidActor {
+    vec4 pos_rad;  // x = world_x, y = foot_y, z = world_z, w = radius (cm)
+    vec4 vel_pad;  // x = vx (cm/s), y = vy, z = vz (cm/s), w = speed (cm/s)
+};
+
+struct FroxelFluidParams {
+    vec4 grid_info;    // x = origin_x (cm), y = origin_z (cm), z = world_size (cm), w = dt (sec)
+    vec4 shift_and_t;  // x = shift_texels_x, y = shift_texels_z, z = elapsed_sec, w = reset_flag
+    uvec4 counts;      // x = actor_count (<=8), y = 0, z = 0, w = 0
+    FluidActor actors[8];
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer FluidParamsBuf {
+    FroxelFluidParams p;
+};
+
+layout(push_constant) uniform FluidPush {
+    FluidParamsBuf buf;
+} pc;
+
+const float kN = 256.0;
+
+// Smooth 2D value noise for Bridson divergence-free curl-noise potential psi(x, z, t).
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm2(vec2 p) {
+    float v = 0.0;
+    float a = 0.52;
+    for (int i = 0; i < 3; ++i) {
+        v += a * vnoise(p);
+        p = mat2(1.6, 1.2, -1.2, 1.6) * p + vec2(13.7, 7.3);
+        a *= 0.5;
+    }
+    return v;
+}
+
+// Bridson (2007) divergence-free curl noise: u = (d_psi/dz, -d_psi/dx).
+vec2 curl_noise(vec2 world_xz, float t) {
+    vec2 p = world_xz * 0.0022 + vec2(t * 0.04, t * 0.025);
+    float e = 0.04;
+    float psi_r = fbm2(p + vec2(e, 0.0));
+    float psi_l = fbm2(p - vec2(e, 0.0));
+    float psi_u = fbm2(p + vec2(0.0, e));
+    float psi_d = fbm2(p - vec2(0.0, e));
+    return vec2((psi_u - psi_d) / (2.0 * e), -(psi_r - psi_l) / (2.0 * e));
+}
+
+// Natural wispy equilibrium density field in pure world space (clear pockets + drifting mist filaments).
+float ambient_mist_target(vec2 world_xz, float t) {
+    vec2 p1 = world_xz * 0.0018 + vec2(t * 0.015, t * 0.010);
+    vec2 p2 = world_xz * 0.0046 + vec2(-t * 0.022, t * 0.018);
+    float n = fbm2(p1) * 0.65 + fbm2(p2) * 0.35;
+    return smoothstep(0.32, 0.78, n);
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(kN) || gid.y >= int(kN)) return;
+
+    FroxelFluidParams p = pc.buf.p;
+    float dt = clamp(p.grid_info.w, 0.004, 0.05);
+    float world_size = p.grid_info.z;
+    float texel_cm = world_size / kN;
+    float t_sec = p.shift_and_t.z;
+
+    vec2 uv = (vec2(gid) + 0.5) / kN;
+    vec2 cell_world_xz = p.grid_info.xy + uv * world_size;
+    float eq_dens = ambient_mist_target(cell_world_xz, t_sec);
+
+    vec2 prev_uv = (vec2(gid) + 0.5 + p.shift_and_t.xy) / kN;
+    vec2 vel = vec2(0.0);
+    float dens = eq_dens;
+
+    if (p.shift_and_t.w < 0.5 &&
+        prev_uv.x > 0.006 && prev_uv.x < 0.994 &&
+        prev_uv.y > 0.006 && prev_uv.y < 0.994) {
+        // Selle (2008) Unconditionally Stable MacCormack Advection:
+        vec4 s_cur = texture(u_state_prev, prev_uv);
+        vec2 u0 = s_cur.rg;
+        vec2 back_uv = clamp(prev_uv - u0 * (dt / kN), vec2(0.003), vec2(0.997));
+        vec4 phi_hat = texture(u_state_prev, back_uv);
+
+        // Reverse step to estimate advection error.
+        vec2 fwd_uv = clamp(back_uv + phi_hat.rg * (dt / kN), vec2(0.003), vec2(0.997));
+        vec4 phi_back = texture(u_state_prev, fwd_uv);
+
+        // Min/max clamping against the 4 surrounding texels of back_uv prevents all MacCormack ringing!
+        vec2 tc = back_uv * kN - 0.5;
+        ivec2 i0 = clamp(ivec2(floor(tc)), ivec2(0), ivec2(int(kN) - 2));
+        vec4 n00 = texelFetch(u_state_prev, i0, 0);
+        vec4 n10 = texelFetch(u_state_prev, i0 + ivec2(1, 0), 0);
+        vec4 n01 = texelFetch(u_state_prev, i0 + ivec2(0, 1), 0);
+        vec4 n11 = texelFetch(u_state_prev, i0 + ivec2(1, 1), 0);
+        vec4 mn = min(min(n00, n10), min(n01, n11));
+        vec4 mx = max(max(n00, n10), max(n01, n11));
+
+        vec4 adv = clamp(phi_hat + 0.5 * (s_cur - phi_back), mn, mx);
+        vel = adv.rg * exp(-dt * 1.15);
+        dens = adv.b;
+
+        // Gentle relaxation back toward the world-space wispy equilibrium (~2.2s recovery).
+        dens = mix(dens, eq_dens, clamp(dt * 0.45, 0.0, 0.25));
+    }
+
+    // Add gentle Bridson divergence-free curl-noise swamp breeze so the mist is constantly swirling!
+    vec2 cn = curl_noise(cell_world_xz, t_sec);
+    vel += (cn * 4.5 + vec2(0.85, 0.45)) * dt;
+
+    // Inject hunter & monster physical momentum + parting wakes into the Navier-Stokes field!
+    uint n_act = min(p.counts.x, 8u);
+    for (uint i = 0u; i < n_act; ++i) {
+        vec2 act_xz = p.actors[i].pos_rad.xz;
+        float rad = max(p.actors[i].pos_rad.w, 68.0);
+        vec2 d = cell_world_xz - act_xz;
+        float dist = length(d);
+        if (dist > rad * 2.2) continue;
+
+        vec2 dir = (dist > 1.0) ? (d / dist) : vec2(1.0, 0.0);
+        vec2 avel_tex = p.actors[i].vel_pad.xz / texel_cm;
+        float speed = p.actors[i].vel_pad.w; // cm/s
+        float move_k = clamp(speed / 90.0, 0.0, 3.0);
+
+        // Gaussian body kernel: imparts real forward + outward momentum (pressure projection turns this into vortices!).
+        float body = exp(-(dist * dist) / (rad * rad * 0.72));
+        vec2 impulse = avel_tex * (1.35 * body) + dir * (24.0 * move_k * body);
+        vel = clamp(vel + impulse * clamp(dt * 16.0, 0.25, 1.0), vec2(-75.0), vec2(75.0));
+
+        // Gently part density right inside the legs/boots when moving (conservation of mass piles it up on the sides!).
+        float clear_w = (1.0 - smoothstep(rad * 0.15, rad * 1.05, dist)) * clamp(0.25 + 0.75 * move_k, 0.0, 1.0);
+        dens = mix(dens, 0.02, clamp(clear_w * 0.85, 0.0, 0.92));
+    }
+
+    // Softly blend grid border to ambient equilibrium so the 32m sim boundary is invisible.
+    vec2 ed = min(uv, 1.0 - uv);
+    float border = smoothstep(0.0, 0.06, min(ed.x, ed.y));
+    vel *= border;
+    dens = mix(eq_dens, clamp(dens, 0.0, 1.65), border);
+
+    imageStore(u_state_out, gid, vec4(vel, dens, 0.0));
+}

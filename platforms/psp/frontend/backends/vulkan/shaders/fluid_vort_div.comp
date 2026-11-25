@@ -1,0 +1,63 @@
+#version 460
+
+// True 2D GPU Navier-Stokes Ground-Fog Solver — Stage 2:
+// - Fedkiw, Stam, Jensen (SIGGRAPH 2001) Vorticity Confinement (re-energizes crisp curling eddies!)
+// - Computes velocity divergence (div u) for Stage 3 Jacobi pressure projection.
+// Inputs:  binding 0 = writeonly u_state_out (RGBA16F: RG = vel_vort, B = density, A = |omega|)
+//          binding 1 = writeonly u_div_out   (RG16F:   R = 0, G = div_u)
+//          binding 2 = sampler2D u_state_in  (RGBA16F: advected vel + density)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D u_state_out;
+layout(set = 0, binding = 1, rg16f)   uniform writeonly image2D u_div_out;
+layout(set = 0, binding = 2) uniform sampler2D u_state_in;
+
+const int kN = 256;
+
+float sample_curl(ivec2 c) {
+    ivec2 cL = clamp(c + ivec2(-1, 0), ivec2(0), ivec2(kN - 1));
+    ivec2 cR = clamp(c + ivec2( 1, 0), ivec2(0), ivec2(kN - 1));
+    ivec2 cD = clamp(c + ivec2( 0,-1), ivec2(0), ivec2(kN - 1));
+    ivec2 cU = clamp(c + ivec2( 0, 1), ivec2(0), ivec2(kN - 1));
+    float vR = texelFetch(u_state_in, cR, 0).g;
+    float vL = texelFetch(u_state_in, cL, 0).g;
+    float uU = texelFetch(u_state_in, cU, 0).r;
+    float uD = texelFetch(u_state_in, cD, 0).r;
+    return 0.5 * ((vR - vL) - (uU - uD));
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= kN || gid.y >= kN) return;
+
+    vec4 sC = texelFetch(u_state_in, gid, 0);
+    ivec2 cL = clamp(gid + ivec2(-1, 0), ivec2(0), ivec2(kN - 1));
+    ivec2 cR = clamp(gid + ivec2( 1, 0), ivec2(0), ivec2(kN - 1));
+    ivec2 cD = clamp(gid + ivec2( 0,-1), ivec2(0), ivec2(kN - 1));
+    ivec2 cU = clamp(gid + ivec2( 0, 1), ivec2(0), ivec2(kN - 1));
+
+    // Fedkiw (2001) Vorticity Confinement: N = grad(|omega|) / |grad(|omega|)|, f = eps * (N x omega).
+    float wC = sample_curl(gid);
+    float wL = abs(sample_curl(cL));
+    float wR = abs(sample_curl(cR));
+    float wD = abs(sample_curl(cD));
+    float wU = abs(sample_curl(cU));
+
+    vec2 grad = 0.5 * vec2(wR - wL, wU - wD);
+    float glen = length(grad) + 1e-5;
+    vec2 N = grad / glen;
+    // Confinement strength eps = 2.6 * dt (~0.085) gives lively, crisp rolling smoke curls!
+    vec2 f_conf = vec2(N.y, -N.x) * (wC * 0.085);
+    vec2 vel = clamp(sC.rg + f_conf, vec2(-80.0), vec2(80.0));
+
+    // Velocity divergence for incompressible pressure solve (Harris GPU Gems Ch. 38).
+    vec2 uL = texelFetch(u_state_in, cL, 0).rg;
+    vec2 uR = texelFetch(u_state_in, cR, 0).rg;
+    vec2 uD = texelFetch(u_state_in, cD, 0).rg;
+    vec2 uU = texelFetch(u_state_in, cU, 0).rg;
+    float div = 0.5 * ((uR.x - uL.x) + (uU.y - uD.y));
+
+    imageStore(u_state_out, gid, vec4(vel, sC.b, abs(wC)));
+    imageStore(u_div_out,   gid, vec4(0.0, div, 0.0, 0.0));
+}
