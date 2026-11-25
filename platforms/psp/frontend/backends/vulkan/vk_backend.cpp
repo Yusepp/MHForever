@@ -423,7 +423,14 @@ private:
     std::vector<vk::RtVertex> cur_rt_static_verts_;
     std::vector<vk::RtStaticBatch> cur_rt_static_batches_;
     std::vector<vk::RtVertex> cur_rt_dyn_verts_;
+    struct DynRtXform {
+        std::uint32_t draw_idx = 0u;
+        interpolation::Matrix mv_old{interpolation::identity()};
+        interpolation::Matrix mv_new{interpolation::identity()};
+        bool has_new = false;
+    };
     std::vector<vk::RtVertex> interp_rt_dyn_verts_;
+    std::vector<DynRtXform> interp_dyn_xforms_;
     std::uint32_t cur_shadow_batch_start_ = 0u;
     std::uint32_t cur_rt_static_batch_start_ = 0u;
     bool setup_is_shadow_caster_ = false;
@@ -3380,6 +3387,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
     float exact_terrain_vz_scale = 32767.5f;
     float exact_terrain_vz_center = 32767.5f;
     std::uint32_t exact_terrain_vcount = 0u;
+    const bool collect_rt_dyn = rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing);
+    interp_dyn_xforms_.clear();
+    const auto &rt_flags = blend_older_.draw_rt_flags;
 
     for (std::size_t i = 0; i < ndraws; ++i) {
         const PreparedDraw &pd = prepared_draws_[i];
@@ -3388,6 +3398,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
         const auto &older = blend_older_.summaries[i];
         vk::DrawTransform &tr = transforms[i];
         interpolation::Matrix used_world_to_eye = older.view;
+        interpolation::Matrix used_world_to_eye_new = older.view;
+        bool used_has_new = false;
         if (zero_phase) {
             pack_3x4(older.view, tr.mv_old);
             pack_3x4(older.view, tr.mv_new);
@@ -3405,10 +3417,11 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 pack_3x4(used_world_to_eye, tr.mv_old);
                 if (pd.has_vertex_pair) {
                     const interpolation::Matrix eye_blend = interpolation::multiply(r_t, pd.eye_old);
-                    const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
-                    pack_3x4(world_to_eye_new, tr.mv_new);
+                    used_world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
+                    used_has_new = true;
+                    pack_3x4(used_world_to_eye_new, tr.mv_new);
                 } else {
-                    std::copy_n(tr.mv_old, 12, tr.mv_new);
+                    pack_3x4(used_world_to_eye, tr.mv_new);
                 }
             } else if (!pd.has_partner && pd.follow_cam && has_cam_rt && pd.has_inv_world_old) {
                 // Hoisted cam_rt * older.view, cached across consecutive draws sharing the same view matrix.
@@ -3437,10 +3450,11 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 pack_3x4(used_world_to_eye, tr.mv_old);
 
                 if (pd.has_vertex_pair) {
-                    const auto world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
-                    pack_3x4(world_to_eye_new, tr.mv_new);
+                    used_world_to_eye_new = interpolation::multiply(eye_blend, pd.inv_world_new);
+                    used_has_new = true;
+                    pack_3x4(used_world_to_eye_new, tr.mv_new);
                 } else {
-                    std::copy_n(tr.mv_old, 12, tr.mv_new);
+                    pack_3x4(used_world_to_eye, tr.mv_new);
                 }
             }
 
@@ -3454,6 +3468,11 @@ void VkBackend::render_interpolated_subframe(float phase) {
             tr.pair_info[1] = pd.new_start;
             tr.pair_info[2] = pd.has_vertex_pair ? 1u : 0u;
             tr.pair_info[3] = pd.max_deform_bits;
+        }
+
+        // Cache dynamic RT draw transforms in CPU RAM (NEVER read back from write-combined GPU `transforms`!).
+        if (collect_rt_dyn && i < rt_flags.size() && (rt_flags[i] & 3u) == 3u) {
+            interp_dyn_xforms_.push_back({static_cast<std::uint32_t>(i), used_world_to_eye, used_world_to_eye_new, used_has_new});
         }
 
         const auto &vp = blend_older_.viewports[i];
@@ -3557,18 +3576,12 @@ void VkBackend::render_interpolated_subframe(float phase) {
     }
     if (have_interp_view) {
         if (rt_shadows_.ready() && want_vk_effect(LiveSettings::kVkEffectRayTracing)) {
-            // Build per-draw interpolated Dynamic BLAS directly from unclipped `raw_verts` + `prepared_draws_`
-            // in exact lockstep with `place_v2.comp` (works even when other NPCs enter/leave the frustum!).
+            // Build per-draw interpolated Dynamic BLAS from CPU-cached `interp_dyn_xforms_` (ZERO WC GPU reads!)
+            // in exact lockstep with `place_v2.comp` — includes both skinned characters AND small rigid weapons/props
+            // whether moving or standing still (no shadow pop when stopping!).
             interp_rt_dyn_verts_.clear();
             interpolation::Matrix inv_interp_view{interpolation::identity()};
             const bool have_inv_view = interpolation::affine_inverse(interp_view, inv_interp_view);
-            auto unpack_3x4 = [](const float m[12]) noexcept -> interpolation::Matrix {
-                interpolation::Matrix out{interpolation::identity()};
-                out[0] = m[0]; out[4] = m[1]; out[8]  = m[2];  out[12] = m[3];
-                out[1] = m[4]; out[5] = m[5]; out[9]  = m[6];  out[13] = m[7];
-                out[2] = m[8]; out[6] = m[9]; out[10] = m[10]; out[14] = m[11];
-                return out;
-            };
             auto xform_pt = [](const interpolation::Matrix &m, const float p[3]) noexcept -> vk::RtVertex {
                 return {
                     m[0] * p[0] + m[4] * p[1] + m[8]  * p[2] + m[12],
@@ -3578,48 +3591,57 @@ void VkBackend::render_interpolated_subframe(float phase) {
             };
             const auto &raw_old = blend_older_.raw_verts;
             const auto &raw_new = blend_newer_.raw_verts;
-            const auto &rt_flags = blend_older_.draw_rt_flags;
             const float inv_p = 1.0f - scene_phase;
-            for (std::size_t i = 0; i < ndraws && i < rt_flags.size(); ++i) {
-                if ((rt_flags[i] & 3u) != 3u) continue; // must be opaque RT caster & dynamic
+            for (const DynRtXform &dx : interp_dyn_xforms_) {
+                const std::size_t i = dx.draw_idx;
                 const PreparedDraw &pd = prepared_draws_[i];
-                if (!pd.active) continue;
                 const auto &older = blend_older_.summaries[i];
-                // Skip large static non-identity architecture (houses/trees) already in the persistent zone cache;
-                // include all skinned characters/monsters/NPCs AND all moving rigid weapons/props!
-                if (!older.skinned) {
-                    const bool moved_rigid = pd.has_partner && (older.world != blend_newer_.summaries[pd.partner].world);
-                    if (!moved_rigid) continue;
-                }
                 const std::uint32_t vcnt = (blend_older_.draw_raw_count[i] / 3u) * 3u;
                 if (vcnt < 3u || static_cast<std::size_t>(pd.old_start) + vcnt > raw_old.size()) continue;
+                // For non-skinned non-identity meshes, keep small rigid props/weapons (< 220 cm extent) ALWAYS
+                // in dyn_blas_ (even when standing still!) and skip large static houses/trees already in zone cache.
+                if (!older.skinned) {
+                    float minx = raw_old[pd.old_start].world_pos[0], maxx = minx;
+                    float miny = raw_old[pd.old_start].world_pos[1], maxy = miny;
+                    float minz = raw_old[pd.old_start].world_pos[2], maxz = minz;
+                    const std::uint32_t step = std::max<std::uint32_t>(1u, vcnt / 16u);
+                    for (std::uint32_t k = step; k < vcnt; k += step) {
+                        const float *wp = raw_old[pd.old_start + k].world_pos;
+                        if (wp[0] < minx) minx = wp[0]; else if (wp[0] > maxx) maxx = wp[0];
+                        if (wp[1] < miny) miny = wp[1]; else if (wp[1] > maxy) maxy = wp[1];
+                        if (wp[2] < minz) minz = wp[2]; else if (wp[2] > maxz) maxz = wp[2];
+                    }
+                    if (std::max({maxx - minx, maxy - miny, maxz - minz}) >= 220.0f) continue;
+                }
                 if (interp_rt_dyn_verts_.size() + vcnt > 150000u) break;
 
-                const vk::DrawTransform &tr = transforms[i];
                 const interpolation::Matrix m_old =
-                    have_inv_view ? interpolation::multiply(inv_interp_view, unpack_3x4(tr.mv_old))
+                    have_inv_view ? interpolation::multiply(inv_interp_view, dx.mv_old)
                                   : interpolation::identity();
-                const bool use_pair = !zero_phase && pd.has_vertex_pair &&
+                const bool use_pair = !zero_phase && dx.has_new &&
                                       static_cast<std::size_t>(pd.new_start) + vcnt <= raw_new.size();
                 const interpolation::Matrix m_new =
-                    (use_pair && have_inv_view) ? interpolation::multiply(inv_interp_view, unpack_3x4(tr.mv_new))
+                    (use_pair && have_inv_view) ? interpolation::multiply(inv_interp_view, dx.mv_new)
                                                 : interpolation::identity();
-                for (std::uint32_t k = 0u; k < vcnt; ++k) {
-                    const vk::RtVertex p0 = xform_pt(m_old, raw_old[pd.old_start + k].world_pos);
-                    if (use_pair) {
+                const std::size_t dst_off = interp_rt_dyn_verts_.size();
+                interp_rt_dyn_verts_.resize(dst_off + vcnt);
+                vk::RtVertex *dst = interp_rt_dyn_verts_.data() + dst_off;
+                if (use_pair) {
+                    for (std::uint32_t k = 0u; k < vcnt; ++k) {
+                        const vk::RtVertex p0 = xform_pt(m_old, raw_old[pd.old_start + k].world_pos);
                         const vk::RtVertex p1 = xform_pt(m_new, raw_new[pd.new_start + k].world_pos);
-                        const float dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
-                        if (dx * dx + dy * dy + dz * dz < 600.0f * 600.0f) {
-                            interp_rt_dyn_verts_.push_back({
-                                p0.x * inv_p + p1.x * scene_phase,
-                                p0.y * inv_p + p1.y * scene_phase,
-                                p0.z * inv_p + p1.z * scene_phase,
-                            });
+                        const float ddx = p1.x - p0.x, ddy = p1.y - p0.y, ddz = p1.z - p0.z;
+                        if (ddx * ddx + ddy * ddy + ddz * ddz < 600.0f * 600.0f) {
+                            dst[k] = {p0.x * inv_p + p1.x * scene_phase,
+                                      p0.y * inv_p + p1.y * scene_phase,
+                                      p0.z * inv_p + p1.z * scene_phase};
                         } else {
-                            interp_rt_dyn_verts_.push_back(p0);
+                            dst[k] = p0;
                         }
-                    } else {
-                        interp_rt_dyn_verts_.push_back(p0);
+                    }
+                } else {
+                    for (std::uint32_t k = 0u; k < vcnt; ++k) {
+                        dst[k] = xform_pt(m_old, raw_old[pd.old_start + k].world_pos);
                     }
                 }
             }
