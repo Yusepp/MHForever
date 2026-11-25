@@ -464,6 +464,29 @@ VkDescriptorSet LightingPipeline::get_or_bind_scene_set(const Context &ctx, VkIm
     return scene_set;
 }
 
+void LightingPipeline::resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept {
+    float wx = 0.34f, wy = 0.78f, wz = 0.52f;
+    if (active_is_cave_) {
+        wx = 0.14f; wy = 0.95f; wz = 0.28f;
+    } else if (in.has_light0) {
+        wx = in.light0_dir[0];
+        wy = in.light0_dir[1];
+        wz = in.light0_dir[2];
+    } else if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size() &&
+               zones_[static_cast<std::size_t>(active_zone_)].sun_height_deg > 0.0f) {
+        const auto &z = zones_[static_cast<std::size_t>(active_zone_)];
+        const float elev = std::clamp(z.sun_height_deg, 18.0f, 75.0f) * (3.14159265f / 180.0f);
+        const float azim = z.sun_turn * (3.14159265f / 180.0f);
+        const float ce = std::cos(elev);
+        wx = ce * std::sin(azim);
+        wy = std::sin(elev);
+        wz = ce * std::cos(azim);
+    }
+    const float wlen = std::sqrt(wx * wx + wy * wy + wz * wz);
+    if (wlen > 1e-4f) { wx /= wlen; wy /= wlen; wz /= wlen; }
+    out[0] = wx; out[1] = wy; out[2] = wz;
+}
+
 void LightingPipeline::fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept {
     // Projection info for view-space reconstruction.
     const float p00 = std::fabs(in.proj[0]) > 1e-4f ? in.proj[0] : 1.0f;
@@ -622,7 +645,8 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
                                 const LightingFrameInput &in, void *params_cpu_ptr, VkDeviceAddress params_bda,
                                 bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot,
-                                VkDeviceAddress lights_bda, std::uint32_t light_count) {
+                                VkDeviceAddress lights_bda, std::uint32_t light_count,
+                                std::uint32_t shadow_map_slot, const float *shadow_from_view) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
 
@@ -674,6 +698,14 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     base.lights_bda = lights_bda;
     base.light_count = std::min<std::uint32_t>(light_count, static_cast<std::uint32_t>(LightingFrameInput::kMaxViewLights));
     base.lights_pad = 0u;
+    if (shadow_map_slot != 0u && shadow_from_view != nullptr && !active_is_cave_) {
+        std::memcpy(base.shadow_from_view, shadow_from_view, sizeof(base.shadow_from_view));
+        base.shadow_info[0] = shadow_map_slot;
+        base.shadow_info[1] = BindlessDescriptors::sampler_index(false, false, true, true, 1);
+    } else {
+        base.shadow_info[0] = 0u;
+        base.shadow_info[1] = 0u;
+    }
 
     auto *slots = reinterpret_cast<LightingComputeParams *>(params_cpu_ptr);
     slots[kPassGtao]        = base; slots[kPassGtao].aux_slots[2]        = gtao_tex_.w;       slots[kPassGtao].aux_slots[3]        = gtao_tex_.h;

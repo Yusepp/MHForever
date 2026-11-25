@@ -14,6 +14,7 @@
 #include "vk_interpolate.hpp"
 #include "vk_lighting.hpp"
 #include "vk_pipelines.hpp"
+#include "vk_shadows.hpp"
 #include "vk_swapchain.hpp"
 #include "vk_transfer.hpp"
 
@@ -267,7 +268,11 @@ private:
                        const float *taa_prev_from_curr = nullptr, bool taa_valid_reproj = false,
                        bool taa_reset = false, const float *curr_jitter_uv = nullptr,
                        bool use_hdr = false,
-                       const vk::ViewPointLight *view_lights = nullptr, std::uint32_t view_light_count = 0);
+                       const vk::ViewPointLight *view_lights = nullptr, std::uint32_t view_light_count = 0,
+                       const interpolation::Matrix *view_mat = nullptr);
+    void render_sun_shadow_pass(const interpolation::Matrix &view_mat, const vk::LightingFrameInput &light_in,
+                                const std::vector<vk::ShadowVertex> &verts,
+                                const std::vector<vk::ShadowBatch> &batches);
     std::uint32_t build_view_lights(const interpolation::Matrix &view_mat,
                                     const std::vector<SemanticPointLight> &vfx_lights,
                                     std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> &out_lights) const;
@@ -349,6 +354,8 @@ private:
         std::vector<vk::RawGpuVertex> raw_verts;
         std::vector<GpuVertex> flat_verts;
         std::vector<RecordedBatch> batches;
+        std::vector<vk::ShadowVertex> shadow_verts;
+        std::vector<vk::ShadowBatch> shadow_batches;
         void clear() noexcept {
             shown_addr = 0;
             width = 512;
@@ -361,6 +368,8 @@ private:
             raw_verts.clear();
             flat_verts.clear();
             batches.clear();
+            shadow_verts.clear();
+            shadow_batches.clear();
         }
     };
     struct SnapRawBuf {
@@ -388,7 +397,12 @@ private:
     vk::Pipelines pipelines_;
     vk::PackStreamer pack_streamer_;
     vk::LightingPipeline lighting_;
+    vk::SunShadowMap sun_shadows_;
     vk::GpuInterpolator interpolator_;
+    std::vector<vk::ShadowVertex> cur_shadow_verts_;
+    std::vector<vk::ShadowBatch> cur_shadow_batches_;
+    std::uint32_t cur_shadow_batch_start_ = 0u;
+    bool setup_is_shadow_caster_ = false;
 
     VkImageResource blur_a_;
     VkImageResource blur_b_;
@@ -639,6 +653,7 @@ bool VkBackend::init() {
     pack_streamer_.init(ctx_, live_->texture_pack_folder, live_->texture_pack_game,
                         live_->builtin_textures_folder, live_->texture_pack_mipmaps.load());
     lighting_.init(ctx_, descriptors_.layout(), live_);
+    sun_shadows_.init(ctx_, descriptors_.layout(), descriptors_);
     interpolator_.init(ctx_);
 
     for (int i = 0; i < kFramesInFlight; ++i) {
@@ -716,6 +731,7 @@ void VkBackend::shutdown() {
     }
 
     pack_streamer_.shutdown(ctx_, descriptors_);
+    sun_shadows_.shutdown(ctx_, descriptors_);
     lighting_.shutdown(ctx_, descriptors_);
     interpolator_.shutdown(ctx_);
 
@@ -1329,6 +1345,11 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
             }
         }
     }
+    const auto RS = [&](std::uint32_t reg) { return key_reg(setup_.key, reg); };
+    setup_is_shadow_caster_ = sun_shadows_.ready() && want_enhanced_3d_hdr() && !lighting_.active_is_cave() &&
+                              !setup_.through && (RS(kClearMode) & 1u) == 0 &&
+                              (RS(kAlphaBlendEnable) & 1u) == 0 && (RS(kZWriteDisable) & 1u) == 0 &&
+                              is_shown_target(setup_.target);
 }
 
 bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w, std::uint32_t rt_h,
@@ -1542,11 +1563,14 @@ void VkBackend::draw_batch() {
                 const bool had_hdr = main_hdr_started_;
                 end_render_pass();
                 std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> vlights{};
+                if (has_cur_view_mat_ && subframes_ <= 1) {
+                    render_sun_shadow_pass(cur_view_mat_, cur_light_in_, cur_shadow_verts_, cur_shadow_batches_);
+                }
                 const std::uint32_t vl_count = has_cur_view_mat_
                                                    ? build_view_lights(cur_view_mat_, cur_vfx_lights_, vlights)
                                                    : 0u;
                 apply_post_3d(rt, cur_light_in_, nullptr, false, false, main_taa_jitter_uv_, had_hdr,
-                              vlights.data(), vl_count);
+                              vlights.data(), vl_count, has_cur_view_mat_ ? &cur_view_mat_ : nullptr);
                 lit_3d_this_frame_ = true;
             }
             main_3d_finished_ = true;
@@ -1670,6 +1694,23 @@ void VkBackend::draw_batch() {
         }
         cur_raw_batch_start_ = static_cast<std::uint32_t>(cur_snap_.raw_verts.size());
         cur_snap_.batches.push_back(rb);
+    }
+
+    if (cur_shadow_verts_.size() > cur_shadow_batch_start_) {
+        vk::ShadowBatch sb{};
+        sb.v_offset = cur_shadow_batch_start_;
+        sb.v_count = static_cast<std::uint32_t>(cur_shadow_verts_.size()) - cur_shadow_batch_start_;
+        const bool textured = (R(kTextureMapEnable) & 1u) != 0;
+        const bool alpha_test = (R(kAlphaTestEnable) & 1u) != 0;
+        const bool clamp_s = (R(kTexWrap) & 1u) != 0;
+        const bool clamp_t = (R(kTexWrap) & 0x100u) != 0;
+        sb.tex_slot = textured ? setup_.tex_slot : 0u;
+        sb.sampler_idx = vk::BindlessDescriptors::sampler_index(false, false, clamp_s, clamp_t, 1);
+        sb.alpha_bits = alpha_test ? (R(kAlphaTest) & 0xFFFFFFu) : 1u;
+        sb.textured = textured ? 1u : 0u;
+        std::copy_n(setup_.uv_xform, 4, sb.uv_xform);
+        cur_shadow_batches_.push_back(sb);
+        cur_shadow_batch_start_ = static_cast<std::uint32_t>(cur_shadow_verts_.size());
     }
 
     if (setup_.is_additive_vfx && batch_world_cnt_ >= 12u && is_shown_target(setup_.target) &&
@@ -1858,6 +1899,9 @@ void VkBackend::triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Ver
             batch_col_sum_[1] += std::clamp(v.g, 0.0f, 255.0f);
             batch_col_sum_[2] += std::clamp(v.b, 0.0f, 255.0f);
             ++batch_world_cnt_;
+        }
+        if (setup_is_shadow_caster_ && v.has_world && cur_shadow_verts_.size() < 180000u) {
+            cur_shadow_verts_.push_back({v.world[0], v.world[1], v.world[2], v.u, v.v});
         }
         batch_.push_back(g);
     };
@@ -2905,10 +2949,41 @@ std::uint32_t VkBackend::build_view_lights(
     return count;
 }
 
+void VkBackend::render_sun_shadow_pass(const interpolation::Matrix &view_mat, const vk::LightingFrameInput &light_in,
+                                       const std::vector<vk::ShadowVertex> &verts,
+                                       const std::vector<vk::ShadowBatch> &batches) {
+    if (!sun_shadows_.ready() || !want_enhanced_3d_hdr() || lighting_.active_is_cave() ||
+        verts.empty() || batches.empty()) {
+        sun_shadows_.invalidate();
+        return;
+    }
+    ensure_recording();
+    end_render_pass();
+    FrameSlice &f = frames_[frame_slot_];
+    const std::size_t vbytes = verts.size() * sizeof(vk::ShadowVertex);
+    auto vsl = f.vertices.allocate(vbytes, 16);
+    if (!vsl.ptr) {
+        sun_shadows_.invalidate();
+        return;
+    }
+    std::memcpy(vsl.ptr, verts.data(), vbytes);
+    const std::size_t nb = std::min<std::size_t>(batches.size(), 512u);
+    auto psl = f.params.allocate(nb * sizeof(vk::ShadowDrawParams), 16);
+    if (!psl.ptr) {
+        sun_shadows_.invalidate();
+        return;
+    }
+    float sun_dir[3]{};
+    lighting_.resolve_sun_dir_world(light_in, sun_dir);
+    sun_shadows_.render(f.cmd, descriptors_.set(), view_mat.data(), sun_dir, verts, batches,
+                        f.vertices.buffer, vsl.offset, psl.ptr, psl.address, nb);
+}
+
 void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in,
                               const float *taa_prev_from_curr, bool taa_valid_reproj,
                               bool taa_reset, const float *curr_jitter_uv, bool use_hdr,
-                              const vk::ViewPointLight *view_lights, std::uint32_t view_light_count) {
+                              const vk::ViewPointLight *view_lights, std::uint32_t view_light_count,
+                              const interpolation::Matrix *view_mat) {
     if (!lighting_.ready()) return;
     if (rt.color.image == VK_NULL_HANDLE || rt.depth.image == VK_NULL_HANDLE ||
         rt.color.bindless_slot == 0 || rt.depth.bindless_slot == 0) return;
@@ -2969,9 +3044,16 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
 
         vk::LightingFrameInput fin = in;
         fin.frame_index = frame_number_;
+        float shadow_from_view[16]{};
+        std::uint32_t shadow_slot = 0u;
+        if (view_mat != nullptr && sun_shadows_.valid() && !lighting_.active_is_cave()) {
+            sun_shadows_.compute_shadow_from_view(view_mat->data(), shadow_from_view);
+            shadow_slot = sun_shadows_.map_slot();
+        }
         if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
                                rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address, want_fxaa,
-                               hdr_slot, 0u, lights_bda, light_cnt)) {
+                               hdr_slot, 0u, lights_bda, light_cnt, shadow_slot,
+                               shadow_slot != 0u ? shadow_from_view : nullptr)) {
             rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
         }
     } else if (want_fxaa) {
@@ -3285,6 +3367,13 @@ void VkBackend::render_interpolated_subframe(float phase) {
         taa_have_prev_ = true;
     }
 
+    // Render 2048x2048 Sun Shadow Map ONCE per 30 Hz game frame (phase <= 0) before opening the 3D pass.
+    const interpolation::Matrix interp_view =
+        (has_last_view_mat_ && has_cam_rt) ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
+    if (phase <= 0.0f && has_last_view_mat_) {
+        render_sun_shadow_pass(interp_view, last_light_in_, blend_older_.shadow_verts, blend_older_.shadow_batches);
+    }
+
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -3381,8 +3470,6 @@ void VkBackend::render_interpolated_subframe(float phase) {
     std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> interp_vlights{};
     std::uint32_t interp_vl_count = 0u;
     if (has_last_view_mat_) {
-        const interpolation::Matrix interp_view =
-            has_cam_rt ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
         interp_vl_count = build_view_lights(interp_view, last_vfx_lights_, interp_vlights);
     }
 
@@ -3421,7 +3508,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
                 if (need_boundary) {
                     vkCmdEndRendering(f.cmd);
                     apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false,
-                                  taa_jitter_uv, pass_hdr, interp_vlights.data(), interp_vl_count);
+                                  taa_jitter_uv, pass_hdr, interp_vlights.data(), interp_vl_count,
+                                  has_last_view_mat_ ? &interp_view : nullptr);
                     interp_lit = true;
                     if (phase <= 0.0f) {
                         capture_clean_3d_snapshot(interp_rt_);
@@ -3495,7 +3583,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
     vkCmdEndRendering(f.cmd);
     if (interp_saw_3d && !interp_lit) {
         apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv,
-                      pass_hdr, interp_vlights.data(), interp_vl_count);
+                      pass_hdr, interp_vlights.data(), interp_vl_count,
+                      has_last_view_mat_ ? &interp_view : nullptr);
     }
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -3596,6 +3685,11 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
 
     if (subframes_ > 1) {
         cur_snap_.shown_addr = off;
+        std::swap(cur_snap_.shadow_verts, cur_shadow_verts_);
+        std::swap(cur_snap_.shadow_batches, cur_shadow_batches_);
+        cur_shadow_verts_.clear();
+        cur_shadow_batches_.clear();
+        cur_shadow_batch_start_ = 0u;
         if (it != targets_.end()) {
             cur_snap_.width = it->second.width;
             cur_snap_.height = it->second.height;
@@ -3718,6 +3812,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
         last_vfx_lights_ = cur_vfx_lights_;
     }
     cur_vfx_lights_.clear();
+    cur_shadow_verts_.clear();
+    cur_shadow_batches_.clear();
+    cur_shadow_batch_start_ = 0u;
     has_cur_view_mat_ = false;
     lighting_.end_frame_zone_vote();
     frame_had_3d_ = false;

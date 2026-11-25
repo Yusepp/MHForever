@@ -62,6 +62,7 @@ if(MHF_WITH_SDL)
         frontend/backends/vulkan/vk_pipelines.cpp
         frontend/backends/vulkan/vk_transfer.cpp
         frontend/backends/vulkan/vk_lighting.cpp
+        frontend/backends/vulkan/vk_shadows.cpp
         frontend/backends/vulkan/vk_interpolate.cpp)
     target_include_directories(mhf_psp_backend_vulkan
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend

@@ -49,6 +49,8 @@ struct LightingParams {
     LightListBuf lights;
     uint light_count;
     uint lights_pad;
+    mat4 shadow_from_view; // column-major: PSP view (+Y up) -> orthographic sun shadow clip space
+    uvec4 shadow_info;     // x = shadow_map_slot, y = nearest_sampler, z = 0, w = 0
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -199,13 +201,44 @@ void main() {
         vec3 L = normalize(p.sun_dir_view.xyz);
         vec3 U = normalize(p.world_up_view.xyz);
 
-        // Multi-bounce AO + Screen-Space Contact Shadows (deeper, moodier crevices in caves!).
+        // Multi-bounce AO + Screen-Space Contact Shadows + Projected Sun Shadow Map (4-tap IGN-rotated PCF).
         vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
         float ao_shaped = is_cave ? pow(ao, 1.25) : ao;
         vec3 mb_ao = multi_bounce_ao(ao_shaped, albedo_est);
         vec3 tinted_ao = mix(shadow_tint_lin * (is_cave ? 0.60 : 0.90), vec3(1.0), mb_ao);
         vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact);
-        col_lin *= tinted_ao * tinted_cs;
+
+        float sun_shadow = 1.0;
+        if (!is_cave && p.shadow_info.x != 0u) {
+            // Convert +Y-down view space back to PSP +Y-up view space with small normal-offset bias.
+            vec3 P_psp = vec3(P.x, -P.y, P.z) + vec3(N.x, -N.y, N.z) * 5.0;
+            vec4 sc = p.shadow_from_view * vec4(P_psp, 1.0);
+            vec2 suv = sc.xy * 0.5 + 0.5;
+            if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
+                float edge = max(abs(sc.x), abs(sc.y));
+                float border_fade = 1.0 - smoothstep(0.82, 0.99, edge);
+                float texel = 1.0 / 2048.0;
+                float ang = ign(vec2(ip)) * 6.2831853;
+                float ca = cos(ang), sa = sin(ang);
+                const vec2 kPoisson4[4] = vec2[4](
+                    vec2(-0.613,  0.342), vec2( 0.728,  0.221),
+                    vec2(-0.241, -0.785), vec2( 0.412, -0.619)
+                );
+                float lit = 0.0;
+                float bias = 0.0014;
+                for (int s = 0; s < 4; ++s) {
+                    vec2 d = kPoisson4[s];
+                    vec2 rot = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) * (1.75 * texel);
+                    float sd = texture(sampler2D(u_textures[p.shadow_info.x],
+                                                 u_samplers[p.shadow_info.y]),
+                                       suv + rot).r;
+                    lit += (sc.z - bias <= sd) ? 1.0 : 0.0;
+                }
+                sun_shadow = mix(1.0, lit * 0.25, border_fade);
+            }
+        }
+        vec3 tinted_sun_sh = mix(shadow_tint_lin * 0.54, vec3(1.0), sun_shadow);
+        col_lin *= tinted_ao * tinted_cs * tinted_sun_sh;
 
         // 2. World-up Hemisphere Ambient Bounce (soft, never highlights individual flat polygons).
         if (p.ground_bounce.a > 0.001) {
@@ -219,7 +252,7 @@ void main() {
 
         // 3. Gentle outdoor sun key (no global fake specular/fresnel sheen on grass, dirt, rock, or wood!).
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
-        float sun_vis = ao * contact;
+        float sun_vis = ao * min(contact, sun_shadow);
         float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_cave ? 0.45 : 1.0);
         col_lin *= clamp(key_boost, 0.88, 1.14);
 

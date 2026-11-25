@@ -67,8 +67,10 @@ struct alignas(16) LightingComputeParams {
     VkDeviceAddress lights_bda{0};
     std::uint32_t light_count{0};
     std::uint32_t lights_pad{0};
+    float shadow_from_view[16]{}; // column-major: PSP view (+Y up) -> shadow clip space
+    std::uint32_t shadow_info[4]{}; // x = shadow_map_slot, y = nearest_sampler, z = 0, w = 0
 };
-static_assert(sizeof(LightingComputeParams) == 256);
+static_assert(sizeof(LightingComputeParams) == 336);
 
 struct alignas(16) TaaComputeParams {
     float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
@@ -127,7 +129,8 @@ public:
                   const LightingFrameInput &in,
                   void *params_cpu_ptr, VkDeviceAddress params_bda, bool run_fxaa = true,
                   std::uint32_t hdr_input_slot = 0, std::uint32_t gbuf_normal_slot = 0,
-                  VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0);
+                  VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0,
+                  std::uint32_t shadow_map_slot = 0, const float *shadow_from_view = nullptr);
 
     // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
     // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.
@@ -148,6 +151,8 @@ public:
 
     void reset_taa_history() noexcept { taa_hist_valid_ = false; }
     void reset_exposure() noexcept { exposure_reset_ = true; }
+    [[nodiscard]] bool active_is_cave() const noexcept { return active_is_cave_; }
+    void resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept;
 
     // Invalidates any cached VkImageView -> VkDescriptorSet entry matching a retired view.
     void invalidate_scene_view(VkImageView view) noexcept {
