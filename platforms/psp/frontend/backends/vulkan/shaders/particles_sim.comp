@@ -1,0 +1,235 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// 120/180 Hz GPU Compute Particle Simulator with VORTEXEL-Lite 3D Curl-Noise Wind,
+// Biome Ambient Profiles, Semantic/VFX Emitters (campfire/fireball/combat sparks),
+// and Screen-Space Depth Collision.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+
+struct GpuParticle {
+    vec4 pos_life;   // xyz = world pos (cm), w = life remaining (s)
+    vec4 vel_size;   // xyz = world vel (cm/s), w = world radius (cm)
+    vec4 color_kind; // rgb = linear HDR color, a = visual kind (0=glow, 1=snow, 2=mote/ash, 3=streak)
+    vec4 aux;        // x = max_life, y = seed, z = gravity_scale, w = additive (0=alpha, 1=additive)
+};
+
+struct ParticleEmitter {
+    vec4 pos_radius; // xyz = world pos (cm), w = radius (cm)
+    vec4 color_rate; // rgb = linear HDR color, w = strength/intensity
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer ParticleBuf {
+    GpuParticle items[];
+};
+
+struct SimParams {
+    mat4 view_proj;         // world -> Vulkan clip space (for depth collision)
+    vec4 cam_pos_dt;        // xyz = camera world pos (cm), w = dt (seconds)
+    vec4 wind_time;         // xyz = biome wind velocity (cm/s), w = elapsed time (s)
+    vec4 vz_and_size;       // x = vz_scale, y = vz_center, z = depth_w, w = depth_h
+    vec4 biome_cfg;         // x = ambient_density [0..1], y = gravity (cm/s^2), z = turbulence, w = size_scale
+    vec4 ambient_col_a;     // rgb = primary ambient linear color, a = kind
+    vec4 ambient_col_b;     // rgb = secondary ambient linear color, a = additive flag (0 or 1)
+    uvec4 counts_slots;     // x = total_particles, y = ambient_count, z = emitter_count, w = depth_slot
+    uvec4 flags_seed;       // x = reset_flag, y = frame_seed, z = biome_id, w = is_cave
+    ParticleEmitter emitters[8];
+    ParticleBuf particles;
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer SimParamsBuf {
+    SimParams p;
+};
+
+layout(push_constant) uniform SimPush {
+    SimParamsBuf buf;
+} pc;
+
+uint hash_u32(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+float rand01(inout uint s) {
+    s = hash_u32(s);
+    return float(s & 0x00FFFFFFu) / 16777216.0;
+}
+
+// Fast divergence-free 3D trigonometric curl-noise approximation (VORTEXEL-lite wind turbulence).
+vec3 curl_wind(vec3 p, float t) {
+    vec3 q = p * 0.0042 + vec3(t * 0.35, t * 0.18, -t * 0.27);
+    float sx = sin(q.y + cos(q.z * 1.3 + t * 0.5));
+    float sy = sin(q.z + cos(q.x * 1.1 - t * 0.4));
+    float sz = sin(q.x + cos(q.y * 1.2 + t * 0.6));
+    return vec3(sx, sy * 0.65, sz);
+}
+
+void main() {
+    SimParams p = pc.buf.p;
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= p.counts_slots.x) return;
+
+    GpuParticle pt = p.particles.items[id];
+    uint rng = hash_u32(id * 1973u ^ p.flags_seed.y * 9277u ^ 0x9E3779B9u);
+
+    float dt = clamp(p.cam_pos_dt.w, 0.001, 0.05);
+    vec3 cam = p.cam_pos_dt.xyz;
+    float time = p.wind_time.w;
+    bool is_ambient = (id < p.counts_slots.y);
+
+    // Ambient volume half-extents around camera (26m x 14m x 26m in MHFU cm).
+    const vec3 box_half = vec3(1300.0, 700.0, 1300.0);
+
+    if (p.flags_seed.x != 0u) {
+        pt.pos_life.w = -1.0;
+    }
+
+    if (is_ambient) {
+        float active_limit = p.biome_cfg.x * float(p.counts_slots.y);
+        if (float(id) >= active_limit) {
+            pt.pos_life.w = -1.0;
+            p.particles.items[id] = pt;
+            return;
+        }
+
+        bool need_respawn = (pt.pos_life.w <= 0.0);
+        vec3 rel = pt.pos_life.xyz - cam;
+        if (!need_respawn && (abs(rel.x) > box_half.x * 1.18 || abs(rel.y) > box_half.y * 1.18 || abs(rel.z) > box_half.z * 1.18)) {
+            // Wrap seamlessly into opposite side of camera box when player moves.
+            rel = mod(rel + box_half, box_half * 2.0) - box_half;
+            pt.pos_life.xyz = cam + rel;
+        }
+
+        if (need_respawn) {
+            vec3 off = vec3(
+                (rand01(rng) * 2.0 - 1.0) * box_half.x,
+                (rand01(rng) * 2.0 - 1.0) * box_half.y,
+                (rand01(rng) * 2.0 - 1.0) * box_half.z
+            );
+            pt.pos_life.xyz = cam + off;
+            float max_l = 3.5 + rand01(rng) * 5.0;
+            // Stagger initial lifetimes on reset so particles fade in naturally.
+            pt.pos_life.w = (p.flags_seed.x != 0u) ? (rand01(rng) * max_l) : max_l;
+
+            float mix_c = rand01(rng);
+            vec3 col = mix(p.ambient_col_a.rgb, p.ambient_col_b.rgb, mix_c);
+            float kind = p.ambient_col_a.a;
+            float add_flag = p.ambient_col_b.a;
+            // Volcano: mix glowing embers (65%) with dark drifting ash (35%).
+            if (p.flags_seed.z == 12u && mix_c > 0.65) {
+                kind = 2.0;
+                add_flag = 0.0;
+                col = vec3(0.28, 0.24, 0.22);
+            }
+
+            pt.vel_size.xyz = p.wind_time.xyz * (0.7 + 0.6 * rand01(rng)) +
+                              vec3((rand01(rng) - 0.5) * 40.0, p.biome_cfg.y * 0.25, (rand01(rng) - 0.5) * 40.0);
+            pt.vel_size.w = p.biome_cfg.w * (0.65 + 0.75 * rand01(rng));
+            pt.color_kind = vec4(col, kind);
+            pt.aux = vec4(max_l, rand01(rng) * 6.283185, 0.7 + 0.6 * rand01(rng), add_flag);
+            p.particles.items[id] = pt;
+            return;
+        }
+
+        // Integrate VORTEXEL-lite curl wind + gravity + drag.
+        vec3 curl = curl_wind(pt.pos_life.xyz, time + pt.aux.y);
+        vec3 target_vel = p.wind_time.xyz + curl * p.biome_cfg.z;
+        target_vel.y += p.biome_cfg.y * pt.aux.z;
+
+        // Reactive wind impulses from nearby explosions / fireballs / combat hits!
+        uint ecount = min(p.counts_slots.z, 8u);
+        for (uint e = 0u; e < ecount; ++e) {
+            vec3 to_p = pt.pos_life.xyz - p.emitters[e].pos_radius.xyz;
+            float d2 = dot(to_p, to_p);
+            float r = p.emitters[e].pos_radius.w * 1.4;
+            if (d2 > 1.0 && d2 < r * r) {
+                float d = sqrt(d2);
+                float falloff = 1.0 - d / r;
+                // Thermal updraft + outward gust!
+                target_vel += (to_p / d) * (falloff * 180.0 * p.emitters[e].color_rate.w);
+                target_vel.y += falloff * 140.0 * p.emitters[e].color_rate.w;
+            }
+        }
+
+        pt.vel_size.xyz = mix(pt.vel_size.xyz, target_vel, clamp(dt * 2.6, 0.0, 1.0));
+        vec3 next_pos = pt.pos_life.xyz + pt.vel_size.xyz * dt;
+
+        // Screen-space depth collision so snow/embers/ash gently settle or bounce off terrain.
+        if (p.counts_slots.w != 0u) {
+            vec4 clip = p.view_proj * vec4(next_pos, 1.0);
+            if (clip.w > 1.0) {
+                vec3 ndc = clip.xyz / clip.w;
+                if (ndc.x >= -1.0 && ndc.x <= 1.0 && ndc.y >= -1.0 && ndc.y <= 1.0) {
+                    vec2 uv = ndc.xy * 0.5 + 0.5;
+                    ivec2 dip = clamp(ivec2(uv * p.vz_and_size.zw), ivec2(0), ivec2(p.vz_and_size.zw) - ivec2(1));
+                    float scene_d = texelFetch(u_textures[p.counts_slots.w], dip, 0).r;
+                    float part_d = clamp((ndc.z * p.vz_and_size.x + p.vz_and_size.y) / 65535.0, 0.0, 1.0);
+                    if (scene_d < 0.9999 && part_d > scene_d && (part_d - scene_d) < 0.004) {
+                        // Gentle fade-out on ground/wall contact.
+                        pt.pos_life.w -= dt * 4.5;
+                        pt.vel_size.xyz *= 0.4;
+                        next_pos = pt.pos_life.xyz + pt.vel_size.xyz * dt;
+                    }
+                }
+            }
+        }
+
+        pt.pos_life.xyz = next_pos;
+        pt.pos_life.w -= dt;
+        p.particles.items[id] = pt;
+    } else {
+        // Emitter-driven semantic & VFX particles (campfire embers, fireball sparks, elemental hit bursts!).
+        uint ecount = min(p.counts_slots.z, 8u);
+        if (pt.pos_life.w <= 0.0) {
+            if (ecount == 0u) {
+                p.particles.items[id] = pt;
+                return;
+            }
+            // Stochastic spawn rate scaled by dt so emission is frame-rate independent (30/60/120/180 Hz).
+            if (rand01(rng) > clamp(dt * 5.5, 0.02, 0.35)) {
+                p.particles.items[id] = pt;
+                return;
+            }
+            uint ei = (id - p.counts_slots.y) % ecount;
+            ParticleEmitter em = p.emitters[ei];
+            if (em.color_rate.w < 0.15) {
+                p.particles.items[id] = pt;
+                return;
+            }
+            // Spawn within a tight sphere around the emitter (campfire/fireball/hit point).
+            vec3 dir = normalize(vec3(rand01(rng) * 2.0 - 1.0, rand01(rng) * 2.0 - 1.0, rand01(rng) * 2.0 - 1.0) + vec3(0.001));
+            float r_off = rand01(rng) * min(em.pos_radius.w * 0.22, 48.0);
+            pt.pos_life.xyz = em.pos_radius.xyz + dir * r_off;
+            float max_l = 0.55 + rand01(rng) * 1.15;
+            pt.pos_life.w = max_l;
+
+            // Rising embers & outward sparks.
+            bool is_spark = (em.color_rate.w > 1.05 && rand01(rng) < 0.55);
+            vec3 v = dir * (is_spark ? (140.0 + rand01(rng) * 220.0) : (25.0 + rand01(rng) * 55.0));
+            v.y += is_spark ? (70.0 + rand01(rng) * 90.0) : (95.0 + rand01(rng) * 110.0);
+            pt.vel_size.xyz = v;
+            pt.vel_size.w = is_spark ? (2.6 + rand01(rng) * 2.2) : (2.2 + rand01(rng) * 2.4);
+            pt.color_kind = vec4(em.color_rate.rgb * (1.15 + 0.55 * rand01(rng)), is_spark ? 3.0 : 0.0);
+            pt.aux = vec4(max_l, rand01(rng) * 6.283185, is_spark ? -260.0 : 40.0, 1.0);
+            p.particles.items[id] = pt;
+            return;
+        }
+
+        // Integrate emitter particle.
+        vec3 curl = curl_wind(pt.pos_life.xyz * 1.8, time * 1.5 + pt.aux.y);
+        pt.vel_size.xyz += (curl * 45.0 + vec3(0.0, pt.aux.z, 0.0)) * dt;
+        pt.vel_size.xyz *= exp(-dt * 1.15);
+        pt.pos_life.xyz += pt.vel_size.xyz * dt;
+        pt.pos_life.w -= dt;
+        p.particles.items[id] = pt;
+    }
+}

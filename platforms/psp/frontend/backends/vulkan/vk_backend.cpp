@@ -13,6 +13,7 @@
 #include "vk_descriptors.hpp"
 #include "vk_interpolate.hpp"
 #include "vk_lighting.hpp"
+#include "vk_particles.hpp"
 #include "vk_pipelines.hpp"
 #include "vk_swapchain.hpp"
 #include "vk_transfer.hpp"
@@ -271,6 +272,11 @@ private:
     std::uint32_t build_view_lights(const interpolation::Matrix &view_mat,
                                     const std::vector<SemanticPointLight> &vfx_lights,
                                     std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> &out_lights) const;
+    void build_particle_input(const interpolation::Matrix &view_mat, const vk::LightingFrameInput &light_in,
+                              const RenderTarget &rt, const std::vector<SemanticPointLight> &vfx_lights,
+                              std::uint32_t depth_slot, std::uint32_t soft_depth_slot,
+                              vk::ParticleFrameInput &out);
+    [[nodiscard]] float foliage_wind_phase() const noexcept;
     void snapshot_soft_depth(RenderTarget &rt);
     [[nodiscard]] bool want_vk_effect(std::uint32_t bit) const noexcept {
         return live_->enhanced_lighting.load(std::memory_order_relaxed) &&
@@ -388,7 +394,12 @@ private:
     vk::Pipelines pipelines_;
     vk::PackStreamer pack_streamer_;
     vk::LightingPipeline lighting_;
+    vk::ParticleSystem particles_;
     vk::GpuInterpolator interpolator_;
+    std::chrono::steady_clock::time_point particle_last_tp_{};
+    bool particle_have_tp_ = false;
+    float particle_elapsed_ = 0.0f;
+    std::uint32_t particle_seed_ = 1u;
 
     VkImageResource blur_a_;
     VkImageResource blur_b_;
@@ -639,6 +650,7 @@ bool VkBackend::init() {
     pack_streamer_.init(ctx_, live_->texture_pack_folder, live_->texture_pack_game,
                         live_->builtin_textures_folder, live_->texture_pack_mipmaps.load());
     lighting_.init(ctx_, descriptors_.layout(), live_);
+    particles_.init(ctx_, descriptors_.layout());
     interpolator_.init(ctx_);
 
     for (int i = 0; i < kFramesInFlight; ++i) {
@@ -716,6 +728,7 @@ void VkBackend::shutdown() {
     }
 
     pack_streamer_.shutdown(ctx_, descriptors_);
+    particles_.shutdown(ctx_);
     lighting_.shutdown(ctx_, descriptors_);
     interpolator_.shutdown(ctx_);
 
@@ -1375,7 +1388,9 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     dp.jitter_and_lod[0] = jitter_ndc_x;
     dp.jitter_and_lod[1] = jitter_ndc_y;
     dp.jitter_and_lod[2] = mip_lod_bias;
-    dp.jitter_and_lod[3] = 0.0f;
+    const bool is_static_foliage = !clear && !setup.through && !setup.is_skinned && textured && alpha_test &&
+                                   (R(kAlphaBlendEnable) & 1u) == 0 && want_enhanced_3d_hdr();
+    dp.jitter_and_lod[3] = is_static_foliage ? foliage_wind_phase() : 0.0f;
     std::memcpy(pslice.ptr, &dp, sizeof(dp));
 
     vk::GePipelineKey pkey{};
@@ -1542,6 +1557,29 @@ void VkBackend::draw_batch() {
                 const bool had_hdr = main_hdr_started_;
                 end_render_pass();
                 std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> vlights{};
+                if (particles_.ready() && want_enhanced_3d_hdr() && has_cur_view_mat_ && subframes_ <= 1) {
+                    const bool had_msaa = active_pass_msaa_;
+                    end_render_pass();
+                    vk::ParticleFrameInput pin{};
+                    transition_resource(rt.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+                    build_particle_input(cur_view_mat_, cur_light_in_, rt, cur_vfx_lights_,
+                                         rt.depth.bindless_slot,
+                                         main_depth_snapped_ ? soft_depth_copy_.bindless_slot : 0u, pin);
+                    FrameSlice &pf = frames_[frame_slot_];
+                    auto sslice = pf.params.allocate(sizeof(vk::ParticleSimParams), 16);
+                    auto dslice = pf.params.allocate(sizeof(vk::ParticleDrawParams), 16);
+                    if (sslice.ptr && dslice.ptr) {
+                        particles_.simulate(pf.cmd, descriptors_.set(), pin, sslice.ptr, sslice.address);
+                        begin_target_pass(rt, had_msaa, had_hdr);
+                        VkViewport pvp{0.0f, 0.0f, static_cast<float>(pin.depth_w), static_cast<float>(pin.depth_h), 0.0f, 1.0f};
+                        VkRect2D psc{{0, 0}, {pin.depth_w, pin.depth_h}};
+                        vkCmdSetViewport(pf.cmd, 0, 1, &pvp);
+                        vkCmdSetScissor(pf.cmd, 0, 1, &psc);
+                        particles_.draw(pf.cmd, descriptors_.set(), pin, had_hdr, had_msaa, dslice.ptr, dslice.address);
+                    }
+                }
+                end_render_pass();
                 const std::uint32_t vl_count = has_cur_view_mat_
                                                    ? build_view_lights(cur_view_mat_, cur_vfx_lights_, vlights)
                                                    : 0u;
@@ -2905,6 +2943,80 @@ std::uint32_t VkBackend::build_view_lights(
     return count;
 }
 
+float VkBackend::foliage_wind_phase() const noexcept {
+    if (!lighting_.ready() || lighting_.active_is_cave()) return 0.0f;
+    switch (lighting_.active_biome()) {
+        case vk::BiomeKind::ForestHills:
+        case vk::BiomeKind::GreatForest:
+        case vk::BiomeKind::Jungle:
+        case vk::BiomeKind::Swamp:
+        case vk::BiomeKind::SnowyPeak:
+            return std::max(particle_elapsed_ * 2.1f, 0.01f);
+        default:
+            return 0.0f;
+    }
+}
+
+void VkBackend::build_particle_input(const interpolation::Matrix &view_mat, const vk::LightingFrameInput &light_in,
+                                     const RenderTarget &rt, const std::vector<SemanticPointLight> &vfx_lights,
+                                     std::uint32_t depth_slot, std::uint32_t soft_depth_slot,
+                                     vk::ParticleFrameInput &out) {
+    const auto now = std::chrono::steady_clock::now();
+    float dt = 1.0f / static_cast<float>(std::max(target_fps_, 30));
+    if (particle_have_tp_) {
+        const float real_dt = std::chrono::duration<float>(now - particle_last_tp_).count();
+        dt = std::clamp(real_dt, 0.002f, 0.05f);
+    }
+    particle_last_tp_ = now;
+    particle_have_tp_ = true;
+    particle_elapsed_ += dt;
+    if (particle_elapsed_ > 10000.0f) particle_elapsed_ -= 10000.0f;
+
+    out = vk::ParticleFrameInput{};
+    std::copy_n(view_mat.data(), 16, out.view);
+    std::copy_n(light_in.proj, 16, out.proj);
+    // Flip Y row of column-major OpenGL-style PSP projection matrix to match Vulkan clip space (-Y up).
+    out.proj[1] = -out.proj[1];
+    out.proj[5] = -out.proj[5];
+    out.proj[9] = -out.proj[9];
+    out.proj[13] = -out.proj[13];
+
+    out.vz_scale = light_in.vz_scale;
+    out.vz_center = light_in.vz_center;
+    out.depth_w = std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_);
+    out.depth_h = std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_);
+    out.depth_slot = depth_slot;
+    out.soft_depth_slot = soft_depth_slot;
+    out.biome = lighting_.active_biome();
+    out.is_cave = lighting_.active_is_cave();
+    out.dt = dt;
+    out.elapsed_time = particle_elapsed_;
+    out.frame_seed = ++particle_seed_;
+
+    std::uint32_t ec = 0u;
+    auto push_em = [&](const SemanticPointLight &src) {
+        if (ec >= 8u || src.intensity <= 0.15f || src.radius <= 10.0f) return;
+        vk::ParticleEmitter &em = out.emitters[ec++];
+        em.pos_radius[0] = src.world_pos[0];
+        em.pos_radius[1] = src.world_pos[1];
+        em.pos_radius[2] = src.world_pos[2];
+        em.pos_radius[3] = src.radius;
+        em.color_rate[0] = std::pow(std::clamp(src.color[0], 0.0f, 1.0f), 2.2f);
+        em.color_rate[1] = std::pow(std::clamp(src.color[1], 0.0f, 1.0f), 2.2f);
+        em.color_rate[2] = std::pow(std::clamp(src.color[2], 0.0f, 1.0f), 2.2f);
+        em.color_rate[3] = src.intensity;
+    };
+    SemanticSceneFrame sem{};
+    {
+        std::lock_guard<std::mutex> lock(live_->semantic_mutex);
+        sem = live_->semantic_frame;
+    }
+    const std::uint32_t sn = std::min<std::uint32_t>(sem.light_count, static_cast<std::uint32_t>(SemanticSceneFrame::kMaxLights));
+    for (std::uint32_t i = 0u; i < sn; ++i) push_em(sem.lights[i]);
+    for (const auto &l : vfx_lights) push_em(l);
+    out.emitter_count = ec;
+}
+
 void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in,
                               const float *taa_prev_from_curr, bool taa_valid_reproj,
                               bool taa_reset, const float *curr_jitter_uv, bool use_hdr,
@@ -3285,6 +3397,30 @@ void VkBackend::render_interpolated_subframe(float phase) {
         taa_have_prev_ = true;
     }
 
+    // Simulate 120/180 Hz GPU particles BEFORE opening the 3D render pass (uses previous subframe's depth for collision).
+    vk::ParticleFrameInput interp_pin{};
+    bool interp_want_particles = particles_.ready() && want_enhanced_3d_hdr() && has_last_view_mat_;
+    bool interp_particles_drawn = false;
+    if (interp_want_particles) {
+        const interpolation::Matrix interp_view =
+            has_cam_rt ? interpolation::multiply(cam_rt, last_view_mat_) : last_view_mat_;
+        std::uint32_t sim_depth_slot = 0u;
+        if (interp_rt_.depth.image != VK_NULL_HANDLE && interp_rt_.depth.layout != VK_IMAGE_LAYOUT_UNDEFINED &&
+            interp_rt_.depth.bindless_slot != 0u) {
+            transition_resource(interp_rt_.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            sim_depth_slot = interp_rt_.depth.bindless_slot;
+        }
+        build_particle_input(interp_view, last_light_in_, interp_rt_, last_vfx_lights_,
+                             sim_depth_slot, 0u, interp_pin);
+        auto sslice = f.params.allocate(sizeof(vk::ParticleSimParams), 16);
+        if (sslice.ptr) {
+            particles_.simulate(f.cmd, descriptors_.set(), interp_pin, sslice.ptr, sslice.address);
+        } else {
+            interp_want_particles = false;
+        }
+    }
+
     transition_resource(interp_rt_.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -3419,6 +3555,18 @@ void VkBackend::render_interpolated_subframe(float phase) {
                                             (live_->enhanced_lighting.load(std::memory_order_relaxed) ||
                                              aa == LiveSettings::kAaFxaa || aa == LiveSettings::kAaTaa));
                 if (need_boundary) {
+                    if (interp_want_particles && !interp_particles_drawn) {
+                        interp_pin.soft_depth_slot = interp_depth_snapped ? soft_depth_copy_.bindless_slot : 0u;
+                        auto dslice = f.params.allocate(sizeof(vk::ParticleDrawParams), 16);
+                        if (dslice.ptr) {
+                            VkViewport pvp{0.0f, 0.0f, static_cast<float>(interp_pin.depth_w), static_cast<float>(interp_pin.depth_h), 0.0f, 1.0f};
+                            VkRect2D psc{{0, 0}, {interp_pin.depth_w, interp_pin.depth_h}};
+                            vkCmdSetViewport(f.cmd, 0, 1, &pvp);
+                            vkCmdSetScissor(f.cmd, 0, 1, &psc);
+                            particles_.draw(f.cmd, set0, interp_pin, pass_hdr, pass_msaa, dslice.ptr, dslice.address);
+                        }
+                        interp_particles_drawn = true;
+                    }
                     vkCmdEndRendering(f.cmd);
                     apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false,
                                   taa_jitter_uv, pass_hdr, interp_vlights.data(), interp_vl_count);
@@ -3492,6 +3640,18 @@ void VkBackend::render_interpolated_subframe(float phase) {
         vkCmdDraw(f.cmd, draw_vcount, 1, first_vertex, 0);
     }
 
+    if (interp_saw_3d && interp_want_particles && !interp_particles_drawn) {
+        interp_pin.soft_depth_slot = interp_depth_snapped ? soft_depth_copy_.bindless_slot : 0u;
+        auto dslice = f.params.allocate(sizeof(vk::ParticleDrawParams), 16);
+        if (dslice.ptr) {
+            VkViewport pvp{0.0f, 0.0f, static_cast<float>(interp_pin.depth_w), static_cast<float>(interp_pin.depth_h), 0.0f, 1.0f};
+            VkRect2D psc{{0, 0}, {interp_pin.depth_w, interp_pin.depth_h}};
+            vkCmdSetViewport(f.cmd, 0, 1, &pvp);
+            vkCmdSetScissor(f.cmd, 0, 1, &psc);
+            particles_.draw(f.cmd, set0, interp_pin, pass_hdr, pass_msaa, dslice.ptr, dslice.address);
+        }
+        interp_particles_drawn = true;
+    }
     vkCmdEndRendering(f.cmd);
     if (interp_saw_3d && !interp_lit) {
         apply_post_3d(interp_rt_, last_light_in_, taa_prev_from_curr, taa_valid_reproj, false, taa_jitter_uv,
