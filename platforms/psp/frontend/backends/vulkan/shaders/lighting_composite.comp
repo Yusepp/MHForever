@@ -449,7 +449,7 @@ void main() {
                         vec3 scatter_col = (bid == 11u) ? vec3(0.04, 0.06, 0.05)
                                          : (bid == 10u) ? vec3(0.02, 0.11, 0.14)
                                                         : vec3(0.03, 0.10, 0.14);
-                        col_lin = mix(col_lin, bg_lin * T_water + scatter_col * (1.0 - T_water), 0.55);
+                        col_lin = mix(col_lin, bg_lin * T_water + scatter_col * (1.0 - T_water), 0.32);
                     }
                     // Subtle animated shoreline foam where water meets solid banks/legs.
                     float foam_edge = (1.0 - smoothstep(2.0, 26.0, thickness)) * smoothstep(0.5, 4.0, thickness);
@@ -457,7 +457,7 @@ void main() {
                         float fn = (p.shadow_info.w != 0u)
                             ? sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(uv * 14.0 + vec2(t_w * 0.06), 0.22))
                             : 0.5;
-                        float foam = foam_edge * smoothstep(0.32, 0.72, fn) * 0.42;
+                        float foam = foam_edge * smoothstep(0.32, 0.72, fn) * 0.32;
                         col_lin = mix(col_lin, vec3(0.75, 0.82, 0.85) * mix(0.45, 1.0, sun_shadow), foam);
                     }
                 }
@@ -468,7 +468,7 @@ void main() {
                 vec4 ssr = texture(sampler2D(u_textures[p.ext_slots.y], u_samplers[p.aux_slots.y]), uv);
                 float ndotv = clamp(dot(N_water, V), 0.0, 1.0);
                 float fresnel = 0.02 + 0.98 * pow(1.0 - ndotv, 5.0);
-                float refl_str = clamp(fresnel * (shallow ? 0.55 : 0.88), 0.06, shallow ? 0.42 : 0.75);
+                float refl_str = clamp(fresnel * (shallow ? 0.45 : 0.75), 0.05, shallow ? 0.36 : 0.62);
                 col_lin = mix(col_lin, ssr.rgb, refl_str);
             }
 

@@ -1615,8 +1615,12 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     const auto mat_cls = static_cast<MaterialClass>(setup.material_id);
     const bool is_non_surface_mat = (mat_cls == MaterialClass::Fire || mat_cls == MaterialClass::WeatherSheet ||
                                      mat_cls == MaterialClass::HazeIgnore);
+    const bool z_write = (R(kZWriteDisable) & 1u) == 0;
+    // Every depth-writing 3D surface (terrain, sand, cliffs, trees, boats, characters — even when PSP has
+    // alpha-blend enabled!) MUST write its own MaterialClass (0 for untagged terrain) so it cleanly overwrites
+    // any water plane extending underneath it. Only non-depth-writing overlays/particles skip writing mat_id.
     const bool write_mat = hdr_3d && !clear && !setup.through && !is_soft_particle && !is_non_surface_mat &&
-                           (!blend_en || mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater);
+                           (z_write || mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater);
     const VkColorComponentFlags mat_write_mask = write_mat ? VK_COLOR_COMPONENT_R_BIT : 0u;
     if (write_mat && (mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater)) {
         main_has_water_ = true;
