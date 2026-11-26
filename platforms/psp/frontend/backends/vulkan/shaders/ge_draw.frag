@@ -169,6 +169,15 @@ void main() {
                 c.rgb += em * (kSpecHdr != 0u ? 1.45 : 0.85);
             }
         }
+        // The footstep splash / water ring occupies one tile in the shared effect atlas:
+        // crisp sunlit spray highlight & slightly fuller droplet presence (SDR-safe).
+        if ((p.pbr_slots.w & 0x200u) != 0u &&
+            all(greaterThanEqual(v_uv, vec2(0.625, 0.125))) &&
+            all(lessThan(v_uv, vec2(0.75, 0.25)))) {
+            float splash_w = smoothstep(0.06, 0.60, c.a);
+            c.rgb += vec3(0.18, 0.21, 0.23) * splash_w;
+            c.a = min(1.0, c.a * 1.18);
+        }
         if ((bits & 0x80u) != 0u) {
             float f = clamp(v_fog, 0.0, 1.0);
             if (p.jitter_and_lod.w > 0.5) {
@@ -210,6 +219,10 @@ void main() {
                 }
                 c.a *= soft_fade;
             }
+        }
+        // Color only the surviving fragments of the traced cave layer.
+        if ((p.pbr_slots.w & 0x100u) != 0u) {
+            c.rgb = vec3(1.0, 0.0, 1.0);
         }
     }
     if (kSpecHdr != 0u) {

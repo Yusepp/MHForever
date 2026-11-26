@@ -33,6 +33,9 @@ enum class MaterialClass : std::uint8_t {
     Lava         = 9,  // Molten magma (no diffuse AO)
     WeatherSheet = 10, // 2D camera rain/snow/sandstorm sheets (non-surface)
     HazeIgnore   = 11, // Sky/mist/haze cards (non-surface, no diffuse AO)
+    WaterSparkle = 12, // Secondary additive water caustic/glint flipbook
+    SplashAtlas  = 13, // Shared effect atlas with an authored water-impact tile
+    CutoutPuddle = 14, // Alpha-cutout floor whose discarded holes expose a planar reflection puddle
 };
 
 // Clean-room texture-identity -> MaterialClass registry entry supplied by the game host.

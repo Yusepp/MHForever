@@ -993,6 +993,53 @@ struct AreaHeightCache {
 };
 AreaHeightCache g_area_height_cache;
 
+#if MHF_MHFU_FUC
+void trace_water_contact(Runtime &rt, std::uint16_t area, const std::array<float, 3> &point, float ground) {
+    static const bool enabled = [] {
+        const char *value = std::getenv("MHF_TRACE_WATER_CONTACT");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) return;
+
+    // FUComplete ObjBase::pl_flag_ck at 0x08865C80 reads this word for low flags.
+    constexpr std::uint32_t kActorFlags = 0x288u;
+    constexpr std::uint32_t kInWater = 0x20u;
+    const auto player = g_monster_tracker.player_address();
+    auto &memory = rt.memory();
+    if (player == 0u || !memory.contains(player + kActorFlags, 4u)) return;
+
+    // game_task's hunter collision call to game_sub:09C39588 passes these output fields.
+    constexpr std::uint32_t kContactRecord = 0x290u;
+    constexpr std::uint32_t kSurfaceHeight = 0x2A0u;
+    constexpr std::uint32_t kGroundHeight = 0x2CCu;
+    if (!memory.contains(player + kGroundHeight, 4u)) return;
+
+    const auto contact = memory.load32(player + kContactRecord);
+    const auto surface_y = std::bit_cast<float>(memory.load32(player + kSurfaceHeight));
+    const auto ground_y = std::bit_cast<float>(memory.load32(player + kGroundHeight));
+    const auto flags = memory.load32(player + kActorFlags);
+    const bool in_water = (flags & kInWater) != 0;
+    static std::uint16_t previous_area = 0;
+    static bool previous_in_water = false;
+    static std::uint32_t previous_contact = 0;
+    static std::uint64_t last_us = 0;
+    const auto now = rt.now_us();
+    if (area == previous_area && in_water == previous_in_water && contact == previous_contact &&
+        now >= last_us && now - last_us < 500'000u) {
+        return;
+    }
+    previous_area = area;
+    previous_in_water = in_water;
+    previous_contact = contact;
+    last_us = now;
+    std::fprintf(stderr, "[mhfu][water-contact] ms=%llu area=%u in_water=%u flags=%08x "
+                         "pos=(%.1f,%.1f,%.1f) probe_ground=%.1f contact=%08x ground=%.1f surface=%.1f\n",
+                 static_cast<unsigned long long>(now / 1000u), static_cast<unsigned>(area),
+                 in_water ? 1u : 0u, flags, point[0], point[1], point[2], ground, contact, ground_y, surface_y);
+}
+#endif
+
+
 void sample_mist_ground(Runtime &rt, const Context &ctx) {
     g_mist_ground.reset();
     const auto area = g_monster_tracker.player_area();
@@ -1034,6 +1081,7 @@ void sample_mist_ground(Runtime &rt, const Context &ctx) {
     };
 
     const float ground = probe_ground(point[0], point[1] + 40.0f, point[2]);
+    trace_water_contact(rt, area, point, ground);
     if (!std::isfinite(ground) || std::fabs(ground - point[1]) > 120.0f) return;
     if (profile) {
         static unsigned samples = 0;
@@ -1482,7 +1530,7 @@ int main(int argc, char **argv) {
     // The projected shadows (enhancement): --projected-shadows turns them on, --no-whole-map-shadows leaves only the hunter and
     // monsters casting, --shadow-quality 0..2 (low by default), --shadow-darkness 0..100 (50: as each zone was tuned).
     bool projected_shadows = false, whole_map_shadows = true, enhanced_lighting = false;
-    std::uint32_t vulkan_effects_mask = 0x3FFFu;
+    std::uint32_t vulkan_effects_mask = 0xBFFFu;
     int aa_mode = 1; // 0=Off, 1=FXAA, 2=MSAA 4x, 3=TAA
     int shadow_quality = 0, shadow_darkness = 50;
     bool true_weapon_values = false; // --true-weapon-values: menus show attack and element without display multipliers
@@ -1533,7 +1581,7 @@ int main(int argc, char **argv) {
         else if (a == "--enhanced-lighting") enhanced_lighting = true;
         else if (a == "--no-enhanced-lighting") enhanced_lighting = false;
         else if (a == "--vulkan-effects-mask" && i + 1 < argc)
-            vulkan_effects_mask = static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0)) & 0x7FFFu;
+            vulkan_effects_mask = static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0)) & 0xFFFFu;
         else if (a == "--aa-mode" && i + 1 < argc)
             aa_mode = std::clamp(std::stoi(argv[++i]), 0, 3);
         else if (a == "--no-whole-map-shadows") whole_map_shadows = false;

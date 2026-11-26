@@ -1,4 +1,5 @@
 #include "vk_lighting.hpp"
+#include "vk_pipelines.hpp"
 #include "vk_shaders_spv.hpp"
 
 #include <algorithm>
@@ -406,7 +407,8 @@ VkDescriptorSet LightingPipeline::get_or_bind_mat_set(const Context &ctx, VkImag
 }
 
 MaterialClass LightingPipeline::note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
-                                             const textures::MemoryReader &reader, bool is_blended) {
+                                             const textures::MemoryReader &reader, bool is_blended,
+                                             std::uint32_t *out_data_hash, std::uint32_t *out_clut_hash) {
     if (!zone_keys_) return MaterialClass::Unknown;
     CachedTexSem sem{};
     if (const auto cit = content_hash_sem_.find(content_hash); cit != content_hash_sem_.end()) {
@@ -424,6 +426,10 @@ MaterialClass LightingPipeline::note_texture(std::uint64_t content_hash, const t
         }
         if (content_hash_sem_.size() > 16384u) content_hash_sem_.clear();
         content_hash_sem_.emplace(content_hash, sem);
+    }
+    if (sem.has_key) {
+        if (out_data_hash) *out_data_hash = sem.data_hash;
+        if (out_clut_hash) *out_clut_hash = sem.clut_hash;
     }
     if (sem.zone >= 0 && static_cast<std::size_t>(sem.zone) < zone_votes_.size()) {
         ++zone_votes_[static_cast<std::size_t>(sem.zone)];
@@ -648,6 +654,158 @@ VkDescriptorSet LightingPipeline::get_or_bind_scene_set(const Context &ctx, VkIm
                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &sii, nullptr, nullptr};
     vkUpdateDescriptorSets(ctx.device, 1, &swds, 0, nullptr);
     return scene_set;
+}
+
+void LightingPipeline::fill_water_frame_params(WaterFrameParams &out, const LightingFrameInput &in,
+                                               const float *view_mat, float vp_w, float vp_h, float elapsed_sec,
+                                               std::uint32_t bg_color_slot, std::uint32_t bg_depth_slot) const noexcept {
+    out = WaterFrameParams{};
+    out.proj_info[0] = 1.0f / std::max(std::fabs(in.proj[0]), 1e-4f);
+    out.proj_info[1] = 1.0f / std::max(std::fabs(in.proj[5]), 1e-4f);
+    out.proj_info[2] = in.proj[10];
+    out.proj_info[3] = in.proj[14];
+    out.vz_and_size[0] = in.vz_scale;
+    out.vz_and_size[1] = in.vz_center;
+    out.vz_and_size[2] = std::max(vp_w, 1.0f);
+    out.vz_and_size[3] = std::max(vp_h, 1.0f);
+
+    // Prefer exact area-space camera from game host (world-locked across camera movement!), falling back to view_mat.
+    const float *vm = in.fog_camera.valid ? in.fog_camera.world_to_eye.data() : view_mat;
+    if (vm != nullptr) {
+        out.inv_view[0]  = vm[0]; out.inv_view[1]  = vm[4]; out.inv_view[2]  = vm[8];  out.inv_view[3]  = 0.0f;
+        out.inv_view[4]  = vm[1]; out.inv_view[5]  = vm[5]; out.inv_view[6]  = vm[9];  out.inv_view[7]  = 0.0f;
+        out.inv_view[8]  = vm[2]; out.inv_view[9]  = vm[6]; out.inv_view[10] = vm[10]; out.inv_view[11] = 0.0f;
+        const float tx = vm[12], ty = vm[13], tz = vm[14];
+        out.inv_view[12] = -(vm[0] * tx + vm[1] * ty + vm[2] * tz);
+        out.inv_view[13] = -(vm[4] * tx + vm[5] * ty + vm[6] * tz);
+        out.inv_view[14] = -(vm[8] * tx + vm[9] * ty + vm[10] * tz);
+        out.inv_view[15] = 1.0f;
+        // World-up (0, 1, 0) in screen view space (+Y down).
+        const float ux = vm[4], uy = -vm[5], uz = vm[6];
+        const float ulen = std::sqrt(ux * ux + uy * uy + uz * uz);
+        if (ulen > 1e-4f) {
+            out.world_up_view[0] = ux / ulen;
+            out.world_up_view[1] = uy / ulen;
+            out.world_up_view[2] = uz / ulen;
+        }
+        out.world_up_view[3] = 1.0f;
+    } else if (in.has_view_rot) {
+        const float *r = in.view_rot;
+        const float ux = r[1], uy = -r[4], uz = r[7];
+        const float ulen = std::sqrt(ux * ux + uy * uy + uz * uz);
+        if (ulen > 1e-4f) {
+            out.world_up_view[0] = ux / ulen;
+            out.world_up_view[1] = uy / ulen;
+            out.world_up_view[2] = uz / ulen;
+        }
+        out.world_up_view[3] = 0.0f;
+    }
+
+    float sw[3]{0.34f, 0.78f, 0.52f};
+    resolve_sun_dir_world(in, sw);
+    if (vm != nullptr) {
+        const float sx = vm[0] * sw[0] + vm[4] * sw[1] + vm[8] * sw[2];
+        const float sy = -(vm[1] * sw[0] + vm[5] * sw[1] + vm[9] * sw[2]);
+        const float sz = vm[2] * sw[0] + vm[6] * sw[1] + vm[10] * sw[2];
+        const float sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+        if (sl > 1e-4f) {
+            out.sun_dir_view[0] = sx / sl;
+            out.sun_dir_view[1] = sy / sl;
+            out.sun_dir_view[2] = sz / sl;
+        }
+    } else if (in.has_view_rot) {
+        const float *r = in.view_rot;
+        const float sx = r[0] * sw[0] + r[1] * sw[1] + r[2] * sw[2];
+        const float sy = -(r[3] * sw[0] + r[4] * sw[1] + r[5] * sw[2]);
+        const float sz = r[6] * sw[0] + r[7] * sw[1] + r[8] * sw[2];
+        const float sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+        if (sl > 1e-4f) {
+            out.sun_dir_view[0] = sx / sl;
+            out.sun_dir_view[1] = sy / sl;
+            out.sun_dir_view[2] = sz / sl;
+        }
+    }
+    out.sun_dir_view[3] = active_is_cave_ ? 1.0f : 0.0f;
+
+    // Area-aware / biome-calibrated linear SDR water optics (respecting MHFU's authentic per-map art style):
+    //   sky_zenith.rgb  = subtle zenith sky reflection tint      | sky_zenith.w  = elapsed_sec
+    //   sky_horizon.rgb = subtle horizon reflection tint         | sky_horizon.w = max_fresnel (restrained!)
+    //   deep_col.rgb    = deep-water scatter accent (blended w/ orig) | deep_col.w = wave_chop (0.3..0.9)
+    //   sigma_abs.rgb   = Beer-Lambert extinction (1/cm)         | sigma_abs.w   = caustic_foam_pack (caustic_str)
+    auto set_biome = [&](float zr, float zg, float zb,
+                         float hr, float hg, float hb, float max_fresnel,
+                         float dr, float dg, float db, float wave_chop,
+                         float sr, float sg, float sb, float caustic_str) {
+        out.sky_zenith[0] = zr;  out.sky_zenith[1] = zg;  out.sky_zenith[2] = zb;
+        out.sky_horizon[0] = hr; out.sky_horizon[1] = hg; out.sky_horizon[2] = hb;
+        out.sky_horizon[3] = max_fresnel;
+        out.deep_col[0] = dr;    out.deep_col[1] = dg;    out.deep_col[2] = db;
+        out.deep_col[3] = wave_chop;
+        out.sigma_abs[0] = sr;   out.sigma_abs[1] = sg;   out.sigma_abs[2] = sb;
+        out.sigma_abs[3] = caustic_str;
+    };
+    switch (active_biome_) {
+    case BiomeKind::Jungle:
+        // Jungle: vibrant tropical emerald-turquoise ocean, lively coastal swell, crisp shallow sand caustics.
+        set_biome(0.14f, 0.38f, 0.56f,  0.34f, 0.52f, 0.56f, 0.44f,
+                  0.015f, 0.14f, 0.14f, 0.82f,
+                  0.014f, 0.0045f, 0.0048f, 0.34f);
+        break;
+    case BiomeKind::Swamp:
+        // Swamp: eerie dark murky marsh-olive water, calm still ripples, high turbidity, muted overcast reflection, zero caustics.
+        set_biome(0.16f, 0.19f, 0.18f,  0.24f, 0.27f, 0.25f, 0.38f,
+                  0.032f, 0.048f, 0.032f, 0.32f,
+                  0.024f, 0.018f, 0.026f, 0.00f);
+        break;
+    case BiomeKind::SnowyPeak:
+    case BiomeKind::PokkeVillage:
+        // Pokke Farm / Pokke Village / Snowy Mtns: crisp alpine lake & mossy stream, glassy mountain/pier reflections.
+        set_biome(0.18f, 0.34f, 0.52f,  0.40f, 0.48f, 0.56f, 0.48f,
+                  0.025f, 0.095f, 0.125f, 0.52f,
+                  0.014f, 0.0075f, 0.0060f, 0.20f);
+        break;
+    case BiomeKind::ForestHills:
+    case BiomeKind::GreatForest:
+        // Forest & Hills / Great Forest: clear woodland river, mossy-teal shadows, dappled canopy reflection.
+        set_biome(0.16f, 0.32f, 0.44f,  0.32f, 0.44f, 0.46f, 0.44f,
+                  0.020f, 0.095f, 0.090f, 0.62f,
+                  0.014f, 0.0065f, 0.0070f, 0.24f);
+        break;
+    case BiomeKind::Desert:
+    case BiomeKind::DesertSandstorm:
+        // Desert Oasis: warm sunlit turquoise-amber shallows, bright sky reflection.
+        set_biome(0.20f, 0.38f, 0.56f,  0.48f, 0.50f, 0.48f, 0.46f,
+                  0.030f, 0.120f, 0.130f, 0.58f,
+                  0.012f, 0.0060f, 0.0055f, 0.30f);
+        break;
+    case BiomeKind::DarkCave:
+    case BiomeKind::IceCave:
+    case BiomeKind::Volcano:
+        // Subterranean cave pools: dark still glossy water, minimal reflection, zero sun glints.
+        set_biome(0.04f, 0.06f, 0.08f,  0.07f, 0.09f, 0.11f, 0.28f,
+                  0.015f, 0.032f, 0.042f, 0.26f,
+                  0.020f, 0.014f, 0.012f, 0.00f);
+        break;
+    default:
+        set_biome(0.18f, 0.34f, 0.52f,  0.38f, 0.48f, 0.54f, 0.44f,
+                  0.025f, 0.100f, 0.125f, 0.60f,
+                  0.013f, 0.0065f, 0.0055f, 0.22f);
+        break;
+    }
+    out.sky_zenith[3] = elapsed_sec;
+
+    out.slots[0] = bg_color_slot;
+    out.slots[1] = bg_depth_slot;
+    out.slots[2] = noise3d_tex_.slot;
+    out.slots[3] = BindlessDescriptors::sampler_index(true, false, true, true, 1);
+
+    out.ripple_count = static_cast<std::uint32_t>(kMaxRipples);
+    for (std::size_t i = 0; i < kMaxRipples; ++i) {
+        out.ripples[i][0] = ripples_[i].x;
+        out.ripples[i][1] = ripples_[i].z;
+        out.ripples[i][2] = elapsed_sec - ripples_[i].birth_sec;
+        out.ripples[i][3] = ripples_[i].radius;
+    }
 }
 
 void LightingPipeline::resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept {
@@ -960,8 +1118,11 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                  (mask & LiveSettings::kVkEffectRayTracing) != 0u;
     const bool need_bloom_src  = want_bloom;
     const bool use_hdr_src     = (hdr_input_slot != 0u);
-    const bool run_water_ssr   = want_water && has_water_draws && use_hdr_src &&
-                                 hiz_pipe_ != VK_NULL_HANDLE && water_ssr_pipe_ != VK_NULL_HANDLE;
+    // Forward water replacement pass (ge_draw_water.frag) now handles immutable SSR, refraction,
+    // Beer-Lambert absorption, caustics, and contact foam directly during water geometry rasterization.
+    const bool run_water_ssr   = false;
+    (void)want_water;
+    (void)has_water_draws;
     const std::uint32_t src_color_slot = use_hdr_src ? hdr_input_slot : scene_color_slot;
 
     // Update analytic interactive water ripple ring buffer from area-space wake actors (0 VRAM, continuous at 120/180 Hz).
@@ -981,7 +1142,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
             } else {
                 const float dx = wa.x - pa.x;
                 const float dz = wa.z - pa.z;
-                if (dx * dx + dz * dz >= 38.0f * 38.0f) {
+                if (dx * dx + dz * dz >= 26.0f * 26.0f) {
                     ripples_[ripple_cursor_] = RippleRing{wa.x, wa.z, elapsed_sec, wa.radius};
                     ripple_cursor_ = (ripple_cursor_ + 1u) % kMaxRipples;
                     pa = {wa.x, wa.z, true};

@@ -323,8 +323,10 @@ void main() {
             ao_mat = 1.0;
             contact_mat = 1.0;
         } else if (mat_id == 1u || mat_id == 2u) {
-            ao_mat = mix(1.0, ao, 0.25);
-            contact_mat = mix(1.0, contact, 0.45);
+            // Forward water pass already computes physical Fresnel, Beer-Lambert transmission, and contact foam;
+            // keep SSAO / contact shadows off water so the surface never gets muddied.
+            ao_mat = 1.0;
+            contact_mat = 1.0;
         } else if (mat_id == 3u) {
             ao_mat = mix(1.0, ao, 0.55);
         } else if (mat_id == 7u) {
@@ -391,97 +393,6 @@ void main() {
                                                              u_samplers[p.aux_slots.y]),
                                                    uv).rgb);
             col_lin += ssgi * (0.30 + 0.70 * albedo_est) * (p.world_up_view.w * (0.45 + 0.55 * ao));
-        }
-
-        // 4b. Fast Water & Wet-Surface Screen-Space Reflections (reflects hunter, monsters, fireballs & trees!).
-        // 4b. Step 3 Deterministic World-Locked Water Shading, Beer-Lambert Depth Absorption,
-        //     Foreground-Safe Refraction & Half-Res Hi-Z SSR + Semantic Sky/Canopy Fallback!
-        //     Strictly gated on categorical R8_UINT MaterialClass (1 = Water, 2 = ShallowWater):
-        //     zero color heuristics, zero read-while-write hazards, 0ms on dry surfaces!
-        if ((p.ext_slots.w & 128u) != 0u && (mat_id == 1u || mat_id == 2u) && mat_alpha > 0.05) {
-            bool shallow = (mat_id == 2u);
-            float t_w = p.env_time.x;
-            float w_mask = smoothstep(0.05, 0.65, mat_alpha);
-
-            // Compute area-space world position & 2-layer animated wave normal (100% camera-independent).
-            vec3 N_water = N;
-            vec2 wave_slope = vec2(0.0);
-            if (p.env_time.w > 0.5 && p.shadow_info.w != 0u) {
-                vec3 P_psp = vec3(P.x, -P.y, P.z);
-                vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
-                float sc1 = shallow ? 0.0065 : 0.0042;
-                float sc2 = shallow ? 0.0130 : 0.0092;
-                vec2 u1 = P_world.xz * sc1 + vec2(t_w * 0.055, -t_w * 0.032);
-                vec2 u2 = P_world.xz * sc2 + vec2(-t_w * 0.042, t_w * 0.068);
-                float eps = 0.018;
-                float h1c = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u1, 0.10));
-                float h1x = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u1 + vec2(eps, 0.0), 0.10));
-                float h1z = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u1 + vec2(0.0, eps), 0.10));
-                float h2c = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u2, 0.35));
-                float h2x = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u2 + vec2(eps, 0.0), 0.35));
-                float h2z = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u2 + vec2(0.0, eps), 0.35));
-                float amp = shallow ? 0.055 : 0.095;
-                wave_slope = clamp((vec2(h1x - h1c, h1z - h1c) * 0.60 + vec2(h2x - h2c, h2z - h2c) * 0.40) * (amp / eps),
-                                   vec2(-0.28), vec2(0.28));
-                vec3 Nw = normalize(vec3(-wave_slope.x, 1.0, -wave_slope.y));
-                vec3 Np = normalize(transpose(mat3(p.inv_view)) * Nw);
-                N_water = normalize(vec3(Np.x, -Np.y, Np.z));
-                if (dot(N_water, U) < 0.0) N_water = U;
-            }
-
-            // Beer-Lambert exponential transmission + depth-safe refraction + shoreline foam for translucent Water.
-            if (!shallow && p.phase1_slots.x != 0u && kSpecInPlace == 0u) {
-                float bg_d = texelFetch(u_textures[p.phase1_slots.x], ip, 0).r;
-                if (bg_d < 0.99992 && bg_d > d_here) {
-                    float z_bg = linear_eye_z(p, bg_d);
-                    float thickness = clamp(z_bg - z_eye, 0.0, 600.0);
-
-                    // Foreground-safe screen-space refraction (rejects foreground objects in front of water).
-                    vec2 ref_uv = clamp(uv + wave_slope * 0.018 * clamp(thickness / 80.0, 0.2, 1.0),
-                                        vec2(0.002), vec2(0.998));
-                    ivec2 ref_ip = clamp(ivec2(ref_uv * p.vz_and_size.zw), ivec2(0), full_max);
-                    float ref_d = texelFetch(u_textures[p.phase1_slots.x], ref_ip, 0).r;
-                    if (ref_d > d_here) {
-                        vec3 bg_raw = texelFetch(u_textures[p.tex_slots.x], ref_ip, 0).rgb;
-                        vec3 bg_lin = srgb_to_linear_hdr(bg_raw);
-                        // Biome-calibrated Beer-Lambert absorption coefficients (1/cm).
-                        vec3 sigma = (bid == 11u) ? vec3(0.014, 0.011, 0.016)
-                                   : (bid == 10u) ? vec3(0.012, 0.005, 0.004)
-                                                  : vec3(0.010, 0.006, 0.004);
-                        vec3 T_water = exp(-sigma * thickness);
-                        vec3 scatter_col = (bid == 11u) ? vec3(0.04, 0.06, 0.05)
-                                         : (bid == 10u) ? vec3(0.02, 0.11, 0.14)
-                                                        : vec3(0.03, 0.10, 0.14);
-                        col_lin = mix(col_lin, bg_lin * T_water + scatter_col * (1.0 - T_water), 0.32 * w_mask);
-                    }
-                    // Subtle animated shoreline foam where water meets solid banks/legs.
-                    float foam_edge = (1.0 - smoothstep(2.0, 26.0, thickness)) * smoothstep(0.5, 4.0, thickness);
-                    if (foam_edge > 0.02) {
-                        float fn = (p.shadow_info.w != 0u)
-                            ? sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(uv * 14.0 + vec2(t_w * 0.06), 0.22))
-                            : 0.5;
-                        float foam = foam_edge * smoothstep(0.32, 0.72, fn) * 0.32 * w_mask;
-                        col_lin = mix(col_lin, vec3(0.75, 0.82, 0.85) * mix(0.45, 1.0, sun_shadow), foam);
-                    }
-                }
-            }
-
-            // Physical Schlick Fresnel (F0 = 0.02) blend with half-res Hi-Z SSR + semantic sky/canopy fallback.
-            if (p.ext_slots.y != 0u) {
-                vec4 ssr = texture(sampler2D(u_textures[p.ext_slots.y], u_samplers[p.aux_slots.y]), uv);
-                float ndotv = clamp(dot(N_water, V), 0.0, 1.0);
-                float fresnel = 0.02 + 0.98 * pow(1.0 - ndotv, 5.0);
-                float refl_str = clamp(fresnel * (shallow ? 0.45 : 0.75), 0.05, shallow ? 0.36 : 0.62) * w_mask;
-                col_lin = mix(col_lin, ssr.rgb, refl_str);
-            }
-
-            // Crisp animated sun specular glint on wave crests (gated by sun visibility).
-            if (!is_cave) {
-                vec3 H_w = normalize(L + V);
-                float ndoth = clamp(dot(N_water, H_w), 0.0, 1.0);
-                float glint = pow(ndoth, shallow ? 96.0 : 160.0) * sun_shadow * (shallow ? 0.55 : 0.95) * w_mask;
-                col_lin += vec3(1.0, 0.96, 0.88) * glint;
-            }
         }
     }
 

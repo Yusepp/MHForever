@@ -93,9 +93,10 @@ bool Pipelines::init(const Context &ctx, VkDescriptorSetLayout bindless_layout, 
 
     ge_vert = ctx.create_shader_module(shaders::kGeDrawVertSpv);
     ge_frag = ctx.create_shader_module(shaders::kGeDrawFragSpv);
+    ge_water_frag = ctx.create_shader_module(shaders::kGeDrawWaterFragSpv);
     VkShaderModule blur_vs = ctx.create_shader_module(shaders::kBlurVertSpv);
     VkShaderModule blur_fs = ctx.create_shader_module(shaders::kBlurFragSpv);
-    if (!ge_vert || !ge_frag || !blur_vs || !blur_fs) {
+    if (!ge_vert || !ge_frag || !ge_water_frag || !blur_vs || !blur_fs) {
         if (blur_vs) vkDestroyShaderModule(ctx.device, blur_vs, nullptr);
         if (blur_fs) vkDestroyShaderModule(ctx.device, blur_fs, nullptr);
         return false;
@@ -156,7 +157,8 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
 
     std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, ge_vert, "main", nullptr};
-    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, ge_frag, "main", &spec};
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
+                 key.is_water ? ge_water_frag : ge_frag, "main", &spec};
 
     using gpu_common::GpuVertex;
     VkVertexInputBindingDescription binding{0, sizeof(GpuVertex), VK_VERTEX_INPUT_RATE_VERTEX};
@@ -271,6 +273,7 @@ void Pipelines::shutdown(const Context &ctx) {
     if (blur_pipe) { vkDestroyPipeline(ctx.device, blur_pipe, nullptr); blur_pipe = VK_NULL_HANDLE; }
     if (ge_vert) { vkDestroyShaderModule(ctx.device, ge_vert, nullptr); ge_vert = VK_NULL_HANDLE; }
     if (ge_frag) { vkDestroyShaderModule(ctx.device, ge_frag, nullptr); ge_frag = VK_NULL_HANDLE; }
+    if (ge_water_frag) { vkDestroyShaderModule(ctx.device, ge_water_frag, nullptr); ge_water_frag = VK_NULL_HANDLE; }
     if (present_layout) { vkDestroyPipelineLayout(ctx.device, present_layout, nullptr); present_layout = VK_NULL_HANDLE; }
     if (blur_layout) { vkDestroyPipelineLayout(ctx.device, blur_layout, nullptr); blur_layout = VK_NULL_HANDLE; }
     if (ge_layout) { vkDestroyPipelineLayout(ctx.device, ge_layout, nullptr); ge_layout = VK_NULL_HANDLE; }

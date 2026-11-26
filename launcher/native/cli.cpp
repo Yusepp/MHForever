@@ -28,7 +28,7 @@ constexpr const char *kBoolSettings[] = {"fullscreen", "smoothTextures", "packMi
                                          "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
                                          "projectedShadows", "wholeMapShadows", "enhancedLighting",
                                          "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
-                                         "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing", "widescreen"};
+                                         "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing", "vkWaterReflections", "widescreen"};
 constexpr const char *kNumberSettings[] = {"scale", "fps", "hudSize", "musicVolume", "sfxVolume",
                                            "analogCameraTurnSpeed", "analogCameraTiltSpeed", "mouseCameraSpeed", "anisotropy",
                                            "shadowQuality", "shadowDarkness"};
@@ -47,7 +47,7 @@ void usage() {
                  "              damageNumbers, comboBooksFromBox, infinitePaintballs, projectedShadows, wholeMapShadows,\n"
                  "              enhancedLighting, vkAo, vkContactShadows, vkVolumetricFog, vkBloom, vkSsgi, vkSpecular,\n"
                  "              vkSoftParticles, vkFxaa, vkVignette, vkKillcamDof, vkSunShadows, vkDynamicLights,\n"
-                 "              vkPbrMaterials, vkFroxelFog, vkRayTracing, widescreen\n"
+                 "              vkPbrMaterials, vkFroxelFog, vkRayTracing, vkWaterReflections, widescreen\n"
                  "        num:  scale 1-10, fps 30-180, hudSize 50-100, musicVolume 0-100, sfxVolume 0-100,\n"
                  "              analogCameraTurnSpeed 50-200, analogCameraTiltSpeed 50-200, mouseCameraSpeed 25-300,\n"
                  "              anisotropy 1/2/4/8/16, shadowQuality 0-2, shadowDarkness 0-100\n"

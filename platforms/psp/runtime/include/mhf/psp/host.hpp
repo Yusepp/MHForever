@@ -60,6 +60,8 @@ struct ControllerState {
 [[nodiscard]] const DisplayState &display_state(Runtime &rt);
 void set_controller_state(Runtime &rt, const ControllerState &state);
 [[nodiscard]] const ControllerState &controller_state(Runtime &rt);
+void request_input_tape_snap(Runtime &rt);
+[[nodiscard]] std::uint64_t take_input_tape_snap_request(Runtime &rt);
 
 // Mixes up to `frames` stereo frames of what the game has output on its audio channels into `out` (interleaved
 // 16-bit, 44.1 kHz) and returns `frames`. Channels are jitter-buffered (see hle_media.cpp).

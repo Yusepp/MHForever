@@ -690,6 +690,7 @@ export function GameSettingsPage({ state, onChange, onChangeCopy, onRemoveCopy, 
               ['vkVignette', 'Moody vignette', 'Subtle edge framing in caves, swamps, volcanoes, and sieges.', true],
               ['vkKillcamDof', 'Killcam depth of field', 'Peripheral bokeh blur during the monster killcam.', true],
               ['vkRayTracing', 'Hardware RT shadows (Ultra)', 'VK_KHR_ray_query hardware ray-traced sun shadows via partitioned Static+Dynamic BVH.', false],
+              ['vkWaterReflections', 'Water waves & reflections', 'Area-aware animated water ripples, Beer-Lambert depth tint, and screen-space reflections.', true],
             ] as const).map(([key, label, help, defOn]) => (
               <ToggleRow key={key} label={label} help={help} on={s[key] ?? defOn} onToggle={() => onChange({ [key]: !(s[key] ?? defOn) })} />
             ))}

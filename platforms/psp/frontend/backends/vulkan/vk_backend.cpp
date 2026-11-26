@@ -67,6 +67,11 @@ VkBlendFactor psp_blend_factor(std::uint32_t f, bool is_src, std::uint32_t fix, 
     }
 }
 
+bool is_water_overlay_blend(std::uint32_t enabled, std::uint32_t mode, std::uint32_t fixed_b) {
+    // GE source alpha, fixed white destination, add.
+    return (enabled & 1u) && (mode & 0xFFFu) == 0x0A2u && (fixed_b & 0xFFFFFFu) == 0xFFFFFFu;
+}
+
 struct VkImageResource {
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation alloc = VK_NULL_HANDLE;
@@ -177,6 +182,8 @@ struct DrawSetup {
     bool self_sampled = false;
     bool is_killcam = false;
     std::uint8_t material_id = 0;
+    std::uint32_t tex_data_hash = 0;
+    std::uint32_t tex_clut_hash = 0;
     bool is_skinned = false;
     bool is_additive_vfx = false;
 };
@@ -261,6 +268,7 @@ private:
     void upload_texture_2d(VkImageResource &dst, std::uint32_t w, std::uint32_t h, const void *rgba_pixels);
     void upload_overlay_if_needed();
     void submit_recorded_without_present();
+    void maybe_save_vk_snapshot(VkImageResource &src, std::uint32_t vis_w, std::uint32_t vis_h);
     void show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter);
     void submit_and_present(std::uint32_t swap_img_idx);
     void apply_live_scale();
@@ -280,6 +288,7 @@ private:
                                     const std::vector<SemanticPointLight> &vfx_lights,
                                     std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> &out_lights) const;
     void snapshot_soft_depth(RenderTarget &rt);
+    bool snapshot_water_bg(RenderTarget &rt, bool use_hdr);
     [[nodiscard]] bool want_vk_effect(std::uint32_t bit) const noexcept {
         return live_->enhanced_lighting.load(std::memory_order_relaxed) &&
                (live_->vulkan_effects_mask.load(std::memory_order_relaxed) & bit) != 0u;
@@ -319,7 +328,8 @@ private:
     [[nodiscard]] bool bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w,
                                           std::uint32_t rt_h, bool is_soft_particle, bool msaa_4x, bool hdr_3d,
                                           float jitter_ndc_x, float jitter_ndc_y, float mip_lod_bias,
-                                          VkDeviceAddress &out_params_addr, PassStateCache &cache);
+                                          VkDeviceAddress &out_params_addr, PassStateCache &cache,
+                                          VkDeviceAddress water_params_addr = 0, bool reflection_replay = false);
     void reset_interp_state() noexcept {
         interp_active_ = false;
         interp_can_blend_ = false;
@@ -463,6 +473,8 @@ private:
         bool linear_override = false;
         bool is_killcam = false;
         std::uint8_t material_id = 0;
+        std::uint32_t tex_data_hash = 0;
+        std::uint32_t tex_clut_hash = 0;
         float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     };
     struct PackCacheEntry {
@@ -482,6 +494,9 @@ private:
     VkImageResource cpu_display_tex_;
     VkImageResource copy_tex_;
     VkImageResource soft_depth_copy_;
+    VkImageResource water_bg_color_;
+    VkImageResource water_bg_depth_;
+    VkImageResource water_replay_mat_;
     VkImageResource msaa_color_;
     VkImageResource msaa_depth_;
     VkImageResource hdr_color_;
@@ -489,8 +504,35 @@ private:
     VkImageResource mat_id_;
     VkImageResource msaa_mat_id_;
     bool main_has_water_ = false;
+    // Forensic water draw-call tracer (gated strictly on MHF_VK_TRACE_WATER=1; 0 overhead when off).
+    struct WaterTraceState {
+        bool enabled = false;
+        bool active_frame = false;
+        int last_zone = -2;
+        unsigned game_area = 0;
+        bool highlight_cave_layer = false;
+        int stable_frames = 0;
+        int frames_left = 0;
+        std::uint32_t batch_idx = 0;
+        float wmin[3]{1e20f, 1e20f, 1e20f};
+        float wmax[3]{-1e20f, -1e20f, -1e20f};
+        float umin = 1e20f, umax = -1e20f, vmin = 1e20f, vmax = -1e20f;
+        std::uint32_t amin = 255u, amax = 0u;
+        std::uint32_t wcnt = 0u;
+        void reset_batch() noexcept {
+            wmin[0] = wmin[1] = wmin[2] = 1e20f;
+            wmax[0] = wmax[1] = wmax[2] = -1e20f;
+            umin = vmin = 1e20f;
+            umax = vmax = -1e20f;
+            amin = 255u;
+            amax = 0u;
+            wcnt = 0u;
+        }
+    } wtrace_{};
     VkImageResource overlay_tex_;
     bool main_depth_snapped_ = false;
+    bool main_water_snapped_ = false;
+    VkDeviceAddress main_water_params_addr_ = 0;
     bool active_pass_msaa_ = false;
     bool active_pass_hdr_ = false;
     bool main_msaa_started_ = false;
@@ -654,6 +696,10 @@ private:
     };
 
     struct ProfStats {
+        unsigned water_enabled_frames = 0;
+        unsigned water_batches = 0;
+        unsigned reflection_replay_batches = 0;
+        unsigned reflection_replay_skinned = 0;
         bool enabled = false;
         std::uint64_t frames = 0;
         std::uint64_t draws = 0;
@@ -747,6 +793,9 @@ void VkBackend::shutdown() {
     cpu_display_tex_.destroy_immediate(ctx_, &descriptors_);
     copy_tex_.destroy_immediate(ctx_, &descriptors_);
     soft_depth_copy_.destroy_immediate(ctx_, &descriptors_);
+    water_bg_color_.destroy_immediate(ctx_, &descriptors_);
+    water_bg_depth_.destroy_immediate(ctx_, &descriptors_);
+    water_replay_mat_.destroy_immediate(ctx_, nullptr);
     msaa_color_.destroy_immediate(ctx_, nullptr);
     msaa_depth_.destroy_immediate(ctx_, nullptr);
     hdr_color_.destroy_immediate(ctx_, &descriptors_);
@@ -1335,6 +1384,8 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 setup_.linear_override = fit->second.linear_override;
                 setup_.is_killcam = fit->second.is_killcam;
                 setup_.material_id = fit->second.material_id;
+                setup_.tex_data_hash = fit->second.tex_data_hash;
+                setup_.tex_clut_hash = fit->second.tex_clut_hash;
                 std::copy_n(fit->second.uv_xform, 4, setup_.uv_xform);
             } else {
                 if (prof_.enabled) ++prof_.tex_misses;
@@ -1359,7 +1410,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                     setup_.material_id = static_cast<std::uint8_t>(lighting_.note_texture(
                         h, build_facts(),
                         [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
-                        blended));
+                        blended, &setup_.tex_data_hash, &setup_.tex_clut_hash));
                 }
 
                 // Phase 3: check texture pack (cached by content hash so XXHash never runs on repeated draws).
@@ -1468,6 +1519,8 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 bind.linear_override = setup_.linear_override;
                 bind.is_killcam = setup_.is_killcam;
                 bind.material_id = setup_.material_id;
+                bind.tex_data_hash = setup_.tex_data_hash;
+                bind.tex_clut_hash = setup_.tex_clut_hash;
                 std::copy_n(setup_.uv_xform, 4, bind.uv_xform);
                 frame_tex_cache_.emplace(param_key, bind);
             }
@@ -1496,7 +1549,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
 bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, std::uint32_t rt_w, std::uint32_t rt_h,
                                    bool is_soft_particle, bool msaa_4x, bool hdr_3d, float jitter_ndc_x,
                                    float jitter_ndc_y, float mip_lod_bias, VkDeviceAddress &out_params_addr,
-                                   PassStateCache &cache) {
+                                   PassStateCache &cache, VkDeviceAddress water_params_addr, bool reflection_replay) {
     FrameSlice &f = frames_[frame_slot_];
     auto pslice = f.params.allocate(sizeof(vk::DrawParams), 16);
     if (!pslice.ptr) return false;
@@ -1541,8 +1594,27 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
                             want_vk_effect(LiveSettings::kVkEffectVolumetricFog))
                                ? 1.0f
                                : 0.0f;
+    const bool use_forward_water = (water_params_addr != 0u) && !clear && !setup.through;
     dp.pbr_slots[3] = (!clear && !setup.through) ? static_cast<std::uint32_t>(setup.material_id) : 0u;
-    if (textured && !clear && !setup.through && want_vk_effect(LiveSettings::kVkEffectPbrMaterials) &&
+    if (wtrace_.highlight_cave_layer && wtrace_.game_area == 69u && !clear && !setup.through &&
+        is_shown_target(setup.target) && setup.tex_data_hash == 0x9fb226a7u &&
+        setup.tex_clut_hash == 0xf852e614u) {
+        dp.pbr_slots[3] |= 0x100u;
+    }
+    if (!reflection_replay && !clear && !setup.through && textured &&
+        setup.material_id == static_cast<std::uint8_t>(MaterialClass::SplashAtlas) &&
+        (R(kAlphaBlendEnable) & 1u) != 0 && (R(kBlendMode) & 0xFFFu) == 0x32u &&
+        (R(kZTestEnable) & 1u) != 0 && (R(kZWriteDisable) & 1u) != 0 &&
+        want_vk_effect(LiveSettings::kVkEffectWaterReflections)) {
+        dp.pbr_slots[3] |= 0x200u;
+    }
+    if (use_forward_water) {
+        dp.pbr_slots[0] = static_cast<std::uint32_t>(water_params_addr & 0xFFFFFFFFull);
+        dp.pbr_slots[1] = static_cast<std::uint32_t>(water_params_addr >> 32u);
+        const auto mcls = static_cast<MaterialClass>(setup.material_id);
+        dp.pbr_slots[2] = ((mcls == MaterialClass::ShallowWater || mcls == MaterialClass::CutoutPuddle) ? 1u : 0u) |
+                          ((mcls == MaterialClass::CutoutPuddle) ? 2u : 0u);
+    } else if (textured && !clear && !setup.through && want_vk_effect(LiveSettings::kVkEffectPbrMaterials) &&
         (setup.pbr_slots.normal_slot != 0u || setup.pbr_slots.rough_metal_slot != 0u ||
          setup.pbr_slots.emissive_slot != 0u)) {
         dp.pbr_slots[0] = setup.pbr_slots.normal_slot;
@@ -1619,14 +1691,16 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
     // Every depth-writing 3D surface (terrain, sand, cliffs, trees, boats, characters — even when PSP has
     // alpha-blend enabled!) MUST write its own MaterialClass (0 for untagged terrain) so it cleanly overwrites
     // any water plane extending underneath it. Only non-depth-writing overlays/particles skip writing mat_id.
-    const bool write_mat = hdr_3d && !clear && !setup.through && !is_soft_particle && !is_non_surface_mat &&
+    const bool write_mat = !reflection_replay && hdr_3d && !clear && !setup.through && !is_soft_particle && !is_non_surface_mat &&
                            (z_write || mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater);
     const VkColorComponentFlags mat_write_mask = write_mat ? VK_COLOR_COMPONENT_R_BIT : 0u;
-    if (write_mat && (mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater)) {
+    if (write_mat && (mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater ||
+                      mat_cls == MaterialClass::CutoutPuddle)) {
         main_has_water_ = true;
     }
 
     pkey.mat_write = write_mat ? 1u : 0u;
+    pkey.is_water = use_forward_water ? 1u : 0u;
     pkey.blend_enable = blend_en ? 1u : 0u;
     pkey.color_op = static_cast<std::uint8_t>(blend_eq.colorBlendOp);
     pkey.src_factor = static_cast<std::uint8_t>(blend_eq.srcColorBlendFactor);
@@ -1635,6 +1709,7 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
 
     VkPipeline pipe = pipelines_.get_ge_pipeline(ctx_, pkey);
     if (!pipe) return false;
+    if (use_forward_water && prof_.enabled) ++prof_.water_batches;
     if (pipe != cache.pipe) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         cache.pipe = pipe;
@@ -1779,7 +1854,17 @@ void VkBackend::draw_batch() {
         }
     }
 
+    const auto mat_cls = static_cast<MaterialClass>(setup_.material_id);
+    const std::uint32_t bm_raw = R(kBlendMode);
+    const bool is_add_blend = is_water_overlay_blend(R(kAlphaBlendEnable), bm_raw, R(kBlendFixedB));
+    const bool want_modern_water = want_vk_effect(LiveSettings::kVkEffectWaterReflections);
+    const bool is_water_surf = !clear && !setup_.through && is_shown_target(setup_.target) &&
+                               (mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater ||
+                                mat_cls == MaterialClass::CutoutPuddle);
+    const bool is_water_sparkle = !clear && !setup_.through && is_shown_target(setup_.target) &&
+                                  mat_cls == MaterialClass::WaterSparkle && is_add_blend;
     const bool is_soft_particle = !clear && !setup_.through && is_shown_target(setup_.target) &&
+                                  !is_water_surf && !is_water_sparkle &&
                                   (R(kAlphaBlendEnable) & 1u) != 0 && (R(kZTestEnable) & 1u) != 0 &&
                                   (R(kZWriteDisable) & 1u) != 0 &&
                                   want_vk_effect(LiveSettings::kVkEffectSoftParticles);
@@ -1794,6 +1879,30 @@ void VkBackend::draw_batch() {
     const bool use_main_hdr = !main_rt_skipped && want_enhanced_3d_hdr() &&
                               is_shown_target(setup_.target) && !main_3d_finished_ &&
                               (!setup_.through || clear);
+    VkDeviceAddress water_params_addr = 0u;
+    if (is_water_surf && want_modern_water && !main_rt_skipped && !main_3d_finished_) {
+        if (!main_water_snapped_) {
+            main_water_snapped_ = snapshot_water_bg(rt, use_main_hdr);
+        }
+        if (main_water_snapped_) {
+            if (main_water_params_addr_ == 0u) {
+                auto wslice = frames_[frame_slot_].params.allocate(sizeof(vk::WaterFrameParams), 16);
+                if (wslice.ptr) {
+                    vk::WaterFrameParams wp{};
+                    const float vp_w = static_cast<float>(std::min(480u, rt.width) * static_cast<std::uint32_t>(scale_));
+                    const float vp_h = static_cast<float>(std::min(272u, rt.height) * static_cast<std::uint32_t>(scale_));
+                    const float elapsed_sec = static_cast<float>(frame_number_) * (1.0f / 30.0f);
+                    const vk::LightingFrameInput &lin = has_cur_view_mat_ ? cur_light_in_ : last_light_in_;
+                    lighting_.fill_water_frame_params(wp, lin, has_cur_view_mat_ ? cur_view_mat_.data() : nullptr,
+                                                      vp_w, vp_h, elapsed_sec,
+                                                      water_bg_color_.bindless_slot, water_bg_depth_.bindless_slot);
+                    std::memcpy(wslice.ptr, &wp, sizeof(wp));
+                    main_water_params_addr_ = wslice.address;
+                }
+            }
+            water_params_addr = main_water_params_addr_;
+        }
+    }
     begin_target_pass(rt, use_main_msaa, use_main_hdr);
 
     // Quest HUD detection, HUD scaling, and widescreen 2D aspect preservation (single tight pass).
@@ -1863,7 +1972,7 @@ void VkBackend::draw_batch() {
                             apply_main_taa_jitter ? main_taa_jitter_ndc_[0] : 0.0f,
                             apply_main_taa_jitter ? main_taa_jitter_ndc_[1] : 0.0f,
                             apply_main_taa_jitter ? -0.5f : 0.0f,
-                            params_addr, main_pass_state_)) {
+                            params_addr, main_pass_state_, water_params_addr)) {
         batch_.clear();
         return;
     }
@@ -2024,6 +2133,40 @@ void VkBackend::draw_batch() {
     batch_skin_min_[0] = batch_skin_min_[1] = batch_skin_min_[2] = 1e20f;
     batch_skin_max_[0] = batch_skin_max_[1] = batch_skin_max_[2] = -1e20f;
     batch_skin_cnt_ = 0u;
+    if (wtrace_.active_frame && !clear && !setup_.through && is_shown_target(setup_.target) && !batch_.empty()) {
+        const bool bl = (R(kAlphaBlendEnable) & 1u) != 0;
+        const bool zt = (R(kZTestEnable) & 1u) != 0;
+        const bool zw = (R(kZWriteDisable) & 1u) == 0;
+        const bool at = (R(kAlphaTestEnable) & 1u) != 0;
+        const std::uint32_t bm = R(kBlendMode);
+        const std::uint32_t tf = R(kTexFunc);
+        const float dy = wtrace_.wcnt > 0u ? (wtrace_.wmax[1] - wtrace_.wmin[1]) : -1.0f;
+        const float dxz = wtrace_.wcnt > 0u
+                              ? std::max(wtrace_.wmax[0] - wtrace_.wmin[0], wtrace_.wmax[2] - wtrace_.wmin[2])
+                              : 0.0f;
+        const bool is_flat = (wtrace_.wcnt >= 6u && dy >= 0.0f && dy < 45.0f && dxz > 240.0f);
+        const bool is_water_mat = (setup_.material_id == static_cast<std::uint8_t>(MaterialClass::Water) ||
+                                   setup_.material_id == static_cast<std::uint8_t>(MaterialClass::ShallowWater));
+        if (bl || is_water_mat || is_flat) {
+            std::fprintf(stderr,
+                         "[vk][wtrace] f=%llu area=%u z=%d(%s) b=%u v=%zu data=0x%08x clut=0x%08x %.0fx%.0f mat=%u "
+                         "bl=%u(s=%u,d=%u,op=%u) zt=%u zw=%u at=%u tf=%u.%u soft=%u "
+                         "wy=[%.0f..%.0f](dy=%.1f) xz=%.0f va=[%u..%u] uv=[%.3f..%.3f,%.3f..%.3f]\n",
+                         static_cast<unsigned long long>(frame_number_), wtrace_.game_area, lighting_.active_zone(),
+                         lighting_.active_zone_name(), wtrace_.batch_idx, batch_.size(),
+                         setup_.tex_data_hash, setup_.tex_clut_hash, setup_.tex_width, setup_.tex_height,
+                         static_cast<unsigned>(setup_.material_id), bl ? 1u : 0u,
+                         bm & 0xFu, (bm >> 4u) & 0xFu, (bm >> 8u) & 0xFu,
+                         zt ? 1u : 0u, zw ? 1u : 0u, at ? 1u : 0u, tf & 7u, (tf >> 8u) & 1u,
+                         is_soft_particle ? 1u : 0u,
+                         wtrace_.wcnt ? wtrace_.wmin[1] : 0.0f, wtrace_.wcnt ? wtrace_.wmax[1] : 0.0f, dy, dxz,
+                         wtrace_.amin, wtrace_.amax,
+                         wtrace_.wcnt ? wtrace_.umin : 0.0f, wtrace_.wcnt ? wtrace_.umax : 0.0f,
+                         wtrace_.wcnt ? wtrace_.vmin : 0.0f, wtrace_.wcnt ? wtrace_.vmax : 0.0f);
+        }
+        ++wtrace_.batch_idx;
+    }
+    wtrace_.reset_batch();
     batch_.clear();
 }
 
@@ -2188,6 +2331,23 @@ void VkBackend::triangle(const gpu::Ge &ge, const gpu::Vertex &a, const gpu::Ver
         if (setup_is_rt_caster_ && v.has_world) {
             auto &dst = setup_.is_skinned ? cur_rt_dyn_verts_ : cur_rt_static_verts_;
             if (dst.size() < 150000u) dst.push_back({v.world[0], v.world[1], v.world[2]});
+        }
+        if (wtrace_.active_frame && !setup_.through && is_shown_target(setup_.target)) {
+            if (v.has_world) {
+                if (v.world[0] < wtrace_.wmin[0]) wtrace_.wmin[0] = v.world[0];
+                if (v.world[1] < wtrace_.wmin[1]) wtrace_.wmin[1] = v.world[1];
+                if (v.world[2] < wtrace_.wmin[2]) wtrace_.wmin[2] = v.world[2];
+                if (v.world[0] > wtrace_.wmax[0]) wtrace_.wmax[0] = v.world[0];
+                if (v.world[1] > wtrace_.wmax[1]) wtrace_.wmax[1] = v.world[1];
+                if (v.world[2] > wtrace_.wmax[2]) wtrace_.wmax[2] = v.world[2];
+                if (g.u < wtrace_.umin) wtrace_.umin = g.u;
+                if (g.u > wtrace_.umax) wtrace_.umax = g.u;
+                if (g.v < wtrace_.vmin) wtrace_.vmin = g.v;
+                if (g.v > wtrace_.vmax) wtrace_.vmax = g.v;
+                ++wtrace_.wcnt;
+            }
+            if (g.color[3] < wtrace_.amin) wtrace_.amin = g.color[3];
+            if (g.color[3] > wtrace_.amax) wtrace_.amax = g.color[3];
         }
         batch_.push_back(g);
     };
@@ -2892,6 +3052,129 @@ void VkBackend::submit_recorded_without_present() {
     frame_slot_ = (frame_slot_ + 1) % kFramesInFlight;
 }
 
+void VkBackend::maybe_save_vk_snapshot(VkImageResource &src, std::uint32_t vis_w, std::uint32_t vis_h) {
+    if (!live_) return;
+    const std::uint64_t req = live_->snap_request_frame.exchange(0u, std::memory_order_relaxed);
+    if (req == 0u || src.image == VK_NULL_HANDLE) return;
+
+    const std::uint32_t w = std::min(vis_w, src.width);
+    const std::uint32_t h = std::min(vis_h, src.height);
+    if (w == 0u || h == 0u) return;
+
+    const char *dir_env = std::getenv("MHF_SNAP_DIR");
+    const std::filesystem::path dir = (dir_env && dir_env[0] != '\0') ? std::filesystem::path(dir_env)
+                                                                      : std::filesystem::path("snaps");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * 4u;
+    VkBuffer stage_buf = VK_NULL_HANDLE;
+    VmaAllocation stage_alloc = VK_NULL_HANDLE;
+    VmaAllocationInfo stage_info{};
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, bytes,
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    if (vmaCreateBuffer(ctx_.allocator, &bci, &aci, &stage_buf, &stage_alloc, &stage_info) != VK_SUCCESS ||
+        !stage_info.pMappedData) {
+        return;
+    }
+
+    ensure_recording();
+    end_render_pass();
+    transition_resource(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy reg{};
+    reg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    reg.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(frames_[frame_slot_].cmd, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           stage_buf, 1, &reg);
+    transition_resource(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    submit_recorded_without_present();
+    ctx_.wait_idle();
+
+    // Minimal zero-dependency stored-PNG encoder (RGB8).
+    auto crc32 = [](const std::uint8_t *data, std::size_t size) -> std::uint32_t {
+        static const auto tbl = [] {
+            std::array<std::uint32_t, 256> t{};
+            for (std::uint32_t i = 0; i < 256; ++i) {
+                std::uint32_t c = i;
+                for (int k = 0; k < 8; ++k) c = (c & 1u) ? (0xEDB88320u ^ (c >> 1u)) : (c >> 1u);
+                t[i] = c;
+            }
+            return t;
+        }();
+        std::uint32_t c = ~0u;
+        for (std::size_t i = 0; i < size; ++i) c = tbl[(c ^ data[i]) & 0xFFu] ^ (c >> 8u);
+        return ~c;
+    };
+    auto put32be = [](std::vector<std::uint8_t> &o, std::uint32_t v) {
+        o.push_back(static_cast<std::uint8_t>(v >> 24u));
+        o.push_back(static_cast<std::uint8_t>(v >> 16u));
+        o.push_back(static_cast<std::uint8_t>(v >> 8u));
+        o.push_back(static_cast<std::uint8_t>(v));
+    };
+    auto push_chunk = [&](std::vector<std::uint8_t> &png, const char *type, const std::vector<std::uint8_t> &data) {
+        put32be(png, static_cast<std::uint32_t>(data.size()));
+        std::vector<std::uint8_t> body(type, type + 4);
+        body.insert(body.end(), data.begin(), data.end());
+        png.insert(png.end(), body.begin(), body.end());
+        put32be(png, crc32(body.data(), body.size()));
+    };
+
+    const auto *rgba = static_cast<const std::uint8_t *>(stage_info.pMappedData);
+    std::vector<std::uint8_t> raw;
+    raw.reserve(static_cast<std::size_t>(h) * (static_cast<std::size_t>(w) * 3u + 1u));
+    for (std::uint32_t y = 0; y < h; ++y) {
+        raw.push_back(0);
+        const std::uint8_t *row = rgba + static_cast<std::size_t>(y) * w * 4u;
+        for (std::uint32_t x = 0; x < w; ++x) {
+            raw.push_back(row[x * 4u + 0u]);
+            raw.push_back(row[x * 4u + 1u]);
+            raw.push_back(row[x * 4u + 2u]);
+        }
+    }
+    vmaDestroyBuffer(ctx_.allocator, stage_buf, stage_alloc);
+
+    std::vector<std::uint8_t> z{0x78, 0x01};
+    std::uint32_t a = 1, b = 0;
+    for (std::uint8_t byte : raw) {
+        a = (a + byte) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    for (std::size_t pos = 0; pos < raw.size(); pos += 65535u) {
+        const auto n = static_cast<std::uint16_t>(std::min<std::size_t>(65535u, raw.size() - pos));
+        z.push_back(pos + n >= raw.size() ? 1 : 0);
+        z.push_back(static_cast<std::uint8_t>(n));
+        z.push_back(static_cast<std::uint8_t>(n >> 8u));
+        z.push_back(static_cast<std::uint8_t>(~n));
+        z.push_back(static_cast<std::uint8_t>(~n >> 8u));
+        z.insert(z.end(), raw.begin() + static_cast<std::ptrdiff_t>(pos),
+                 raw.begin() + static_cast<std::ptrdiff_t>(pos + n));
+    }
+    put32be(z, (b << 16u) | a);
+
+    std::vector<std::uint8_t> png{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    std::vector<std::uint8_t> ihdr;
+    put32be(ihdr, w);
+    put32be(ihdr, h);
+    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0});
+    push_chunk(png, "IHDR", ihdr);
+    push_chunk(png, "IDAT", z);
+    push_chunk(png, "IEND", {});
+
+    char fname[64];
+    std::snprintf(fname, sizeof(fname), "snap_%06llu.png", static_cast<unsigned long long>(req));
+    const std::filesystem::path out_path = dir / fname;
+    if (std::FILE *fp = std::fopen(out_path.string().c_str(), "wb")) {
+        std::fwrite(png.data(), 1, png.size(), fp);
+        std::fclose(fp);
+        std::fprintf(stderr, "[vk][snap] saved %s (%ux%u)\n", out_path.string().c_str(), w, h);
+    }
+}
+
 void VkBackend::show_to_swapchain(std::uint32_t tex_slot, float uv_max_x, float uv_max_y, bool linear_filter) {
     ensure_recording();
     end_render_pass();
@@ -3111,6 +3394,9 @@ void VkBackend::apply_live_scale() {
         retire_image(interp_rt_.depth);
         retire_image(copy_tex_);
         retire_image(soft_depth_copy_);
+        retire_image(water_bg_color_);
+        retire_image(water_bg_depth_);
+        retire_image(water_replay_mat_);
         retire_image(msaa_color_);
         retire_image(msaa_depth_);
         retire_image(hdr_color_);
@@ -3178,6 +3464,9 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
     if (soft_depth_copy_.image == VK_NULL_HANDLE ||
         soft_depth_copy_.width != rt.depth.width || soft_depth_copy_.height != rt.depth.height) {
         retire_image(soft_depth_copy_);
+        retire_image(water_bg_color_);
+        retire_image(water_bg_depth_);
+        retire_image(water_replay_mat_);
         if (!soft_depth_copy_.create(ctx_, &descriptors_, rt.depth.width, rt.depth.height, VK_FORMAT_D32_SFLOAT,
                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                                      VK_IMAGE_ASPECT_DEPTH_BIT)) {
@@ -3199,6 +3488,70 @@ void VkBackend::snapshot_soft_depth(RenderTarget &rt) {
     transition_resource(rt.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+}
+
+bool VkBackend::snapshot_water_bg(RenderTarget &rt, bool use_hdr) {
+    if (rt.depth.image == VK_NULL_HANDLE) return false;
+    VkImageResource &src_col = (use_hdr && hdr_color_.image != VK_NULL_HANDLE) ? hdr_color_ : rt.color;
+    if (src_col.image == VK_NULL_HANDLE) return false;
+    ensure_recording();
+    end_render_pass();
+
+    const VkFormat col_fmt = (use_hdr && hdr_color_.image != VK_NULL_HANDLE) ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
+                                                                              : VK_FORMAT_R8G8B8A8_UNORM;
+    if (water_bg_color_.image == VK_NULL_HANDLE || water_bg_color_.width != src_col.width ||
+        water_bg_color_.height != src_col.height || water_bg_color_.format != col_fmt) {
+        retire_image(water_bg_color_);
+        if (!water_bg_color_.create(ctx_, &descriptors_, src_col.width, src_col.height, col_fmt,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                    VK_IMAGE_ASPECT_COLOR_BIT)) {
+            return false;
+        }
+    }
+    if (water_bg_depth_.image == VK_NULL_HANDLE || water_bg_depth_.width != rt.depth.width ||
+        water_bg_depth_.height != rt.depth.height) {
+        retire_image(water_bg_depth_);
+        if (!water_bg_depth_.create(ctx_, &descriptors_, rt.depth.width, rt.depth.height, VK_FORMAT_D32_SFLOAT,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                    VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            return false;
+        }
+    }
+
+    transition_resource(src_col, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    transition_resource(water_bg_color_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    transition_resource(rt.depth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    transition_resource(water_bg_depth_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    VkImageCopy cp_c{};
+    cp_c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp_c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp_c.extent = {src_col.width, src_col.height, 1};
+    vkCmdCopyImage(frames_[frame_slot_].cmd, src_col.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   water_bg_color_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp_c);
+
+    VkImageCopy cp_d{};
+    cp_d.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    cp_d.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    cp_d.extent = {rt.depth.width, rt.depth.height, 1};
+    vkCmdCopyImage(frames_[frame_slot_].cmd, rt.depth.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   water_bg_depth_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp_d);
+
+    transition_resource(water_bg_color_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    transition_resource(water_bg_depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    transition_resource(src_col, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    transition_resource(rt.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    return water_bg_color_.bindless_slot != 0u && water_bg_depth_.bindless_slot != 0u;
 }
 
 std::uint32_t VkBackend::build_view_lights(
@@ -3990,6 +4343,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
     bool interp_saw_3d = false;
     bool interp_lit = false;
     bool interp_depth_snapped = false;
+    bool interp_water_snapped = false;
+    VkDeviceAddress interp_water_params_addr = 0u;
+    const bool want_modern_water = want_vk_effect(LiveSettings::kVkEffectWaterReflections);
 
     std::array<vk::ViewPointLight, vk::LightingFrameInput::kMaxViewLights> interp_vlights{};
     std::uint32_t interp_vl_count = 0u;
@@ -3997,13 +4353,142 @@ void VkBackend::render_interpolated_subframe(float phase) {
         interp_vl_count = build_view_lights(interp_view, blend_older_.vfx_lights, interp_vlights);
     }
 
-    for (const auto &rb : blend_older_.batches) {
+    const auto draw_recorded_batch = [&](const RecordedBatch &rb, bool clear, bool soft, bool msaa,
+                                         VkDeviceAddress water_params_addr, bool reflection_replay) {
+        VkDeviceAddress params_addr = 0;
+        const bool apply_taa_jitter = use_taa && !clear && !rb.setup.through;
+        if (!bind_ge_draw_state(f.cmd, rb.setup, blend_older_.width, blend_older_.height, soft, msaa,
+                                pass_hdr,
+                                apply_taa_jitter ? taa_jitter_ndc[0] : 0.0f,
+                                apply_taa_jitter ? taa_jitter_ndc[1] : 0.0f,
+                                apply_taa_jitter ? -0.5f : 0.0f,
+                                params_addr, interp_state, water_params_addr, reflection_replay)) {
+            return;
+        }
+
+        std::uint32_t draw_vcount = rb.v_count;
+        std::uint32_t first_vertex = 0;
+        if (rb.use_gpu_raw) {
+            if (static_cast<std::uint64_t>(rb.v_offset) + rb.v_count > interpolator_.max_in_vertices()) return;
+            VkBuffer gpu_vb = interpolator_.out_vertex_buffer(frame_slot_);
+            if (last_vb != gpu_vb || last_vb_off != 0) {
+                const VkDeviceSize zero = 0;
+                vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &zero);
+                last_vb = gpu_vb;
+                last_vb_off = 0;
+            }
+            // place_v2.comp emits 2 clipped triangles (6 verts) per input triangle (3 verts).
+            first_vertex = rb.v_offset * 2u;
+            draw_vcount = rb.v_count * 2u;
+        } else {
+            if (!flat_uploaded) return;
+            if (last_vb != f.vertices.buffer || last_vb_off != flat_base_off) {
+                vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &flat_base_off);
+                last_vb = f.vertices.buffer;
+                last_vb_off = flat_base_off;
+            }
+            first_vertex = rb.v_offset;
+        }
+        vk::DrawPush push{params_addr, 0u};
+        vkCmdPushConstants(f.cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDraw(f.cmd, draw_vcount, 1, first_vertex, 0);
+        if (reflection_replay && prof_.enabled) {
+            ++prof_.reflection_replay_batches;
+            if (rb.setup.is_skinned) ++prof_.reflection_replay_skinned;
+        }
+    };
+
+    // Seed the reflection source at the original water boundary, then add later
+    // depth-writing geometry using the same interpolated vertices as the main scene.
+    const auto replay_reflection_scene = [&](auto first) {
+        if (pass_hdr) {
+            if (water_replay_mat_.image == VK_NULL_HANDLE ||
+                water_replay_mat_.width != pw || water_replay_mat_.height != ph) {
+                retire_image(water_replay_mat_);
+                if (!water_replay_mat_.create(ctx_, nullptr, pw, ph, VK_FORMAT_R8_UINT,
+                                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return;
+            }
+            if (water_replay_mat_.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                vk::Context::cmd_transition_image(f.cmd, water_replay_mat_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            }
+            transition_resource(water_replay_mat_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        }
+        const auto depth_stages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                  VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        const auto depth_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        transition_resource(water_bg_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        transition_resource(water_bg_depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depth_stages, depth_access);
+
+        auto reflection_colors = color_atts;
+        for (auto &att : reflection_colors) {
+            att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            att.resolveMode = VK_RESOLVE_MODE_NONE;
+            att.resolveImageView = VK_NULL_HANDLE;
+        }
+        reflection_colors[0].imageView = water_bg_color_.view;
+        // The GE HDR pipeline requires its material attachment. Replay masks its writes.
+        if (pass_hdr) {
+            reflection_colors[1].imageView = water_replay_mat_.view;
+            reflection_colors[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            reflection_colors[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        }
+        auto reflection_depth = depth_att;
+        reflection_depth.imageView = water_bg_depth_.view;
+        reflection_depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        reflection_depth.resolveMode = VK_RESOLVE_MODE_NONE;
+        reflection_depth.resolveImageView = VK_NULL_HANDLE;
+        auto reflection_pass = ri;
+        reflection_pass.pColorAttachments = reflection_colors.data();
+        reflection_pass.pDepthAttachment = &reflection_depth;
+        vkCmdBeginRendering(f.cmd, &reflection_pass);
+        interp_state.reset();
+
+        for (auto it = first; it != blend_older_.batches.end(); ++it) {
+            const auto &later = *it;
+            if (later.v_count == 0 || later.setup.target != blend_older_.shown_addr) continue;
+            if (later.setup.through && !later.setup.self_sampled) break;
+            if (later.setup.through || later.setup.self_sampled) continue;
+            const auto R = [&](std::uint32_t reg) { return key_reg(later.setup.key, reg); };
+            if ((R(kClearMode) & 1u) || !(R(kZTestEnable) & 1u) || (R(kZWriteDisable) & 1u)) continue;
+            const auto material = static_cast<MaterialClass>(later.setup.material_id);
+            if (material == MaterialClass::Water || material == MaterialClass::ShallowWater ||
+                material == MaterialClass::CutoutPuddle ||
+                material == MaterialClass::WaterSparkle || material == MaterialClass::HazeIgnore ||
+                material == MaterialClass::WeatherSheet || material == MaterialClass::Fire) continue;
+            draw_recorded_batch(later, false, false, false, 0, true);
+        }
+        vkCmdEndRendering(f.cmd);
+        transition_resource(water_bg_color_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        transition_resource(water_bg_depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    };
+
+    for (auto it = blend_older_.batches.begin(); it != blend_older_.batches.end(); ++it) {
+        const auto &rb = *it;
         if (rb.v_count == 0 || rb.setup.target != blend_older_.shown_addr) continue;
         const auto R = [&](std::uint32_t reg) { return key_reg(rb.setup.key, reg); };
         const bool clear = (R(kClearMode) & 1u) != 0;
 
+        const auto mat_cls = static_cast<MaterialClass>(rb.setup.material_id);
+        const std::uint32_t bm_raw = R(kBlendMode);
+        const bool is_add_blend = is_water_overlay_blend(R(kAlphaBlendEnable), bm_raw, R(kBlendFixedB));
+        const bool is_water_surf = !clear && !rb.setup.through &&
+                                   (mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater ||
+                                    mat_cls == MaterialClass::CutoutPuddle);
+        const bool is_water_sparkle = !clear && !rb.setup.through &&
+                                      mat_cls == MaterialClass::WaterSparkle && is_add_blend;
+
         // Snapshot opaque 3D depth once before depth-tested non-depth-writing blended particles (Soft Particles!).
-        const bool is_soft_particle = !clear && !rb.setup.through &&
+        const bool is_soft_particle = !clear && !rb.setup.through && !is_water_surf && !is_water_sparkle &&
                                       (R(kAlphaBlendEnable) & 1u) != 0 && (R(kZTestEnable) & 1u) != 0 &&
                                       (R(kZWriteDisable) & 1u) != 0 &&
                                       want_vk_effect(LiveSettings::kVkEffectSoftParticles);
@@ -4019,6 +4504,41 @@ void VkBackend::render_interpolated_subframe(float phase) {
             vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
             interp_state.reset();
             last_vb = VK_NULL_HANDLE;
+        }
+
+        VkDeviceAddress water_params_addr = 0u;
+        if (is_water_surf && want_modern_water && !interp_lit) {
+            if (!interp_water_snapped) {
+                vkCmdEndRendering(f.cmd);
+                interp_water_snapped = snapshot_water_bg(interp_rt_, pass_hdr);
+                if (interp_water_snapped) replay_reflection_scene(it + 1);
+                color_atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                color_atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                vkCmdBeginRendering(f.cmd, &ri);
+                vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
+                vkCmdSetViewport(f.cmd, 0, 1, &vp_full);
+                interp_state.reset();
+                last_vb = VK_NULL_HANDLE;
+            }
+            if (interp_water_snapped) {
+                if (interp_water_params_addr == 0u) {
+                    auto wslice = f.params.allocate(sizeof(vk::WaterFrameParams), 16);
+                    if (wslice.ptr) {
+                        vk::WaterFrameParams wp{};
+                        const float vp_w = static_cast<float>(std::min(480u, blend_older_.width) * static_cast<std::uint32_t>(scale_));
+                        const float vp_h = static_cast<float>(std::min(272u, blend_older_.height) * static_cast<std::uint32_t>(scale_));
+                        const float elapsed_sec = (static_cast<float>(frame_number_) + phase) * (1.0f / 30.0f);
+                        lighting_.fill_water_frame_params(wp, interp_light_in,
+                                                          have_interp_view ? interp_view.data() : nullptr,
+                                                          vp_w, vp_h, elapsed_sec,
+                                                          water_bg_color_.bindless_slot, water_bg_depth_.bindless_slot);
+                        std::memcpy(wslice.ptr, &wp, sizeof(wp));
+                        interp_water_params_addr = wslice.address;
+                    }
+                }
+                water_params_addr = interp_water_params_addr;
+            }
         }
 
         // Run enhanced lighting & AA strictly after 3D draws and before 2D HUD draws on 120/180 Hz subframes too!
@@ -4066,44 +4586,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
             }
         }
 
-        VkDeviceAddress params_addr = 0;
-        const bool apply_taa_jitter = use_taa && !clear && !rb.setup.through;
-        if (!bind_ge_draw_state(f.cmd, rb.setup, blend_older_.width, blend_older_.height, is_soft_particle, pass_msaa,
-                                pass_hdr,
-                                apply_taa_jitter ? taa_jitter_ndc[0] : 0.0f,
-                                apply_taa_jitter ? taa_jitter_ndc[1] : 0.0f,
-                                apply_taa_jitter ? -0.5f : 0.0f,
-                                params_addr, interp_state)) {
-            continue;
-        }
-
-        std::uint32_t draw_vcount = rb.v_count;
-        std::uint32_t first_vertex = 0;
-        if (rb.use_gpu_raw) {
-            if (static_cast<std::uint64_t>(rb.v_offset) + rb.v_count > interpolator_.max_in_vertices()) continue;
-            VkBuffer gpu_vb = interpolator_.out_vertex_buffer(frame_slot_);
-            if (last_vb != gpu_vb || last_vb_off != 0) {
-                const VkDeviceSize zero = 0;
-                vkCmdBindVertexBuffers(f.cmd, 0, 1, &gpu_vb, &zero);
-                last_vb = gpu_vb;
-                last_vb_off = 0;
-            }
-            // place_v2.comp emits 2 clipped triangles (6 verts) per input triangle (3 verts).
-            first_vertex = rb.v_offset * 2u;
-            draw_vcount = rb.v_count * 2u;
-        } else {
-            if (!flat_uploaded) continue;
-            if (last_vb != f.vertices.buffer || last_vb_off != flat_base_off) {
-                vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vertices.buffer, &flat_base_off);
-                last_vb = f.vertices.buffer;
-                last_vb_off = flat_base_off;
-            }
-            first_vertex = rb.v_offset;
-        }
-        vk::DrawPush push{params_addr, 0u};
-        vkCmdPushConstants(f.cmd, pipelines_.ge_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(push), &push);
-        vkCmdDraw(f.cmd, draw_vcount, 1, first_vertex, 0);
+        draw_recorded_batch(rb, clear, is_soft_particle, pass_msaa, water_params_addr, false);
     }
 
     vkCmdEndRendering(f.cmd);
@@ -4117,6 +4600,9 @@ void VkBackend::render_interpolated_subframe(float phase) {
 
     const float uv_x = std::min(1.0f, 480.0f / static_cast<float>(blend_older_.width));
     const float uv_y = std::min(1.0f, 272.0f / static_cast<float>(blend_older_.height));
+    maybe_save_vk_snapshot(interp_rt_.color,
+                           std::min(480u, blend_older_.width) * static_cast<std::uint32_t>(scale_),
+                           std::min(272u, blend_older_.height) * static_cast<std::uint32_t>(scale_));
     show_to_swapchain(interp_rt_.color.bindless_slot, uv_x, uv_y, true);
 }
 
@@ -4330,12 +4816,20 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
                 lit_3d_this_frame_ = true;
             }
+            maybe_save_vk_snapshot(it->second.color,
+                                   std::min(480u, it->second.width) * static_cast<std::uint32_t>(scale_),
+                                   std::min(272u, it->second.height) * static_cast<std::uint32_t>(scale_));
             show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
         }
         interp_active_ = true;
         next_subframe_ = 1;
         next_subframe_at_ = now + flip_period_ / subframes_;
     } else {
+        if (it != targets_.end()) {
+            maybe_save_vk_snapshot(it->second.color,
+                                   std::min(480u, it->second.width) * static_cast<std::uint32_t>(scale_),
+                                   std::min(272u, it->second.height) * static_cast<std::uint32_t>(scale_));
+        }
         show_to_swapchain(last_shown_slot_, last_shown_uv_[0], last_shown_uv_[1], last_shown_linear_);
     }
 
@@ -4361,10 +4855,47 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
     cur_rt_static_batch_start_ = 0u;
     has_cur_view_mat_ = false;
     lighting_.end_frame_zone_vote();
+    {
+        static const bool s_wtrace = [] {
+            const char *v = std::getenv("MHF_VK_TRACE_WATER");
+            return v != nullptr && v[0] == '1';
+        }();
+        static const bool s_highlight_cave_layer = [] {
+            const char *v = std::getenv("MHF_VK_HIGHLIGHT_CAVE_LAYER");
+            return v != nullptr && v[0] == '1';
+        }();
+        wtrace_.enabled = s_wtrace;
+        wtrace_.highlight_cave_layer = s_highlight_cave_layer;
+        if (s_wtrace || s_highlight_cave_layer) {
+            const int z = lighting_.active_zone();
+            unsigned area = 0;
+            {
+                std::lock_guard<std::mutex> lock(live_->semantic_mutex);
+                if (live_->scene_camera.valid) area = live_->scene_camera.ground_area;
+            }
+            if (z != wtrace_.last_zone || area != wtrace_.game_area) {
+                wtrace_.last_zone = z;
+                wtrace_.game_area = area;
+                wtrace_.stable_frames = 0;
+                wtrace_.frames_left = 0;
+            } else if (z >= 0 || area != 0u) {
+                ++wtrace_.stable_frames;
+                if (wtrace_.stable_frames == 45 || (area != 0u && wtrace_.stable_frames == 240)) {
+                    wtrace_.frames_left = 2; // 2 consecutive frames to observe UV scrolling!
+                }
+            }
+            wtrace_.active_frame = s_wtrace && wtrace_.frames_left > 0;
+            if (wtrace_.frames_left > 0) --wtrace_.frames_left;
+            wtrace_.batch_idx = 0;
+            wtrace_.reset_batch();
+        }
+    }
     frame_had_3d_ = false;
     captured_clean_3d_ = false;
     lit_3d_this_frame_ = false;
     main_depth_snapped_ = false;
+    main_water_snapped_ = false;
+    main_water_params_addr_ = 0u;
     main_msaa_started_ = false;
     main_hdr_started_ = false;
     main_3d_finished_ = false;
@@ -4382,6 +4913,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
 
     if (prof_.enabled) {
         ++prof_.frames;
+        if (want_vk_effect(LiveSettings::kVkEffectWaterReflections)) ++prof_.water_enabled_frames;
         if (prof_.frames >= 30u) {
             const auto pnow = std::chrono::steady_clock::now();
             const double sec = std::chrono::duration<double>(pnow - prof_.window_start).count();
@@ -4389,7 +4921,7 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
             const double ms = 1e-6 * inv_f;
             std::fprintf(stderr,
                 "[vk][prof] gameFPS=%.1f draws=%.0f batches=%.0f rawV=%.0f flatV=%.0f texHit=%.0f texMiss=%.0f packQ=%.0f | "
-                "apply=%.2fms batch=%.2fms drawStart=%.2fms match=%.2fms upRaw=%.2fms interp=%.2fms(%.1fx) light=%.2fms waitGPU=%.2fms acq=%.2fms pres=%.2fms\n",
+                "apply=%.2fms batch=%.2fms drawStart=%.2fms match=%.2fms upRaw=%.2fms interp=%.2fms(%.1fx) light=%.2fms waitGPU=%.2fms acq=%.2fms pres=%.2fms waterFrames=%u/%u waterBatches=%u reflectReplay=%u reflectSkinned=%u\n",
                 sec > 0.0 ? static_cast<double>(prof_.frames) / sec : 0.0,
                 static_cast<double>(prof_.draws) * inv_f,
                 static_cast<double>(prof_.batches) * inv_f,
@@ -4408,7 +4940,9 @@ void VkBackend::present(std::uint32_t address, std::uint32_t stride, std::uint32
                 static_cast<double>(prof_.light_ns) * ms,
                 static_cast<double>(prof_.wait_gpu_ns) * ms,
                 static_cast<double>(prof_.acq_ns) * ms,
-                static_cast<double>(prof_.pres_ns) * ms);
+                static_cast<double>(prof_.pres_ns) * ms,
+                prof_.water_enabled_frames, static_cast<unsigned>(prof_.frames), prof_.water_batches,
+                prof_.reflection_replay_batches, prof_.reflection_replay_skinned);
             std::fflush(stderr);
             prof_ = ProfStats{};
             prof_.enabled = true;

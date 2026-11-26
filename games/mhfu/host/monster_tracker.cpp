@@ -71,6 +71,7 @@ void MonsterTracker::clear() noexcept {
     quest_start_applied_ = false;
     in_active_quest_ = false;
     capturable_in_area_ = false;
+    player_address_ = 0u;
     player_area_ = 0u;
     player_pos_ = {};
     monsters_.clear();
@@ -111,10 +112,12 @@ void MonsterTracker::poll(psprecomp::GuestMemory &memory, bool quest_start_track
         quest_start_applied_ = false;
     }
 
+    player_address_ = 0u;
     const std::uint8_t slot = memory.load8(game_sys + kGameSysPlayerSlot);
     if (slot < 6u) {
         const std::uint32_t player = memory.load32(player_mgr + kPlayerManagerPlayers + static_cast<std::uint32_t>(slot) * 4u);
         if (player != 0u && memory.contains(player + kPlayerPos, 12u) && memory.contains(player + kPlayerArea, 2u)) {
+            player_address_ = player;
             player_pos_ = {
                 std::bit_cast<float>(memory.load32(player + kPlayerPos + 0u)),
                 std::bit_cast<float>(memory.load32(player + kPlayerPos + 4u)),

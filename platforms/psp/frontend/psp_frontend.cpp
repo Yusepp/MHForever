@@ -1,6 +1,7 @@
 #include "psp_frontend.hpp"
 
 #include "dialog_overlay.hpp"
+#include <SDL3/SDL_keyboard.h>
 #include "backends/opengl/gl_backend.hpp"
 #include "backends/vulkan/vk_backend.hpp"
 #include "game_overlay_policy.hpp"
@@ -79,6 +80,7 @@ struct Frontend::Impl {
     int overlay_pixel_w{1920}, overlay_pixel_h{1088};    // the size the menu and the dialogs are shown at (dialog_mutex)
     std::atomic<bool> menu_open{false};
     bool menu_confirming_quit{};
+    bool snap_key_down{false};
     std::unique_ptr<overlay::MenuRenderer> menu_layouter; // the mouse needs to know where everything is drawn
     bool menu_requested{};
     bool guide_down{};
@@ -2378,7 +2380,16 @@ void Frontend::attach(Runtime &rt, std::function<void()> extra) {
                     state.buttons = (state.buttons & ~impl->game_button_clear.load(std::memory_order_relaxed)) |
                                     impl->game_button_force.load(std::memory_order_relaxed);
                 }
+                const bool *kb = SDL_GetKeyboardState(nullptr);
+                const bool f10_now = kb && kb[SDL_SCANCODE_F10];
+                if (f10_now && !impl->snap_key_down) {
+                    request_input_tape_snap(*runtime);
+                }
+                impl->snap_key_down = f10_now;
                 set_controller_state(*runtime, suppressed ? idle : state);
+                if (const std::uint64_t snap_id = take_input_tape_snap_request(*runtime); snap_id != 0u) {
+                    impl->live.snap_request_frame.store(snap_id, std::memory_order_relaxed);
+                }
                 update_dialogs(*impl, *runtime);
                 watch_friends(*impl, *runtime);
                 show_songs(*impl, *runtime);

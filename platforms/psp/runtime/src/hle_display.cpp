@@ -12,7 +12,9 @@
 #endif
 
 #include "mhf/psp/host.hpp"
+#include "mhf/psp/input_tape.hpp"
 
+#include <memory>
 #include <unordered_map>
 
 namespace mhf::psp {
@@ -26,9 +28,20 @@ struct VideoState {
     int display_mode{};
     int width{480};
     int height{272};
+    std::uint64_t ctrl_polls{};
+    std::unique_ptr<InputTape> tape;
+    bool snap_key_queued{false};
+    std::uint64_t pending_snap_id{0};
 };
 std::unordered_map<const Runtime *, VideoState> g_video;
 VideoState &video(Runtime &rt) { return g_video[&rt]; }
+InputTape &ensure_tape(VideoState &v) {
+    if (!v.tape) {
+        v.tape = std::make_unique<InputTape>();
+        v.tape->init_from_env();
+    }
+    return *v.tape;
+}
 
 std::uint64_t vcount(Runtime &rt) { return rt.kernel().now_us() / kVblankPeriodUs; }
 std::uint64_t next_vblank(Runtime &rt) { return (vcount(rt) + 1) * kVblankPeriodUs; }
@@ -39,8 +52,26 @@ void display_release(Runtime &rt) { g_video.erase(&rt); }
 } // namespace hle
 
 const DisplayState &display_state(Runtime &rt) { return video(rt).display; }
-void set_controller_state(Runtime &rt, const ControllerState &state) { video(rt).controller = state; }
+void set_controller_state(Runtime &rt, const ControllerState &state) {
+    auto &v = video(rt);
+    if (ensure_tape(v).replaying()) return; // keep deterministic replayed state intact for camera hooks too
+    v.controller = state;
+}
 const ControllerState &controller_state(Runtime &rt) { return video(rt).controller; }
+void request_input_tape_snap(Runtime &rt) {
+    auto &v = video(rt);
+    if (ensure_tape(v).recording()) {
+        v.snap_key_queued = true;
+    } else {
+        v.pending_snap_id = v.ctrl_polls > 0 ? v.ctrl_polls : (v.display.frames > 0 ? v.display.frames : 1u);
+    }
+}
+std::uint64_t take_input_tape_snap_request(Runtime &rt) {
+    auto &v = video(rt);
+    const std::uint64_t id = v.pending_snap_id;
+    v.pending_snap_id = 0u;
+    return id;
+}
 
 namespace hle {
 namespace {
@@ -140,7 +171,26 @@ void DisplayIsForeground(Runtime &, Context &ctx) { ret(ctx, 1); }
 
 // SceCtrlData: u32 timestamp, u32 buttons, u8 lx, u8 ly, u8 reserved[6].
 void write_samples(Runtime &rt, std::uint32_t address, int count, bool negative) {
-    const auto &c = video(rt).controller;
+    auto &v = video(rt);
+    auto &tape = ensure_tape(v);
+    const std::uint64_t poll_idx = ++v.ctrl_polls;
+    if (tape.replaying()) {
+        bool want_snap = false, want_exit = false;
+        tape.on_replay_poll(poll_idx, v.controller, want_snap, want_exit);
+        if (want_snap) v.pending_snap_id = poll_idx;
+        if (want_exit) {
+            std::fprintf(stderr, "[input-tape] replay finished at ctrl_poll=%llu, exiting cleanly\n",
+                         static_cast<unsigned long long>(poll_idx));
+            rt.exit_program_from_host(0);
+        }
+    } else if (tape.recording()) {
+        const bool snap = v.snap_key_queued;
+        v.snap_key_queued = false;
+        if (tape.on_record_poll(poll_idx, v.controller, snap)) {
+            v.pending_snap_id = poll_idx;
+        }
+    }
+    const auto &c = v.controller;
     const auto stamp = static_cast<std::uint32_t>(rt.kernel().now_us());
     auto &mem = rt.memory();
     for (int i = 0; i < count; ++i) {

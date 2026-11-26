@@ -28,6 +28,24 @@ struct alignas(16) DrawParams {
 };
 static_assert(sizeof(DrawParams) == 128);
 
+// Matches GLSL WaterFrameParams in ge_draw_water.frag (608 bytes, scalar layout).
+struct alignas(16) WaterFrameParams {
+    float inv_view[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float proj_info[4]{1.0f, 1.0f, -1.0f, -60.0f};
+    float vz_and_size[4]{32500.0f, 32500.0f, 1920.0f, 1088.0f};
+    float sun_dir_view[4]{0.34f, -0.78f, 0.52f, 0.0f};
+    float world_up_view[4]{0.0f, -1.0f, 0.0f, 0.0f};
+    float sky_zenith[4]{0.18f, 0.34f, 0.54f, 0.0f};
+    float sky_horizon[4]{0.42f, 0.52f, 0.60f, 0.0f};
+    float deep_col[4]{0.03f, 0.11f, 0.15f, 0.0f};
+    float sigma_abs[4]{0.011f, 0.005f, 0.004f, 0.0f};
+    std::uint32_t slots[4]{0u, 0u, 0u, 0u};
+    std::uint32_t ripple_count{0u};
+    std::uint32_t pad[3]{0u, 0u, 0u};
+    float ripples[24][4]{};
+};
+static_assert(sizeof(WaterFrameParams) == 608);
+
 struct PresentPush {
     float uv_max[2]{1.0f, 1.0f};
     std::uint32_t tex_idx{0};
@@ -58,6 +76,7 @@ struct GePipelineKey {
     std::uint8_t msaa_4x{0};
     std::uint8_t hdr_3d{0};
     std::uint8_t mat_write{1};
+    std::uint8_t is_water{0};
     std::uint8_t blend_enable{0};
     std::uint8_t color_op{0};
     std::uint8_t src_factor{1};
@@ -72,7 +91,8 @@ struct GePipelineKey {
                                         (static_cast<std::uint64_t>(spec_zrange & 1u) << 3u) |
                                         (static_cast<std::uint64_t>(msaa_4x & 1u) << 4u) |
                                         (static_cast<std::uint64_t>(hdr_3d & 1u) << 5u) |
-                                        (static_cast<std::uint64_t>(mat_write & 1u) << 6u);
+                                        (static_cast<std::uint64_t>(mat_write & 1u) << 6u) |
+                                        (static_cast<std::uint64_t>(is_water & 1u) << 7u);
         return spec_bits | (static_cast<std::uint64_t>(blend_enable) << 8u) |
                (static_cast<std::uint64_t>(color_op) << 16u) | (static_cast<std::uint64_t>(src_factor) << 24u) |
                (static_cast<std::uint64_t>(dst_factor) << 32u) | (static_cast<std::uint64_t>(color_mask) << 40u);
@@ -90,6 +110,7 @@ struct Pipelines {
 
     VkShaderModule ge_vert = VK_NULL_HANDLE;
     VkShaderModule ge_frag = VK_NULL_HANDLE;
+    VkShaderModule ge_water_frag = VK_NULL_HANDLE;
     VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat hdr_color_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     VkFormat mat_id_format = VK_FORMAT_R8_UINT;

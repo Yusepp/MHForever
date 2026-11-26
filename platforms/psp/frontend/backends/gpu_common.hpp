@@ -129,6 +129,8 @@ struct LiveSettings {
     std::atomic<int> aa_mode{kAaFxaa};
     std::atomic<bool> msaa_4x_supported{false};
     std::atomic<bool> ray_query_supported{false};
+    // Developer/testing aid: non-zero PSP frame number requests a full-resolution Vulkan PNG snapshot.
+    std::atomic<std::uint64_t> snap_request_frame{0};
     // Optional game-supplied world-space dynamic lights (updated from the host poll, read by Vulkan).
     mutable std::mutex semantic_mutex;
     SemanticSceneFrame semantic_frame{};

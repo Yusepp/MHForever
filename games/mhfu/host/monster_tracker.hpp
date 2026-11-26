@@ -47,6 +47,7 @@ public:
 
     [[nodiscard]] const std::vector<TrackedMonster> &large_monsters() const noexcept { return monsters_; }
     [[nodiscard]] std::uint16_t player_area() const noexcept { return player_area_; }
+    [[nodiscard]] std::uint32_t player_address() const noexcept { return player_address_; }
     [[nodiscard]] std::array<float, 3> player_pos() const noexcept { return player_pos_; }
     [[nodiscard]] bool capturable_in_area() const noexcept { return capturable_in_area_; }
     [[nodiscard]] bool is_enemy_capturable(std::uint32_t enemy_address) const noexcept;
@@ -59,6 +60,7 @@ private:
     bool in_active_quest_{false};
     bool capturable_in_area_{false};
     std::uint16_t player_area_{0};
+    std::uint32_t player_address_ = 0;
     std::array<float, 3> player_pos_{};
     std::vector<TrackedMonster> monsters_;
 };

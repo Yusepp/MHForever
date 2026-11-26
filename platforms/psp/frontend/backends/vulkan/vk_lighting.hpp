@@ -147,7 +147,9 @@ public:
 
     // Zone & material detection: resolves PPSSPP (data, clut) key once per unique `content_hash` (cached O(1)).
     MaterialClass note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
-                               const textures::MemoryReader &reader, bool is_blended = false);
+                               const textures::MemoryReader &reader, bool is_blended = false,
+                               std::uint32_t *out_data_hash = nullptr,
+                               std::uint32_t *out_clut_hash = nullptr);
     void end_frame_zone_vote() noexcept;
 
     // Runs enabled lighting/atmosphere compute passes on `scene_color` using `kParamSlotsPerDispatch`
@@ -187,6 +189,17 @@ public:
     void reset_exposure() noexcept { exposure_reset_ = true; }
     void reset_froxel_history() noexcept { froxel_.reset_history(); }
     [[nodiscard]] bool active_is_cave() const noexcept { return active_is_cave_; }
+    [[nodiscard]] int active_zone() const noexcept { return active_zone_; }
+    [[nodiscard]] std::uint32_t noise3d_slot() const noexcept { return noise3d_tex_.slot; }
+    void fill_water_frame_params(struct WaterFrameParams &out, const LightingFrameInput &in,
+                                 const float *view_mat, float vp_w, float vp_h, float elapsed_sec,
+                                 std::uint32_t bg_color_slot, std::uint32_t bg_depth_slot) const noexcept;
+    [[nodiscard]] const char *active_zone_name() const noexcept {
+        if (live_ && active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < live_->shadow_zone_names.size()) {
+            return live_->shadow_zone_names[static_cast<std::size_t>(active_zone_)].c_str();
+        }
+        return "unknown";
+    }
     void resolve_sun_dir_world(const LightingFrameInput &in, float out[3]) const noexcept;
 
     // Invalidates any cached VkImageView -> VkDescriptorSet entry matching a retired view.

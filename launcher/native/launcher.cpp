@@ -149,6 +149,7 @@ Json default_settings() {
     s["vkPbrMaterials"] = true;
     s["vkFroxelFog"] = true;
     s["vkRayTracing"] = false;
+    s["vkWaterReflections"] = true;
     s["fullscreen"] = false;
     s["smoothTextures"] = false;
     s["packMipmaps"] = false; // texture packs: mip levels made for images that ship none (softer far away, no shimmer)
@@ -1109,7 +1110,7 @@ void Launcher::import_game_controls() {
                                                                     "projectedShadows", "wholeMapShadows", "shadowQuality", "aaMode", "enhancedLighting",
                                                                     "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
                                                                     "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
-                                                                    "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing",
+                                                                    "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing", "vkWaterReflections",
                                                                     "shadowDarkness", "widescreen"};
                 const std::string setting = name == "horn-songs" ? "hornSongs" : name == "hud-size" ? "hudSize" : name.substr(7);
                 if (setting != "hornSongs" && setting != "hudSize" && std::ranges::find(kGameOptions, setting) == std::end(kGameOptions)) continue;
@@ -1206,7 +1207,7 @@ void Launcher::apply_settings(const std::string &disc_id, const Json &partial) {
     }
     for (const char *key : {"fullscreen", "smoothTextures", "packMipmaps", "projectedShadows", "wholeMapShadows", "enhancedLighting",
                             "vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi", "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
-                            "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing",
+                            "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing", "vkWaterReflections",
                             "widescreen", "trueWeaponValues", "fastSupplyBox", "guildQuestScaling", "questAutoclear", "smithyBrowse", "smithyLayout",
                             "analogCamera", "mouseCamera", "hornSongs", "gatheringAssistance", "infiniteGatheringTools", "questBoxIcons", "modernCarving", "invulnerableCarveQuest", "keyQuestMarkers", "betterSharpness",
                             "skipQuestClearTimer", "itemPouchLoadouts", "capturableIndicator", "questStartTracker", "infiniteWhetstone", "damageNumbers", "comboBooksFromBox", "infinitePaintballs",
@@ -1709,14 +1710,15 @@ Launcher::LaunchPlan Launcher::plan_launch(const std::string &game_id) {
     }
     {
         std::uint32_t vk_mask = 0u;
-        const char *const kVkKeys[15] = {"vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
+        const char *const kVkKeys[16] = {"vkAo", "vkContactShadows", "vkVolumetricFog", "vkBloom", "vkSsgi",
                                          "vkSpecular", "vkSoftParticles", "vkFxaa", "vkVignette", "vkKillcamDof",
-                                         "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing"};
-        for (unsigned bit = 0u; bit < 15u; ++bit) {
+                                         "vkSunShadows", "vkDynamicLights", "vkPbrMaterials", "vkFroxelFog", "vkRayTracing",
+                                         "vkWaterReflections"};
+        for (unsigned bit = 0u; bit < 16u; ++bit) {
             const bool def = (bit != 14u); // vkRayTracing defaults to false (Ultra opt-in)
             if (s[kVkKeys[bit]].as_bool(def)) vk_mask |= (1u << bit);
         }
-        if (vk_mask != 0x3FFFu) {
+        if (vk_mask != 0xBFFFu) {
             plan.args.push_back("--vulkan-effects-mask");
             plan.args.push_back(std::to_string(vk_mask));
         }
