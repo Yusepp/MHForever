@@ -214,6 +214,9 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
                 zones_[i].sun_darkness = it->second[1];
                 zones_[i].sun_turn = it->second[2];
             }
+            if (i < live->shadow_zone_mist_profiles.size()) {
+                zones_[i].mist = live->shadow_zone_mist_profiles[i];
+            }
         }
         tex_to_zone_.reserve(live->shadow_zone_textures.size());
         for (const auto &[h32, zidx] : live->shadow_zone_textures) {
@@ -881,7 +884,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
             vstr = std::max(vstr, 1.10f * response);
         }
         const float weather = in.fog_camera.ground_mist_weather;
-        if (active_biome_ == BiomeKind::Swamp && weather >= 0.0f) {
+        if (weather >= 0.0f) {
             base.phase1_slots[3] = 1u + static_cast<std::uint32_t>(std::round(weather * 1024.0f));
         }
         base.env_time[2] = vstr;
@@ -890,6 +893,23 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.env_time[0] = elapsed_sec;
         base.env_time[3] = 0.0f;
     }
+
+    // Per-zone GroundMistProfile (populated from host shadow_zone_mist_profiles table; game-agnostic).
+    GroundMistProfile active_mist{};
+    if (active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < zones_.size()) {
+        active_mist = zones_[active_zone_].mist;
+    } else if (active_biome_ == BiomeKind::Swamp && base.env_time[2] > 0.14f) {
+        active_mist.enabled = true;
+        active_mist.ground_mist_only = true;
+    }
+    base.mist_shape[0] = active_mist.base_height_cm;
+    base.mist_shape[1] = active_mist.surge_height_cm;
+    base.mist_shape[2] = active_mist.base_density;
+    base.mist_shape[3] = active_mist.surge_density;
+    base.mist_tint[0]  = active_mist.tint[0];
+    base.mist_tint[1]  = active_mist.tint[1];
+    base.mist_tint[2]  = active_mist.tint[2];
+    base.mist_tint[3]  = active_mist.enabled ? 1.0f : 0.0f;
 
     const bool use_3d_froxel = want_vol && want_froxel && froxel_.ready() && (fog_view != nullptr);
     const bool run_2d_vol    = want_vol && !use_3d_froxel;
@@ -986,23 +1006,40 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         constexpr std::size_t kSlotFroxelInteg  = 12u;
         constexpr std::size_t kSlotFroxelFluid  = 13u;
         float ground_info[4]{};
-        const bool has_hunter = in.fog_camera.has_hunter_feet && active_biome_ == BiomeKind::Swamp;
-        const auto &feet = in.fog_camera.hunter_feet;
-        const FogActor hunter{feet[0], feet[1], feet[2], 68.0f};
+        float hf_info[4]{};
+        std::array<FogActor, FroxelFog::kMaxActors> wake_buf{};
+        std::uint32_t wake_count = 0u;
+        if (in.fog_camera.wake_actor_count > 0u) {
+            const std::uint32_t n = std::min<std::uint32_t>(in.fog_camera.wake_actor_count,
+                                                            static_cast<std::uint32_t>(FroxelFog::kMaxActors));
+            for (std::uint32_t i = 0u; i < n; ++i) {
+                const auto &wa = in.fog_camera.wake_actors[i];
+                wake_buf[wake_count++] = FogActor{wa.x, wa.foot_y, wa.z, wa.radius};
+            }
+        } else if (in.fog_camera.has_hunter_feet) {
+            const auto &feet = in.fog_camera.hunter_feet;
+            wake_buf[wake_count++] = FogActor{feet[0], feet[1], feet[2], 68.0f};
+        }
+        const bool use_host_actors = (wake_count > 0u);
         froxel_dispatched = froxel_.dispatch(
             cmd, bindless_set, fog_view, base.inv_view, in.proj, base.sun_dir_view,
-            fog_lin, scat_lin, elapsed_sec, base.env_time[2], in.frame_index, active_biome_ == BiomeKind::Swamp,
-            has_hunter ? in.fog_camera.ground_area : 0u,
+            fog_lin, scat_lin, elapsed_sec, base.env_time[2], in.frame_index,
+            active_mist.enabled && active_mist.ground_mist_only,
+            in.fog_camera.valid ? in.fog_camera.ground_area : 0u,
+            active_mist.wind_x, active_mist.wind_z,
+            in.fog_camera.heightfield.valid ? &in.fog_camera.heightfield : nullptr,
             noise3d_tex_.slot, base.aux_slots[1], base.shadow_info[0], base.shadow_info[1],
             (base.shadow_info[0] != 0u ? shadow_from_view : nullptr), rt_shadow_slot,
             lights_bda, base.light_count,
-            has_hunter ? &hunter : in.fog_actors, has_hunter ? 1u : in.fog_actor_count,
+            use_host_actors ? wake_buf.data() : in.fog_actors,
+            use_host_actors ? wake_count : in.fog_actor_count,
             &slots[kSlotFroxelInject], params_bda + kSlotFroxelInject * sizeof(LightingComputeParams),
             &slots[kSlotFroxelInteg],  params_bda + kSlotFroxelInteg  * sizeof(LightingComputeParams),
             &slots[kSlotFroxelFluid],  params_bda + kSlotFroxelFluid  * sizeof(LightingComputeParams),
-            ground_info);
+            ground_info, hf_info);
         if (froxel_dispatched) {
             std::memcpy(slots[kPassComposite].ground_fog_info, ground_info, sizeof(ground_info));
+            std::memcpy(slots[kPassComposite].ground_hf_info, hf_info, sizeof(hf_info));
             static std::uint64_t s_last_fog_log = ~0ull;
             static const bool s_log_fog = [] {
                 const char *v = std::getenv("MHF_VK_PROFILE");
@@ -1011,11 +1048,12 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
             if (s_log_fog && (in.frame_index != s_last_fog_log) && ((in.frame_index % 60u) == 0u)) {
                 s_last_fog_log = in.frame_index;
                 std::fprintf(stderr,
-                             "[vk][fog] biome=%u live_fog=%.2f psp_rgb=(%.2f,%.2f,%.2f) vstr=%.2f translucent=%.2f weather=%.2f actors=%u cam=(%.0f,%.0f,%.0f) floor_y=%.1f\n",
-                             static_cast<unsigned>(active_biome_),
+                             "[vk][fog] zone=%d biome=%u mist=%u live_fog=%.2f vstr=%.2f weather=%.2f actors=%u hf=%u cam=(%.0f,%.0f,%.0f) floor_y=%.1f\n",
+                             active_zone_, static_cast<unsigned>(active_biome_), active_mist.enabled ? 1u : 0u,
                              in.has_psp_fog ? in.psp_fog_intensity : -1.0f,
-                             in.psp_fog_rgb[0], in.psp_fog_rgb[1], in.psp_fog_rgb[2],
-                             base.env_time[2], in.translucent_fog_signal, in.fog_camera.ground_mist_weather, in.fog_actor_count,
+                             base.env_time[2], in.fog_camera.ground_mist_weather,
+                             use_host_actors ? wake_count : in.fog_actor_count,
+                             hf_info[3] > 1.0f ? 1u : 0u,
                              base.inv_view[12], base.inv_view[13], base.inv_view[14], ground_info[1]);
             }
         }

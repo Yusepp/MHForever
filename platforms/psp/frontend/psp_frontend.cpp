@@ -503,6 +503,10 @@ void Frontend::set_shadow_zone_biomes(std::vector<std::pair<std::uint8_t, bool>>
     impl_->live.shadow_zone_biomes = std::move(biomes);
 }
 
+void Frontend::set_shadow_zone_mist_profiles(std::vector<GroundMistProfile> profiles) {
+    impl_->live.shadow_zone_mist_profiles = std::move(profiles);
+}
+
 void Frontend::set_hud(int size) { impl_->live.hud_size = std::clamp(size, 50, 100); }
 
 void Frontend::set_widescreen(bool on) {

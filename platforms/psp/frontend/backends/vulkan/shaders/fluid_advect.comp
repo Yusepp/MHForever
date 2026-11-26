@@ -21,6 +21,7 @@ struct FluidActor {
 struct FroxelFluidParams {
     vec4 grid_info;    // x = origin_x (cm), y = origin_z (cm), z = world_size (cm), w = dt (sec)
     vec4 shift_and_t;  // x = shift_texels_x, y = shift_texels_z, z = elapsed_sec, w = reset_flag
+    vec4 wind_info;    // x = wind_x (texels/s), y = wind_z (texels/s), z = 0, w = 0
     uvec4 counts;      // x = actor_count (<=8), y = 0, z = 0, w = 0
     FluidActor actors[8];
 };
@@ -127,39 +128,45 @@ void main() {
         vec4 mx = max(max(n00, n10), max(n01, n11));
 
         vec4 adv = clamp(phi_hat + 0.5 * (s_cur - phi_back), mn, mx);
-        vel = adv.rg * exp(-dt * 1.15);
+        vel = adv.rg * exp(-dt * 1.35);
         dens = adv.b;
 
-        // Gentle relaxation back toward the world-space wispy equilibrium (~2.2s recovery).
-        dens = mix(dens, eq_dens, clamp(dt * 0.45, 0.0, 0.25));
+        // Brief, lively organic recovery (~1.7s swirling trail behind hunter & monsters).
+        dens = mix(dens, eq_dens, clamp(dt * 0.62, 0.0, 0.30));
     }
 
-    // Add gentle Bridson divergence-free curl-noise swamp breeze so the mist is constantly swirling!
+    // Add gentle Bridson divergence-free curl-noise + per-zone directional wind (swamp breeze / snow spindrift / sandstorm!).
     vec2 cn = curl_noise(cell_world_xz, t_sec);
-    vel += (cn * 4.5 + vec2(0.85, 0.45)) * dt;
+    vel += (cn * 4.5 + p.wind_info.xy) * dt;
 
-    // Inject hunter & monster physical momentum + parting wakes into the Navier-Stokes field!
+    // Inject hunter & monster physical momentum + crisp parting wakes into the Navier-Stokes field!
     uint n_act = min(p.counts.x, 8u);
     for (uint i = 0u; i < n_act; ++i) {
         vec2 act_xz = p.actors[i].pos_rad.xz;
         float rad = max(p.actors[i].pos_rad.w, 68.0);
         vec2 d = cell_world_xz - act_xz;
         float dist = length(d);
-        if (dist > rad * 2.2) continue;
+        if (dist > rad * 2.4) continue;
 
         vec2 dir = (dist > 1.0) ? (d / dist) : vec2(1.0, 0.0);
         vec2 avel_tex = p.actors[i].vel_pad.xz / texel_cm;
         float speed = p.actors[i].vel_pad.w; // cm/s
-        float move_k = clamp(speed / 90.0, 0.0, 3.0);
+        float move_k = clamp((speed - 25.0) / 85.0, 0.0, 3.2);
 
-        // Gaussian body kernel: imparts real forward + outward momentum (pressure projection turns this into vortices!).
-        float body = exp(-(dist * dist) / (rad * rad * 0.72));
-        vec2 impulse = avel_tex * (1.35 * body) + dir * (24.0 * move_k * body);
-        vel = clamp(vel + impulse * clamp(dt * 16.0, 0.25, 1.0), vec2(-75.0), vec2(75.0));
+        // Gaussian body kernel + perpendicular vortex shear so Jacobi projection spins crisp twin eddies!
+        float body = exp(-(dist * dist) / (rad * rad * 0.78));
+        vec2 perp = vec2(-dir.y, dir.x);
+        float side = sign(dot(perp, avel_tex) + 0.001);
+        vec2 impulse = avel_tex * (1.55 * body)
+                     + dir * (30.0 * move_k * body)
+                     + perp * (18.0 * side * move_k * body);
+        vel = clamp(vel + impulse * clamp(dt * 18.0, 0.28, 1.0), vec2(-82.0), vec2(82.0));
 
-        // Gently part density right inside the legs/boots when moving (conservation of mass piles it up on the sides!).
-        float clear_w = (1.0 - smoothstep(rad * 0.15, rad * 1.05, dist)) * clamp(0.25 + 0.75 * move_k, 0.0, 1.0);
-        dens = mix(dens, 0.02, clamp(clear_w * 0.85, 0.0, 0.92));
+        // Cleanly part density right inside moving legs/body; pile up displaced collar on the flanks!
+        float clear_w = (1.0 - smoothstep(rad * 0.12, rad * 1.15, dist)) * clamp(0.18 + 0.82 * clamp(move_k, 0.0, 1.0), 0.0, 1.0);
+        dens = mix(dens, 0.015, clamp(clear_w * 0.92, 0.0, 0.95));
+        float collar = smoothstep(rad * 0.80, rad * 1.35, dist) * (1.0 - smoothstep(rad * 1.35, rad * 2.25, dist));
+        dens = min(dens + collar * 0.36 * clamp(move_k, 0.0, 1.4), 1.65);
     }
 
     // Softly blend grid border to ambient equilibrium so the 32m sim boundary is invisible.

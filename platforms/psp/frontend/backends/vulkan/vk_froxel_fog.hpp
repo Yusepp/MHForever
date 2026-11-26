@@ -13,6 +13,7 @@
 
 #include "vk_context.hpp"
 #include "vk_descriptors.hpp"
+#include "semantic_scene.hpp"
 
 #include <cstdint>
 
@@ -54,10 +55,11 @@ struct alignas(16) FroxelFluidParams {
     };
     float grid_info[4]{};   // origin_x, origin_z, world_size, dt
     float shift_and_t[4]{}; // shift_x, shift_z, elapsed_sec, reset_flag
+    float wind_info[4]{};   // wind_x, wind_z, 0, 0
     std::uint32_t counts[4]{};
     ActorGpu actors[8]{};
 };
-static_assert(sizeof(FroxelFluidParams) == 304);
+static_assert(sizeof(FroxelFluidParams) == 320);
 
 class FroxelFog {
 public:
@@ -92,18 +94,25 @@ public:
         zone_floor_frames_ = 0u;
         fluid_valid_ = false;
         prev_actor_count_ = 0u;
+        uploaded_hf_rev_ = 0u;
+        uploaded_hf_area_ = 0u;
     }
 
-    // Ensures fallback 3D + 2D fluid textures are cleared & in SHADER_READ_ONLY_OPTIMAL even when fog is OFF.
+    // Ensures fallback 3D + 2D fluid + 2D heightfield textures are cleared & in SHADER_READ_ONLY_OPTIMAL.
     void ensure_fallback(VkCommandBuffer cmd);
 
-    // Dispatches 256x256 Navier-Stokes solver (at 30 Hz), 3D froxel inject, and Frostbite Z-integration.
-    // Writes `out_ground_info[4]` = {fluid_origin_x, ground_floor_y, fluid_origin_z, kFluidWorldSize}.
+    // Dispatches 256x256 Navier-Stokes solver (at 30 Hz), optional 64x64 heightfield upload,
+    // 3D froxel inject, and Frostbite Z-integration.
+    // Writes `out_ground_info[4]` = {fluid_origin_x, ground_floor_y, fluid_origin_z, kFluidWorldSize}
+    // and `out_hf_info[4]` = {hf_origin_x, hf_origin_z, hf_cell_size, hf_grid_n_or_0}.
     bool dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
                   const float view_mat[16], const float inv_view[16],
                   const float proj[16], const float sun_dir_view[4],
                   const float fog_color_lin[4], const float scatter_color_lin[4],
-                  float elapsed_sec, float vapor_strength, std::uint64_t frame_idx, bool ground_mist_only, std::uint16_t ground_area,
+                  float elapsed_sec, float vapor_strength, std::uint64_t frame_idx,
+                  bool ground_mist_only, std::uint16_t ground_area,
+                  float wind_x, float wind_z,
+                  const GroundHeightField *heightfield,
                   std::uint32_t noise3d_slot, std::uint32_t linear_sampler,
                   std::uint32_t shadow_map_slot, std::uint32_t nearest_sampler,
                   const float *shadow_from_view, std::uint32_t rt_shadow_slot,
@@ -112,7 +121,7 @@ public:
                   void *inject_cpu, VkDeviceAddress inject_bda,
                   void *integ_cpu, VkDeviceAddress integ_bda,
                   void *fluid_cpu, VkDeviceAddress fluid_bda,
-                  float out_ground_info[4]);
+                  float out_ground_info[4], float out_hf_info[4]);
 
 private:
     struct VolTex {
@@ -130,10 +139,11 @@ private:
 
     VkSampler sampler3d_ = VK_NULL_HANDLE;
     VkSampler sampler2d_ = VK_NULL_HANDLE;
+    VkSampler sampler_nearest_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout work_set_layout_ = VK_NULL_HANDLE;     // 1 storage + 1 sampler
     VkDescriptorSetLayout vort_div_layout_ = VK_NULL_HANDLE;     // 2 storage + 1 sampler
     VkDescriptorSetLayout project_layout_ = VK_NULL_HANDLE;      // 1 storage + 2 samplers
-    VkDescriptorSetLayout sample_set_layout_ = VK_NULL_HANDLE;   // 2 samplers (3D froxel + 2D fluid)
+    VkDescriptorSetLayout sample_set_layout_ = VK_NULL_HANDLE;   // 3 samplers (3D froxel + 2D fluid + 2D heightfield)
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
 
     VkDescriptorSet inject_sets_[2]{};
@@ -165,6 +175,13 @@ private:
     VolTex fluid_state_[2]{}; // 256x256 RGBA16F: RG=vel, B=smoke density, A=|vorticity|
     VolTex fluid_press_[2]{}; // 256x256 RG16F:   R=pressure, G=divergence
     VolTex fallback_fluid_{};
+    VolTex heightfield_tex_{}; // 64x64 R32F world-locked terrain collision heightfield
+    VolTex fallback_hf_{};
+    VkBuffer hf_stage_buf_ = VK_NULL_HANDLE;
+    VmaAllocation hf_stage_alloc_ = VK_NULL_HANDLE;
+    void *hf_stage_mapped_ = nullptr;
+    std::uint32_t uploaded_hf_rev_ = 0u;
+    std::uint16_t uploaded_hf_area_ = 0u;
 
     int ping_ = 0;
     int fluid_ping_ = 0;

@@ -20,6 +20,7 @@ layout(set = 0, binding = 1) uniform sampler u_samplers[];
 layout(set = 1, binding = 0, rgba8) uniform image2D u_lit_out;
 layout(set = 2, binding = 0) uniform sampler3D u_froxel_vol;
 layout(set = 2, binding = 1) uniform sampler2D u_ground_fluid;
+layout(set = 2, binding = 2) uniform sampler2D u_ground_height;
 
 layout(constant_id = 0) const uint kSpecInPlace = 0u;
 
@@ -56,6 +57,9 @@ struct LightingParams {
     mat4 inv_view;         // column-major: PSP view (+Y up) -> world space (cm)
     vec4 env_time;         // x = elapsed_sec, y = cam_world_y, z = vapor_strength, w = has_inv_view
     vec4 ground_fog_info;  // x = fluid_origin_x, y = ground_floor_y, z = fluid_origin_z, w = fluid_world_size
+    vec4 mist_shape;       // x = base_h_cm, y = surge_h_cm, z = base_dens, w = surge_dens
+    vec4 mist_tint;        // rgb = multiplicative mist tint, w = mist_enabled (1.0 or 0.0)
+    vec4 ground_hf_info;   // x = hf_origin_x, y = hf_origin_z, z = hf_cell_size, w = hf_grid_n (64.0 or 0.0)
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightingParamsBuf {
@@ -107,6 +111,30 @@ vec3 linear_to_srgb(vec3 c) {
     vec3 s2 = sqrt(s1);
     vec3 s3 = sqrt(s2);
     return clamp(0.662002687 * s1 + 0.684122060 * s2 - 0.323583601 * s3 - 0.0225411470 * a, vec3(0.0), vec3(1.0));
+}
+
+float sample_ground_height(vec2 wxz, float basin_y, vec4 hf_info) {
+    if (hf_info.w < 1.5) return basin_y;
+    int n = int(hf_info.w);
+    vec2 cell = (wxz - hf_info.xy) / hf_info.z - vec2(0.5);
+    ivec2 i0 = ivec2(floor(cell));
+    vec2 f = fract(cell);
+    if (i0.x < -1 || i0.y < -1 || i0.x >= n || i0.y >= n) return basin_y;
+    ivec2 c00 = clamp(i0,                ivec2(0), ivec2(n - 1));
+    ivec2 c10 = clamp(i0 + ivec2(1, 0),  ivec2(0), ivec2(n - 1));
+    ivec2 c01 = clamp(i0 + ivec2(0, 1),  ivec2(0), ivec2(n - 1));
+    ivec2 c11 = clamp(i0 + ivec2(1, 1),  ivec2(0), ivec2(n - 1));
+    float h00 = texelFetch(u_ground_height, c00, 0).r;
+    float h10 = texelFetch(u_ground_height, c10, 0).r;
+    float h01 = texelFetch(u_ground_height, c01, 0).r;
+    float h11 = texelFetch(u_ground_height, c11, 0).r;
+    float w00 = (h00 > -8000.0) ? (1.0 - f.x) * (1.0 - f.y) : 0.0;
+    float w10 = (h10 > -8000.0) ? f.x * (1.0 - f.y) : 0.0;
+    float w01 = (h01 > -8000.0) ? (1.0 - f.x) * f.y : 0.0;
+    float w11 = (h11 > -8000.0) ? f.x * f.y : 0.0;
+    float wsum = w00 + w10 + w01 + w11;
+    if (wsum < 0.001) return basin_y;
+    return (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / wsum;
 }
 
 float linear_eye_z(LightingParams p, float d) {
@@ -421,39 +449,36 @@ void main() {
 
     // 5a. True 2D GPU Navier-Stokes Stacked World-Space Ground-Mist Shells
     //     (Stam Stable Fluids + Harris Jacobi + Fedkiw Vorticity Confinement + Selle MacCormack + Bridson Curl-Noise):
-    //     - Intersects the camera ray with 8 FIXED world-space horizontal planes (Y_k = zone_floor_y + h_k).
+    //     - Intersects the camera ray with 8 FIXED world-space shells draped over the cached 64x64 XZ terrain heightfield.
     //     - Driven DIRECTLY by the 256x256 incompressible Navier-Stokes smoke density (fl.b) & vorticity (fl.a)!
     //     - Fur-shell heightfield slicing: denser piled-up vortex ridges billow higher into the upper shells,
-    //       while parted walk-through trails open cleanly down to the mud and curl into Karman vortices!
-    if ((p.ext_slots.w & 32u) != 0u && p.env_time.w > 0.5 && p.ground_fog_info.w > 1.0 && p.env_time.z > 0.14) {
+    //       while parted walk-through trails open cleanly down to the ground and curl into Karman vortices!
+    if ((p.ext_slots.w & 32u) != 0u && p.env_time.w > 0.5 && p.ground_fog_info.w > 1.0 && p.mist_tint.w > 0.5) {
         vec2 ndc_g = uv * 2.0 - 1.0;
         vec3 ray_psp = normalize(vec3(ndc_g.x * p.proj_info.x, -ndc_g.y * p.proj_info.y, -1.0));
         vec3 cam_w = p.inv_view[3].xyz;
         vec3 ray_w = normalize(mat3(p.inv_view) * ray_psp);
         float max_t = is_sky ? 5200.0 : (z_eye / max(-ray_psp.z, 0.05));
 
-        float floor_y = p.ground_fog_info.y;
+        float basin_y = p.ground_fog_info.y;
         float fog_int = clamp(p.env_time.z, 0.0, 1.40);
         float surge = smoothstep(0.48, 1.05, fog_int);
-        bool swamp = p.ext_slots.z == 11u;
-        if (swamp && p.phase1_slots.w != 0u) {
+        if (p.phase1_slots.w != 0u) {
             surge = float(p.phase1_slots.w - 1u) / 1024.0;
         }
-        float max_h_cm = swamp ? mix(20.0, 75.0, surge)
-                               : mix(56.0, 108.0, clamp(fog_int * 0.85, 0.0, 1.0));
-        float dens_scale = swamp ? mix(0.12, 0.32, surge)
-                                 : mix(0.24, 0.44, clamp(fog_int * 0.85, 0.0, 1.0));
+        float max_h_cm   = mix(p.mist_shape.x, p.mist_shape.y, surge);
+        float dens_scale = mix(p.mist_shape.z, p.mist_shape.w, surge);
 
-        if (abs(ray_w.y) > 0.008) {
+        if (abs(ray_w.y) > 0.008 && max_h_cm > 1.0 && dens_scale > 0.005) {
             vec2 orig_xz = p.ground_fog_info.xz;
             float inv_wsize = 1.0 / p.ground_fog_info.w;
             float t_wind = p.env_time.x * 0.020;
 
-            vec3 fog_lin = srgb_to_linear_hdr(p.fog_color.rgb);
-            vec3 scat_lin = srgb_to_linear_hdr(p.scatter_color.rgb);
+            vec3 fog_lin = srgb_to_linear_hdr(p.fog_color.rgb) * p.mist_tint.rgb;
+            vec3 scat_lin = srgb_to_linear_hdr(p.scatter_color.rgb) * p.mist_tint.rgb;
             vec3 mist_shadow = fog_lin * 0.55;
-            vec3 mist_crest  = mix(fog_lin * 1.95 + vec3(0.16, 0.20, 0.24),
-                                   fog_lin * 2.40 + vec3(0.28, 0.32, 0.36), surge);
+            vec3 mist_crest  = mix(fog_lin * 1.95 + vec3(0.16, 0.20, 0.24) * p.mist_tint.rgb,
+                                   fog_lin * 2.40 + vec3(0.28, 0.32, 0.36) * p.mist_tint.rgb, surge);
 
             float rt_sun = 1.0;
             if (p.shadow_info.z != 0u && !is_cave) {
@@ -462,8 +487,29 @@ void main() {
             uint nslot = p.shadow_info.w;
             uint lsamp = p.aux_slots.y;
 
+            // Resolve world-locked terrain floor via 2-step fixed-point lookup into the cached 64x64 heightfield.
+            float floor_y = basin_y;
+            float cliff_fade = 1.0;
+            if (p.ground_hf_info.w > 1.5) {
+                float t0 = (basin_y - cam_w.y) / ray_w.y;
+                if (t0 > 20.0 && t0 < 4800.0) {
+                    vec2 xz0 = (cam_w + ray_w * min(t0, max_t)).xz;
+                    float hy0 = sample_ground_height(xz0, basin_y, p.ground_hf_info);
+                    float t1 = (hy0 - cam_w.y) / ray_w.y;
+                    if (t1 > 20.0 && t1 < 4800.0) {
+                        vec2 xz1 = (cam_w + ray_w * min(t1, max_t)).xz;
+                        floor_y = sample_ground_height(xz1, basin_y, p.ground_hf_info);
+                    } else {
+                        floor_y = hy0;
+                    }
+                    // Pool naturally in low basins & gentle slopes; fade off dry high cliffs (> 1.4m..2.9m above basin).
+                    cliff_fade = 1.0 - smoothstep(140.0, 290.0, floor_y - basin_y);
+                }
+            }
+            dens_scale *= cliff_fade;
+
             // Vary the crest gently across the basin using a stationary world-space sample.
-            if (swamp && nslot != 0u) {
+            if (nslot != 0u && dens_scale > 0.005) {
                 float floor_t = (floor_y - cam_w.y) / ray_w.y;
                 if (floor_t > 28.0 && floor_t < 4800.0) {
                     vec2 floor_xz = (cam_w + ray_w * floor_t).xz;
@@ -476,7 +522,7 @@ void main() {
             vec3 g_scatter = vec3(0.0);
             float g_trans = 1.0;
 
-            for (int pi = kPlanes - 1; pi >= 0; --pi) {
+            for (int pi = kPlanes - 1; pi >= 0 && dens_scale > 0.005; --pi) {
                 float lf = (float(pi) + 0.5) / float(kPlanes);
                 float plane_y = floor_y + 6.0 + lf * max_h_cm;
                 float t_k = (plane_y - cam_w.y) / ray_w.y;

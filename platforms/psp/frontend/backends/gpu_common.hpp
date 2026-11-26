@@ -70,6 +70,8 @@ struct LiveSettings {
     std::vector<std::pair<std::uint32_t, int>> shadow_zone_textures;
     // Optional per-zone lighting biome (biome preset index, is_cave) aligned with `shadow_zone_names`.
     std::vector<std::pair<std::uint8_t, bool>> shadow_zone_biomes;
+    // Optional per-zone ground-mist profile aligned with `shadow_zone_names`.
+    std::vector<GroundMistProfile> shadow_zone_mist_profiles;
     std::atomic<float> shadow_strength{0.5f};
     // What casts, set by the backend as it goes in and out of caves: objects up to shadow_max_object long (world units), and
     // inside the scenery slender pieces up to shadow_max_piece (0: none).

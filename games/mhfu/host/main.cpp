@@ -913,19 +913,22 @@ void trace_swamp_effect(Runtime &rt, const Context &ctx, unsigned effect) {
                  static_cast<unsigned long long>(rt.now_us() / 1000u), effect, object, flags, state, phase, value);
 }
 
-constexpr std::uint16_t kSwampWeatherArea = 71u;
 float g_swamp_whitening = 0.0f;
+std::uint16_t g_swamp_whitening_area = 0u;
 std::uint64_t g_swamp_whitening_sample_us = 0;
 
 void on_swamp_effect13_update(Runtime &rt, Context &ctx) {
     trace_swamp_effect(rt, ctx, 13u);
-    if (!g_monster_tracker.in_active_quest() || g_monster_tracker.player_area() != kSwampWeatherArea) return;
+    if (!g_monster_tracker.in_active_quest()) return;
+    const auto area = g_monster_tracker.player_area();
+    if (area == 0u) return;
     const auto effect = ctx.gpr[4];
     auto &memory = rt.memory();
     if (effect == 0 || !memory.contains(effect + 0x64u, 4)) return;
     const float ramp = std::bit_cast<float>(memory.load32(effect + 0x64u));
-    if (!std::isfinite(ramp) || ramp < 0.0f || ramp > 0.41f) return;
+    if (!std::isfinite(ramp) || ramp < 0.0f || ramp > 0.45f) return;
     g_swamp_whitening = std::min(ramp / 0.4f, 1.0f);
+    g_swamp_whitening_area = area;
     g_swamp_whitening_sample_us = rt.now_us();
 }
 void on_swamp_effect19_update(Runtime &rt, Context &ctx) { trace_swamp_effect(rt, ctx, 19u); }
@@ -953,10 +956,49 @@ void on_stage_fog_draw(Runtime &rt, Context &ctx) {
                  state[5] & 0xffffu, state[5] >> 16u, state[6]);
 }
 
+// World-locked per-area 64x64 cached terrain heightfield probed progressively via HitManager::GetGroundHit().
+// Once a cell (gx, gz) is probed, its ground height is locked for the duration of the area so mist conforms
+// to real slopes/banks while NEVER rising or falling as the hunter walks uphill!
+struct AreaHeightCache {
+    static constexpr std::uint32_t kN = mhf::psp::GroundHeightField::kSize;
+    static constexpr float kCellCm = 150.0f; // 64 * 150 = 9600 cm (96m x 96m)
+    std::uint16_t area = 0u;
+    float origin_x = 0.0f;
+    float origin_z = 0.0f;
+    float basin_y = 0.0f;
+    std::uint32_t revision = 0u;
+    bool initialized = false;
+    std::array<float, kN * kN> heights{};
+    std::array<std::uint8_t, kN * kN> state{}; // 0=unprobed, 1=valid, 2=invalid/void
+    std::shared_ptr<const std::array<float, kN * kN>> published;
+
+    void reset(std::uint16_t new_area, float cx, float cz, float base_y) {
+        area = new_area;
+        origin_x = std::floor((cx - 0.5f * kCellCm * static_cast<float>(kN)) / kCellCm) * kCellCm;
+        origin_z = std::floor((cz - 0.5f * kCellCm * static_cast<float>(kN)) / kCellCm) * kCellCm;
+        basin_y = base_y;
+        heights.fill(mhf::psp::GroundHeightField::kInvalidHeight);
+        state.fill(0u);
+        ++revision;
+        published = std::make_shared<const std::array<float, kN * kN>>(heights);
+        initialized = true;
+    }
+
+    void clear() {
+        area = 0u;
+        initialized = false;
+        published.reset();
+    }
+};
+AreaHeightCache g_area_height_cache;
+
 void sample_mist_ground(Runtime &rt, const Context &ctx) {
     g_mist_ground.reset();
     const auto area = g_monster_tracker.player_area();
-    if (!g_monster_tracker.in_active_quest() || area == 0) return;
+    if (!g_monster_tracker.in_active_quest() || area == 0) {
+        g_area_height_cache.clear();
+        return;
+    }
 
     auto &memory = rt.memory();
     static const bool profile = [] {
@@ -977,16 +1019,20 @@ void sample_mist_ground(Runtime &rt, const Context &ctx) {
     if (!scratch) scratch = rt.allocate_kernel_block("mist-ground-query", 32);
     if (!scratch) return;
     const auto aligned = (*scratch + 15u) & ~15u;
-    memory.store32(aligned, std::bit_cast<std::uint32_t>(point[0]));
-    memory.store32(aligned + 4, std::bit_cast<std::uint32_t>(point[1] + 40.0f));
-    memory.store32(aligned + 8, std::bit_cast<std::uint32_t>(point[2]));
-    memory.store32(aligned + 12, std::bit_cast<std::uint32_t>(1.0f));
 
-    auto query = ctx;
-    query.gpr[4] = manager;
-    query.gpr[5] = aligned;
-    rt.call(query, *region::mh_ground_height_query);
-    const float ground = query.fpr[0];
+    auto probe_ground = [&](float wx, float wy_start, float wz) -> float {
+        memory.store32(aligned, std::bit_cast<std::uint32_t>(wx));
+        memory.store32(aligned + 4, std::bit_cast<std::uint32_t>(wy_start));
+        memory.store32(aligned + 8, std::bit_cast<std::uint32_t>(wz));
+        memory.store32(aligned + 12, std::bit_cast<std::uint32_t>(1.0f));
+        auto query = ctx;
+        query.gpr[4] = manager;
+        query.gpr[5] = aligned;
+        rt.call(query, *region::mh_ground_height_query);
+        return query.fpr[0];
+    };
+
+    const float ground = probe_ground(point[0], point[1] + 40.0f, point[2]);
     if (!std::isfinite(ground) || std::fabs(ground - point[1]) > 120.0f) return;
     if (profile) {
         static unsigned samples = 0;
@@ -996,6 +1042,49 @@ void sample_mist_ground(Runtime &rt, const Context &ctx) {
     }
     point[1] = ground;
     g_mist_ground = MistGroundSample{point, area};
+
+    // Progressive amortized 64x64 XZ heightfield probing (up to 20 uncached cells per 30 Hz frame).
+    if (!g_area_height_cache.initialized || g_area_height_cache.area != area) {
+        g_area_height_cache.reset(area, point[0], point[2], ground);
+    }
+    const int hx = static_cast<int>(std::floor((point[0] - g_area_height_cache.origin_x) / AreaHeightCache::kCellCm));
+    const int hz = static_cast<int>(std::floor((point[2] - g_area_height_cache.origin_z) / AreaHeightCache::kCellCm));
+    constexpr int kMaxProbesPerFrame = 20;
+    constexpr int kProbeRadius = 18; // 18 * 1.5m = 27m radius around hunter
+    const float probe_top_y = std::max(point[1], g_area_height_cache.basin_y) + 340.0f;
+    int probed = 0;
+    bool dirty = false;
+    for (int r = 0; r <= kProbeRadius && probed < kMaxProbesPerFrame; ++r) {
+        for (int dz = -r; dz <= r && probed < kMaxProbesPerFrame; ++dz) {
+            for (int dx = -r; dx <= r && probed < kMaxProbesPerFrame; ++dx) {
+                if (r > 0 && std::abs(dx) != r && std::abs(dz) != r) continue;
+                const int gx = hx + dx;
+                const int gz = hz + dz;
+                if (gx < 0 || gx >= static_cast<int>(AreaHeightCache::kN) ||
+                    gz < 0 || gz >= static_cast<int>(AreaHeightCache::kN)) {
+                    continue;
+                }
+                const std::size_t idx = static_cast<std::size_t>(gz) * AreaHeightCache::kN + static_cast<std::size_t>(gx);
+                if (g_area_height_cache.state[idx] != 0u) continue;
+                const float wx = g_area_height_cache.origin_x + (static_cast<float>(gx) + 0.5f) * AreaHeightCache::kCellCm;
+                const float wz = g_area_height_cache.origin_z + (static_cast<float>(gz) + 0.5f) * AreaHeightCache::kCellCm;
+                const float h = probe_ground(wx, probe_top_y, wz);
+                if (std::isfinite(h) && std::fabs(h - g_area_height_cache.basin_y) <= 550.0f) {
+                    g_area_height_cache.heights[idx] = h;
+                    g_area_height_cache.state[idx] = 1u;
+                    dirty = true;
+                } else {
+                    g_area_height_cache.state[idx] = 2u;
+                }
+                ++probed;
+            }
+        }
+    }
+    if (dirty) {
+        ++g_area_height_cache.revision;
+        g_area_height_cache.published = std::make_shared<const std::array<float, AreaHeightCache::kN * AreaHeightCache::kN>>(
+            g_area_height_cache.heights);
+    }
 #else
     (void)ctx;
 #endif
@@ -1033,12 +1122,12 @@ void publish_fog_camera(Runtime &rt, mhf::psp::Frontend &frontend) {
         pose.hunter_feet = g_monster_tracker.player_pos();
         pose.ground_area = g_monster_tracker.player_area();
         const auto now = rt.now_us();
-        if (pose.ground_area == kSwampWeatherArea && g_swamp_whitening_sample_us != 0 &&
+        if (g_swamp_whitening_area == pose.ground_area && g_swamp_whitening_sample_us != 0 &&
             now >= g_swamp_whitening_sample_us && now - g_swamp_whitening_sample_us < 250'000u) {
             pose.ground_mist_weather = g_swamp_whitening;
         } else {
             g_swamp_whitening_sample_us = 0;
-            if (pose.ground_area == kSwampWeatherArea) pose.ground_mist_weather = 0.0f;
+            g_swamp_whitening_area = 0u;
         }
         if (g_mist_ground && g_mist_ground->area == g_monster_tracker.player_area()) {
             const auto &sample = g_mist_ground->point;
@@ -1048,6 +1137,29 @@ void publish_fog_camera(Runtime &rt, mhf::psp::Frontend &frontend) {
         }
         pose.has_hunter_feet = std::all_of(pose.hunter_feet.begin(), pose.hunter_feet.end(),
                                            [](float value) { return std::isfinite(value); });
+        // Populate area-space wake actors: hunter (slot 0) + active large monsters in the same area!
+        if (pose.has_hunter_feet) {
+            pose.wake_actors[pose.wake_actor_count++] = {
+                pose.hunter_feet[0], pose.hunter_feet[1], pose.hunter_feet[2], 74.0f
+            };
+        }
+        for (const auto &mon : g_monster_tracker.large_monsters()) {
+            if (pose.wake_actor_count >= mhf::psp::SceneCamera::kMaxWakeActors) break;
+            if (mon.area != pose.ground_area || mon.hp <= 0) continue;
+            if (!std::all_of(mon.pos.begin(), mon.pos.end(), [](float v) { return std::isfinite(v); })) continue;
+            const float rad = (mon.max_hp > 3500) ? 185.0f : 145.0f;
+            pose.wake_actors[pose.wake_actor_count++] = {mon.pos[0], mon.pos[1], mon.pos[2], rad};
+        }
+        if (g_area_height_cache.initialized && g_area_height_cache.area == pose.ground_area &&
+            g_area_height_cache.published) {
+            pose.heightfield.origin_x = g_area_height_cache.origin_x;
+            pose.heightfield.origin_z = g_area_height_cache.origin_z;
+            pose.heightfield.cell_size = AreaHeightCache::kCellCm;
+            pose.heightfield.revision = g_area_height_cache.revision;
+            pose.heightfield.area = g_area_height_cache.area;
+            pose.heightfield.valid = true;
+            pose.heightfield.heights = g_area_height_cache.published;
+        }
     }
     frontend.set_scene_camera(pose);
 }
@@ -1766,6 +1878,7 @@ int main(int argc, char **argv) {
             frontend.set_shadow_zone_suns(shadow_zone_suns());
             frontend.set_shadow_zones({std::begin(kShadowZoneNames), std::end(kShadowZoneNames)}, shadow_zone_textures());
             frontend.set_shadow_zone_biomes(shadow_zone_biomes());
+            frontend.set_shadow_zone_mist_profiles(shadow_zone_mist_profiles());
             frontend.set_hud(hud_size);
             frontend.set_widescreen(widescreen);
             const char *shadow_env = std::getenv("MHF_SHADOW"); // MHF_SHADOW=1 turns them on as --projected-shadows does

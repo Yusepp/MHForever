@@ -94,6 +94,13 @@ bool FroxelFog::init(const Context &ctx, VkDescriptorSetLayout bindless_layout) 
         shutdown(ctx);
         return false;
     }
+    VkSamplerCreateInfo nsci = sci;
+    nsci.magFilter = VK_FILTER_NEAREST;
+    nsci.minFilter = VK_FILTER_NEAREST;
+    if (vkCreateSampler(ctx.device, &nsci, nullptr, &sampler_nearest_) != VK_SUCCESS) {
+        shutdown(ctx);
+        return false;
+    }
 
     const VkImageUsageFlags vol_usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     const VkImageUsageFlags fb_usage  = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -105,10 +112,27 @@ bool FroxelFog::init(const Context &ctx, VkDescriptorSetLayout bindless_layout) 
         !create_tex2d(ctx, fluid_state_[1], kFluidSize, kFluidSize, VK_FORMAT_R16G16B16A16_SFLOAT, vol_usage) ||
         !create_tex2d(ctx, fluid_press_[0], kFluidSize, kFluidSize, VK_FORMAT_R16G16_SFLOAT, vol_usage) ||
         !create_tex2d(ctx, fluid_press_[1], kFluidSize, kFluidSize, VK_FORMAT_R16G16_SFLOAT, vol_usage) ||
-        !create_tex2d(ctx, fallback_fluid_, 1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, fb_usage)) {
+        !create_tex2d(ctx, fallback_fluid_, 1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, fb_usage) ||
+        !create_tex2d(ctx, heightfield_tex_, GroundHeightField::kSize, GroundHeightField::kSize, VK_FORMAT_R32_SFLOAT, fb_usage) ||
+        !create_tex2d(ctx, fallback_hf_, 1u, 1u, VK_FORMAT_R32_SFLOAT, fb_usage)) {
         shutdown(ctx);
         return false;
     }
+
+    // 16 KB host-mapped staging buffer for 64x64 R32F terrain heightfield uploads (copied only when revision changes).
+    constexpr VkDeviceSize kHfBytes = static_cast<VkDeviceSize>(GroundHeightField::kSize) * GroundHeightField::kSize * sizeof(float);
+    VkBufferCreateInfo hbci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, kHfBytes,
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
+    VmaAllocationCreateInfo hvaci{};
+    hvaci.usage = VMA_MEMORY_USAGE_AUTO;
+    hvaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo hinfo{};
+    if (vmaCreateBuffer(ctx.allocator, &hbci, &hvaci, &hf_stage_buf_, &hf_stage_alloc_, &hinfo) != VK_SUCCESS ||
+        !hinfo.pMappedData) {
+        shutdown(ctx);
+        return false;
+    }
+    hf_stage_mapped_ = hinfo.pMappedData;
 
     // Layout 1: 1 storage image + 1 combined sampler (froxel inject/integrate, fluid advect, fluid jacobi).
     VkDescriptorSetLayoutBinding wb[2]{};
@@ -130,11 +154,12 @@ bool FroxelFog::init(const Context &ctx, VkDescriptorSetLayout bindless_layout) 
     pb[2] = {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo pdsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, pb};
 
-    // Layout 4 (Set 2 for lighting_composite.comp): 2 combined samplers (3D froxel + 2D Navier-Stokes fluid).
-    VkDescriptorSetLayoutBinding sb[2]{};
+    // Layout 4 (Set 2 for lighting_composite.comp): 3 combined samplers (3D froxel + 2D Navier-Stokes fluid + 2D heightfield).
+    VkDescriptorSetLayoutBinding sb[3]{};
     sb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     sb[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-    VkDescriptorSetLayoutCreateInfo sdsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, sb};
+    sb[2] = {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo sdsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, sb};
 
     if (vkCreateDescriptorSetLayout(ctx.device, &wdsl, nullptr, &work_set_layout_) != VK_SUCCESS ||
         vkCreateDescriptorSetLayout(ctx.device, &vdsl, nullptr, &vort_div_layout_) != VK_SUCCESS ||
@@ -147,7 +172,7 @@ bool FroxelFog::init(const Context &ctx, VkDescriptorSetLayout bindless_layout) 
     // 15 descriptor sets total: 4 froxel + 2 advect + 2 vort_div + 2 jacobi + 2 project + 3 sample.
     VkDescriptorPoolSize psizes[2]{
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 16u},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 24u},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 27u},
     };
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 15u, 2u, psizes};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &pool_) != VK_SUCCESS) {
@@ -230,17 +255,19 @@ bool FroxelFog::init(const Context &ctx, VkDescriptorSetLayout bindless_layout) 
     write_project(project_sets_[0], fluid_state_[0].view, fluid_state_[1].view, fluid_press_[0].view);
     write_project(project_sets_[1], fluid_state_[1].view, fluid_state_[0].view, fluid_press_[0].view);
 
-    auto write_sample = [&](VkDescriptorSet ds, VkImageView vol3d_v, VkImageView fluid2d_v) {
+    auto write_sample = [&](VkDescriptorSet ds, VkImageView vol3d_v, VkImageView fluid2d_v, VkImageView hf_v) {
         VkDescriptorImageInfo i3{sampler3d_, vol3d_v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo i2{sampler2d_, fluid2d_v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet w[2]{};
+        VkDescriptorImageInfo ih{sampler_nearest_, hf_v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w[3]{};
         w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, ds, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &i3, nullptr, nullptr};
         w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, ds, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &i2, nullptr, nullptr};
-        vkUpdateDescriptorSets(ctx.device, 2, w, 0, nullptr);
+        w[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, ds, 2, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ih, nullptr, nullptr};
+        vkUpdateDescriptorSets(ctx.device, 3, w, 0, nullptr);
     };
-    write_sample(sample_sets_[0],      integ_vol_.view,    fluid_state_[0].view);
-    write_sample(sample_sets_[1],      integ_vol_.view,    fluid_state_[1].view);
-    write_sample(fallback_sample_set_, fallback_vol_.view, fallback_fluid_.view);
+    write_sample(sample_sets_[0],      integ_vol_.view,    fluid_state_[0].view, heightfield_tex_.view);
+    write_sample(sample_sets_[1],      integ_vol_.view,    fluid_state_[1].view, heightfield_tex_.view);
+    write_sample(fallback_sample_set_, fallback_vol_.view, fallback_fluid_.view, fallback_hf_.view);
 
     VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkDeviceAddress)};
     VkDescriptorSetLayout inj_layouts[2] = {bindless_layout, work_set_layout_};
@@ -292,17 +319,28 @@ void FroxelFog::shutdown(const Context &ctx) {
     ds(work_set_layout_); ds(vort_div_layout_); ds(project_layout_); ds(sample_set_layout_);
     if (sampler3d_ != VK_NULL_HANDLE) { vkDestroySampler(ctx.device, sampler3d_, nullptr); sampler3d_ = VK_NULL_HANDLE; }
     if (sampler2d_ != VK_NULL_HANDLE) { vkDestroySampler(ctx.device, sampler2d_, nullptr); sampler2d_ = VK_NULL_HANDLE; }
+    if (sampler_nearest_ != VK_NULL_HANDLE) { vkDestroySampler(ctx.device, sampler_nearest_, nullptr); sampler_nearest_ = VK_NULL_HANDLE; }
+    if (hf_stage_buf_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(ctx.allocator, hf_stage_buf_, hf_stage_alloc_);
+        hf_stage_buf_ = VK_NULL_HANDLE;
+        hf_stage_alloc_ = VK_NULL_HANDLE;
+        hf_stage_mapped_ = nullptr;
+    }
     scatter_vol_[0].destroy(ctx); scatter_vol_[1].destroy(ctx);
     integ_vol_.destroy(ctx); fallback_vol_.destroy(ctx);
     fluid_state_[0].destroy(ctx); fluid_state_[1].destroy(ctx);
     fluid_press_[0].destroy(ctx); fluid_press_[1].destroy(ctx);
     fallback_fluid_.destroy(ctx);
+    heightfield_tex_.destroy(ctx);
+    fallback_hf_.destroy(ctx);
     history_valid_ = false;
     fallback_cleared_ = false;
     zone_floor_valid_ = false;
     zone_floor_frames_ = 0u;
     fluid_valid_ = false;
     prev_actor_count_ = 0u;
+    uploaded_hf_rev_ = 0u;
+    uploaded_hf_area_ = 0u;
 }
 
 void FroxelFog::ensure_fallback(VkCommandBuffer cmd) {
@@ -333,6 +371,24 @@ void FroxelFog::ensure_fallback(VkCommandBuffer cmd) {
                                   VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     fallback_fluid_.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    auto clear_hf = [&](VolTex &t) {
+        if (t.image == VK_NULL_HANDLE) return;
+        Context::cmd_transition_image(cmd, t.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkClearColorValue chf{};
+        chf.float32[0] = GroundHeightField::kInvalidHeight;
+        vkCmdClearColorImage(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &chf, 1, &rng);
+        Context::cmd_transition_image(cmd, t.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        t.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    };
+    clear_hf(fallback_hf_);
+    clear_hf(heightfield_tex_);
     fallback_cleared_ = true;
 }
 
@@ -340,7 +396,10 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
                          const float view_mat[16], const float inv_view[16],
                          const float proj[16], const float sun_dir_view[4],
                          const float fog_color_lin[4], const float scatter_color_lin[4],
-                         float elapsed_sec, float vapor_strength, std::uint64_t frame_idx, bool ground_mist_only, std::uint16_t ground_area,
+                         float elapsed_sec, float vapor_strength, std::uint64_t frame_idx,
+                         bool ground_mist_only, std::uint16_t ground_area,
+                         float wind_x, float wind_z,
+                         const GroundHeightField *heightfield,
                          std::uint32_t noise3d_slot, std::uint32_t linear_sampler,
                          std::uint32_t shadow_map_slot, std::uint32_t nearest_sampler,
                          const float *shadow_from_view, std::uint32_t rt_shadow_slot,
@@ -349,7 +408,7 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
                          void *inject_cpu, VkDeviceAddress inject_bda,
                          void *integ_cpu, VkDeviceAddress integ_bda,
                          void *fluid_cpu, VkDeviceAddress fluid_bda,
-                         float out_ground_info[4]) {
+                         float out_ground_info[4], float out_hf_info[4]) {
     if (!ready() || !view_mat || !inv_view || !inject_cpu || !integ_cpu || !fluid_cpu) return false;
     ensure_fallback(cmd);
 
@@ -467,6 +526,10 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
         fp.shift_and_t[1] = static_cast<float>(shift_z);
         fp.shift_and_t[2] = elapsed_sec;
         fp.shift_and_t[3] = reset_fluid ? 1.0f : 0.0f;
+        fp.wind_info[0] = wind_x;
+        fp.wind_info[1] = wind_z;
+        fp.wind_info[2] = 0.0f;
+        fp.wind_info[3] = 0.0f;
         fp.counts[0] = n_act;
         for (std::uint32_t i = 0u; i < n_act; ++i) {
             const FogActor &a = actors[i];
@@ -541,6 +604,43 @@ bool FroxelFog::dispatch(VkCommandBuffer cmd, VkDescriptorSet bindless_set,
         out_ground_info[1] = zone_floor_y_;
         out_ground_info[2] = origin_z;
         out_ground_info[3] = kFluidWorldSize;
+    }
+
+    // 1b. Upload cached 64x64 R32F world-locked XZ terrain heightfield only when revision/area changes.
+    if (out_hf_info) {
+        out_hf_info[0] = 0.0f;
+        out_hf_info[1] = 0.0f;
+        out_hf_info[2] = 150.0f;
+        out_hf_info[3] = 0.0f;
+    }
+    if (heightfield && heightfield->valid && heightfield->heights &&
+        heightfield_tex_.image != VK_NULL_HANDLE && hf_stage_mapped_ != nullptr) {
+        if (heightfield->revision != uploaded_hf_rev_ || heightfield->area != uploaded_hf_area_) {
+            std::memcpy(hf_stage_mapped_, heightfield->heights->data(),
+                        heightfield->heights->size() * sizeof(float));
+            Context::cmd_transition_image(cmd, heightfield_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                          heightfield_tex_.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {GroundHeightField::kSize, GroundHeightField::kSize, 1u};
+            vkCmdCopyBufferToImage(cmd, hf_stage_buf_, heightfield_tex_.image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            Context::cmd_transition_image(cmd, heightfield_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            heightfield_tex_.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            uploaded_hf_rev_ = heightfield->revision;
+            uploaded_hf_area_ = heightfield->area;
+        }
+        if (out_hf_info) {
+            out_hf_info[0] = heightfield->origin_x;
+            out_hf_info[1] = heightfield->origin_z;
+            out_hf_info[2] = heightfield->cell_size;
+            out_hf_info[3] = static_cast<float>(GroundHeightField::kSize);
+        }
     }
 
     // 2. 3D Froxel Volume (160x90x64) for upper-air valley atmosphere, sun shafts & point lights.

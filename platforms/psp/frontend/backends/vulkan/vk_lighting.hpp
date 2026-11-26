@@ -73,8 +73,11 @@ struct alignas(16) LightingComputeParams {
     float inv_view[16]{};           // column-major: PSP view (+Y up) -> world space (cm)
     float env_time[4]{};            // x = elapsed_sec, y = cam_world_y, z = vapor_strength, w = has_inv_view
     float ground_fog_info[4]{};     // x = fluid_origin_x, y = ground_floor_y, z = fluid_origin_z, w = fluid_world_size
+    float mist_shape[4]{};          // x = base_h_cm, y = surge_h_cm, z = base_dens, w = surge_dens
+    float mist_tint[4]{};           // rgb = multiplicative mist tint, w = mist_enabled (1.0 or 0.0)
+    float ground_hf_info[4]{};      // x = hf_origin_x, y = hf_origin_z, z = hf_cell_size, w = hf_grid_n (64.0 or 0.0)
 };
-static_assert(sizeof(LightingComputeParams) == 432);
+static_assert(sizeof(LightingComputeParams) == 480);
 
 struct alignas(16) TaaComputeParams {
     float proj_info[4]{};       // x = 1/p00, y = 1/p11, z = p10, w = p14
@@ -257,6 +260,7 @@ private:
         float sun_height_deg = -1.0f;
         float sun_darkness = -1.0f;
         float sun_turn = 0.0f;
+        GroundMistProfile mist{};
     };
     std::vector<ZoneInfo> zones_;
     std::unordered_map<std::uint32_t, int> tex_to_zone_;
