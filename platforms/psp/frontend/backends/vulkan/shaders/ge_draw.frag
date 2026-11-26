@@ -217,5 +217,13 @@ void main() {
     } else {
         o_color = clamp(c, 0.0, 1.0);
     }
-    o_mat_id = mat_id;
+    // Discard nearly-invisible water fade-out fragments (e.g. ocean quads extending inland over sand with c.a -> 0)
+    // so they never overwrite the underlying terrain's MaterialClass in the non-blended R8_UINT MRT!
+    if ((mat_id == 1u || mat_id == 2u) && c.a < 0.05) {
+        discard;
+    }
+    // Pack MaterialClass (low 4 bits) + surface opacity (high 4 bits, 0..15) into the single R8_UINT byte
+    // so water reflections & ripples fade smoothly along vertex-alpha shorelines with zero hard quad edges!
+    uint a4 = uint(clamp(c.a, 0.0, 1.0) * 15.0 + 0.5);
+    o_mat_id = (mat_id & 0xFu) | (a4 << 4u);
 }

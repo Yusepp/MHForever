@@ -309,9 +309,11 @@ void main() {
                 sun_shadow = mix(1.0, lit * 0.25, border_fade);
             }
         }
-        // Fetch categorical MaterialClass from dedicated R8_UINT MRT (0 = Unknown).
+        // Fetch categorical MaterialClass (low 4 bits) + surface opacity (high 4 bits) from R8_UINT MRT.
         ivec2 mat_max = max(textureSize(u_mat_id, 0) - ivec2(1), ivec2(0));
-        uint mat_id = texelFetch(u_mat_id, clamp(ip, ivec2(0), mat_max), 0).r;
+        uint mat_raw = texelFetch(u_mat_id, clamp(ip, ivec2(0), mat_max), 0).r;
+        uint mat_id = mat_raw & 0xFu;
+        float mat_alpha = float(mat_raw >> 4u) / 15.0;
 
         // Filament-style Material-Aware AO: decouple indirect diffuse AO from direct sunlight/contact shadows
         // and prevent SSAO from muddying water, snow, foliage, or emissives.
@@ -396,9 +398,10 @@ void main() {
         //     Foreground-Safe Refraction & Half-Res Hi-Z SSR + Semantic Sky/Canopy Fallback!
         //     Strictly gated on categorical R8_UINT MaterialClass (1 = Water, 2 = ShallowWater):
         //     zero color heuristics, zero read-while-write hazards, 0ms on dry surfaces!
-        if ((p.ext_slots.w & 128u) != 0u && (mat_id == 1u || mat_id == 2u)) {
+        if ((p.ext_slots.w & 128u) != 0u && (mat_id == 1u || mat_id == 2u) && mat_alpha > 0.05) {
             bool shallow = (mat_id == 2u);
             float t_w = p.env_time.x;
+            float w_mask = smoothstep(0.05, 0.65, mat_alpha);
 
             // Compute area-space world position & 2-layer animated wave normal (100% camera-independent).
             vec3 N_water = N;
@@ -449,7 +452,7 @@ void main() {
                         vec3 scatter_col = (bid == 11u) ? vec3(0.04, 0.06, 0.05)
                                          : (bid == 10u) ? vec3(0.02, 0.11, 0.14)
                                                         : vec3(0.03, 0.10, 0.14);
-                        col_lin = mix(col_lin, bg_lin * T_water + scatter_col * (1.0 - T_water), 0.32);
+                        col_lin = mix(col_lin, bg_lin * T_water + scatter_col * (1.0 - T_water), 0.32 * w_mask);
                     }
                     // Subtle animated shoreline foam where water meets solid banks/legs.
                     float foam_edge = (1.0 - smoothstep(2.0, 26.0, thickness)) * smoothstep(0.5, 4.0, thickness);
@@ -457,7 +460,7 @@ void main() {
                         float fn = (p.shadow_info.w != 0u)
                             ? sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(uv * 14.0 + vec2(t_w * 0.06), 0.22))
                             : 0.5;
-                        float foam = foam_edge * smoothstep(0.32, 0.72, fn) * 0.32;
+                        float foam = foam_edge * smoothstep(0.32, 0.72, fn) * 0.32 * w_mask;
                         col_lin = mix(col_lin, vec3(0.75, 0.82, 0.85) * mix(0.45, 1.0, sun_shadow), foam);
                     }
                 }
@@ -468,7 +471,7 @@ void main() {
                 vec4 ssr = texture(sampler2D(u_textures[p.ext_slots.y], u_samplers[p.aux_slots.y]), uv);
                 float ndotv = clamp(dot(N_water, V), 0.0, 1.0);
                 float fresnel = 0.02 + 0.98 * pow(1.0 - ndotv, 5.0);
-                float refl_str = clamp(fresnel * (shallow ? 0.45 : 0.75), 0.05, shallow ? 0.36 : 0.62);
+                float refl_str = clamp(fresnel * (shallow ? 0.45 : 0.75), 0.05, shallow ? 0.36 : 0.62) * w_mask;
                 col_lin = mix(col_lin, ssr.rgb, refl_str);
             }
 
@@ -476,7 +479,7 @@ void main() {
             if (!is_cave) {
                 vec3 H_w = normalize(L + V);
                 float ndoth = clamp(dot(N_water, H_w), 0.0, 1.0);
-                float glint = pow(ndoth, shallow ? 96.0 : 160.0) * sun_shadow * (shallow ? 0.55 : 0.95);
+                float glint = pow(ndoth, shallow ? 96.0 : 160.0) * sun_shadow * (shallow ? 0.55 : 0.95) * w_mask;
                 col_lin += vec3(1.0, 0.96, 0.88) * glint;
             }
         }
@@ -699,7 +702,7 @@ void main() {
     // 11. Optional MHF_VK_DEBUG_MAT=1 categorical MaterialClass audit overlay.
     if ((p.ext_slots.w & 64u) != 0u) {
         ivec2 dm_max = max(textureSize(u_mat_id, 0) - ivec2(1), ivec2(0));
-        uint dm = texelFetch(u_mat_id, clamp(ip, ivec2(0), dm_max), 0).r;
+        uint dm = texelFetch(u_mat_id, clamp(ip, ivec2(0), dm_max), 0).r & 0xFu;
         vec3 dbg = vec3(0.35);
         if (dm == 1u)       dbg = vec3(0.10, 0.45, 1.00); // Water (blue)
         else if (dm == 2u)  dbg = vec3(0.10, 0.90, 0.95); // ShallowWater (cyan)

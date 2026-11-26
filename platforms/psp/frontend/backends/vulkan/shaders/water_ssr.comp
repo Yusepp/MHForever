@@ -152,7 +152,8 @@ void main() {
 
     ivec2 full_ip = ip * 2;
     ivec2 mat_max = max(textureSize(u_mat_id, 0) - ivec2(1), ivec2(0));
-    uint mat_id = texelFetch(u_mat_id, clamp(full_ip, ivec2(0), mat_max), 0).r;
+    uint mat_raw = texelFetch(u_mat_id, clamp(full_ip, ivec2(0), mat_max), 0).r;
+    uint mat_id = mat_raw & 0xFu;
     if (mat_id != 1u && mat_id != 2u) {
         imageStore(u_ssr_out, ip, vec4(0.0));
         return;
