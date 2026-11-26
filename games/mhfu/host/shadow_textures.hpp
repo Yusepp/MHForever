@@ -345,19 +345,13 @@ inline std::vector<std::pair<std::uint8_t, bool>> shadow_zone_biomes() {
     return out;
 }
 
-// Per-zone ground-mist profiles aligned with kShadowZoneNames (Step 1 polish: Swamp area-by-area + MHFU maps).
+// Per-zone ground-mist profiles aligned with kShadowZoneNames.
 inline std::vector<mhf::psp::GroundMistProfile> shadow_zone_mist_profiles() {
-    auto is_cave_zone = [](std::string_view name) {
-        for (const char *c : kShadowCaveZones) {
-            if (name == c) return true;
-        }
-        return false;
-    };
-    auto classify = [&](std::string_view name) -> mhf::psp::GroundMistProfile {
+    auto classify = [](std::string_view name) -> mhf::psp::GroundMistProfile {
         mhf::psp::GroundMistProfile p{};
-        const bool cave = is_cave_zone(name);
 
-        // 1. New Swamp (Areas 4, 5, 6, 8 = marsh basins; Area 3 = subtle damp cave wisp; BC/1/2/7/9 = OFF).
+        // Regular Swamp marsh basins ONLY (Areas 4, 5, 6).
+        // Area 8 (dense vegetation), caves (3, 7, 9), dry hills (BC, 1, 2), and all other maps stay OFF.
         if (name.find("hunting/swamp/") != std::string_view::npos) {
             if (name.ends_with("/area6")) {
                 p.enabled = true; p.ground_mist_only = true;
@@ -371,92 +365,13 @@ inline std::vector<mhf::psp::GroundMistProfile> shadow_zone_mist_profiles() {
                 p.base_density = 0.15f;   p.surge_density = 0.34f;
                 p.wind_x = 0.70f; p.wind_z = 0.55f;
                 p.tint[0] = 0.90f; p.tint[1] = 0.94f; p.tint[2] = 1.08f;
-            } else if (name.ends_with("/area4") || name.ends_with("/area8")) {
+            } else if (name.ends_with("/area4")) {
                 p.enabled = true; p.ground_mist_only = true;
                 p.base_height_cm = 21.0f; p.surge_height_cm = 70.0f;
                 p.base_density = 0.13f;   p.surge_density = 0.32f;
                 p.wind_x = 0.80f; p.wind_z = 0.40f;
                 p.tint[0] = 0.95f; p.tint[1] = 0.98f; p.tint[2] = 1.04f;
-            } else if (name.ends_with("/area3")) {
-                p.enabled = true; p.ground_mist_only = true;
-                p.base_height_cm = 14.0f; p.surge_height_cm = 28.0f;
-                p.base_density = 0.06f;   p.surge_density = 0.12f;
-                p.wind_x = 0.35f; p.wind_z = 0.25f;
-                p.tint[0] = 0.86f; p.tint[1] = 0.92f; p.tint[2] = 1.02f;
             }
-            return p;
-        }
-
-        // 2. Old Swamp (marsh basins 1, 2, 4, 5, 6, 10; caves 7/8/11 & BC/3/9 OFF).
-        if (name.find("hunting/old_swamp/") != std::string_view::npos) {
-            if (!cave && (name.ends_with("/area1") || name.ends_with("/area2") ||
-                          name.ends_with("/area4") || name.ends_with("/area5") ||
-                          name.ends_with("/area6") || name.ends_with("/area10"))) {
-                p.enabled = true; p.ground_mist_only = true;
-                p.base_height_cm = 22.0f; p.surge_height_cm = 68.0f;
-                p.base_density = 0.13f;   p.surge_density = 0.30f;
-                p.wind_x = 0.75f; p.wind_z = 0.45f;
-                p.tint[0] = 0.92f; p.tint[1] = 0.97f; p.tint[2] = 1.04f;
-            }
-            return p;
-        }
-
-        // 3. Great Forest (ancient mossy floor Areas 1..7; skip BC & Area 8 cliff overlook).
-        if (name.find("hunting/great_forest/") != std::string_view::npos) {
-            if (!name.ends_with("/base") && !name.ends_with("/area8")) {
-                p.enabled = true; p.ground_mist_only = true;
-                p.base_height_cm = 20.0f; p.surge_height_cm = 48.0f;
-                p.base_density = 0.11f;   p.surge_density = 0.22f;
-                p.wind_x = 0.55f; p.wind_z = 0.35f;
-                p.tint[0] = 0.92f; p.tint[1] = 1.04f; p.tint[2] = 0.96f;
-            }
-            return p;
-        }
-
-        // 4. Snowy Mountains Peak (Areas 6, 7, 8 & peak: wind-driven low spindrift snow drift).
-        if (name.find("hunting/snowy_mountains") != std::string_view::npos) {
-            if (!cave && (name.find("peak") != std::string_view::npos || name.ends_with("/area6") ||
-                          name.ends_with("/area7") || name.ends_with("/area8"))) {
-                p.enabled = true; p.ground_mist_only = true;
-                p.base_height_cm = 20.0f; p.surge_height_cm = 44.0f;
-                p.base_density = 0.12f;   p.surge_density = 0.26f;
-                p.wind_x = 4.20f; p.wind_z = 2.10f;
-                p.tint[0] = 1.08f; p.tint[1] = 1.12f; p.tint[2] = 1.18f;
-            }
-            return p;
-        }
-
-        // 5. Desert Area 2 Sandstorm ONLY (low blowing golden-ochre sand drift; all other Desert areas OFF).
-        if (name.find("hunting/desert/area2") != std::string_view::npos) {
-            p.enabled = true; p.ground_mist_only = true;
-            p.base_height_cm = 28.0f; p.surge_height_cm = 56.0f;
-            p.base_density = 0.16f;   p.surge_density = 0.30f;
-            p.wind_x = 5.40f; p.wind_z = 2.40f;
-            p.tint[0] = 1.24f; p.tint[1] = 1.02f; p.tint[2] = 0.72f;
-            return p;
-        }
-
-        // 6. Jungle & Old Jungle humid interiors (Areas 3, 4, 6, 7; skip sunny beaches 1/2/9 & caves).
-        if (name.find("hunting/jungle/") != std::string_view::npos ||
-            name.find("hunting/old_jungle/") != std::string_view::npos) {
-            if (!cave && (name.ends_with("/area3") || name.ends_with("/area4") ||
-                          name.ends_with("/area6") || name.ends_with("/area7"))) {
-                p.enabled = true; p.ground_mist_only = true;
-                p.base_height_cm = 16.0f; p.surge_height_cm = 36.0f;
-                p.base_density = 0.08f;   p.surge_density = 0.18f;
-                p.wind_x = 0.60f; p.wind_z = 0.40f;
-                p.tint[0] = 0.90f; p.tint[1] = 1.02f; p.tint[2] = 1.00f;
-            }
-            return p;
-        }
-
-        // 7. Tower high-altitude cloud wisps.
-        if (name.find("hunting/tower/") != std::string_view::npos && !cave) {
-            p.enabled = true; p.ground_mist_only = true;
-            p.base_height_cm = 22.0f; p.surge_height_cm = 48.0f;
-            p.base_density = 0.10f;   p.surge_density = 0.22f;
-            p.wind_x = 2.10f; p.wind_z = 1.20f;
-            p.tint[0] = 1.06f; p.tint[1] = 1.08f; p.tint[2] = 1.12f;
             return p;
         }
 
