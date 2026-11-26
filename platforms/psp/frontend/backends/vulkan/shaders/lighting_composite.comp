@@ -440,7 +440,7 @@ void main() {
                     float ref_d = texelFetch(u_textures[p.phase1_slots.x], ref_ip, 0).r;
                     if (ref_d > d_here) {
                         vec3 bg_raw = texelFetch(u_textures[p.tex_slots.x], ref_ip, 0).rgb;
-                        vec3 bg_lin = ((p.phase1_slots.z & 1u) != 0u) ? bg_raw : srgb_to_linear_hdr(bg_raw);
+                        vec3 bg_lin = srgb_to_linear_hdr(bg_raw);
                         // Biome-calibrated Beer-Lambert absorption coefficients (1/cm).
                         vec3 sigma = (bid == 11u) ? vec3(0.014, 0.011, 0.016)
                                    : (bid == 10u) ? vec3(0.012, 0.005, 0.004)
@@ -468,7 +468,7 @@ void main() {
                 vec4 ssr = texture(sampler2D(u_textures[p.ext_slots.y], u_samplers[p.aux_slots.y]), uv);
                 float ndotv = clamp(dot(N_water, V), 0.0, 1.0);
                 float fresnel = 0.02 + 0.98 * pow(1.0 - ndotv, 5.0);
-                float refl_str = clamp(fresnel * (shallow ? 0.65 : 0.88), 0.04, shallow ? 0.52 : 0.78);
+                float refl_str = clamp(fresnel * (shallow ? 0.55 : 0.88), 0.06, shallow ? 0.42 : 0.75);
                 col_lin = mix(col_lin, ssr.rgb, refl_str);
             }
 

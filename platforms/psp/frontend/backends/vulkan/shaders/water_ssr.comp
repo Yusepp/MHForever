@@ -114,22 +114,22 @@ vec3 zone_env_fallback(WaterSsrParams p, vec3 R_world, float rt_sun) {
     vec3 zenith = horizon * 1.35 + vec3(0.06, 0.10, 0.18);
 
     if (is_cave || bid == 5u || bid == 3u) {
-        zenith = horizon * 0.55;
-        horizon *= 0.45;
-    } else if (bid == 11u) { // Swamp: muted overcast + dark marsh canopy
-        zenith = horizon * 1.15 + vec3(0.05, 0.07, 0.08);
-        horizon = mix(horizon, vec3(0.08, 0.11, 0.09), 0.35);
+        zenith = horizon * 0.45;
+        horizon *= 0.35;
+    } else if (bid == 11u) { // Swamp: dark, moody marsh reflection (never bright white/blue paint!)
+        zenith = horizon * 0.55 + vec3(0.02, 0.03, 0.04);
+        horizon = horizon * 0.40 + vec3(0.015, 0.02, 0.02);
     } else if (bid == 10u || bid == 9u) { // Jungle / Great Forest: lush green canopy + sky gaps
-        zenith = mix(vec3(0.08, 0.16, 0.10), horizon * 1.45 + vec3(0.08, 0.14, 0.22), smoothstep(0.60, 0.95, up));
+        zenith = mix(vec3(0.06, 0.13, 0.08), horizon * 1.15 + vec3(0.06, 0.12, 0.20), smoothstep(0.55, 0.92, up));
     } else if (bid == 6u || bid == 7u) { // Desert: bright warm sky
-        zenith = vec3(0.28, 0.46, 0.72);
+        zenith = vec3(0.24, 0.42, 0.68);
     } else if (bid == 2u || bid == 1u) { // Snowy Peak / Pokke: crisp cold sky
-        zenith = vec3(0.32, 0.50, 0.78);
+        zenith = vec3(0.26, 0.44, 0.72);
     } else if (bid == 12u) { // Volcano: dark warm ash sky
-        zenith = vec3(0.18, 0.08, 0.06);
+        zenith = vec3(0.14, 0.06, 0.04);
     }
 
-    vec3 env = mix(horizon * 0.85, zenith, pow(up, 0.65));
+    vec3 env = mix(horizon * 0.75, zenith, pow(up, 0.65));
     return env * mix(0.45, 1.0, rt_sun);
 }
 
@@ -159,8 +159,8 @@ void main() {
     }
 
     vec2 uv = (vec2(ip) + 0.5) / vec2(float(out_w), float(out_h));
-    ivec2 dsz = textureSize(u_textures[p.slots0.y], 0);
-    ivec2 full_max = max(dsz - ivec2(1), ivec2(0));
+    ivec2 scene_sz = ivec2(out_w * 2, out_h * 2);
+    ivec2 full_max = max(scene_sz - ivec2(1), ivec2(0));
     float d_here = texelFetch(u_textures[p.slots0.y], clamp(full_ip, ivec2(0), full_max), 0).r;
     if (d_here >= 0.99992 || d_here <= 0.00001) {
         imageStore(u_ssr_out, ip, vec4(0.0));
@@ -225,14 +225,14 @@ void main() {
                     mip -= 1;
                     continue;
                 }
-                float thick = 18.0 + step_sz * 1.45;
-                if (dz < thick && hz_z < z_eye + 120.0) {
-                    ivec2 qip = clamp(ivec2(q_uv * vec2(dsz)), ivec2(0), full_max);
+                float thick = 24.0 + step_sz * 1.65;
+                if (dz < thick && hz_z > 5.0) {
+                    ivec2 qip = clamp(ivec2(q_uv * vec2(scene_sz)), ivec2(0), full_max);
                     vec3 raw = texelFetch(u_textures[p.slots0.x], qip, 0).rgb;
-                    hit_col = ((p.extra_slots.w & 1u) != 0u) ? raw : srgb_to_linear_hdr(raw);
+                    hit_col = srgb_to_linear_hdr(raw);
                     float edge_x = smoothstep(0.005, 0.09, q_uv.x) * smoothstep(0.995, 0.91, q_uv.x);
                     float edge_y = smoothstep(0.005, 0.11, q_uv.y) * smoothstep(0.995, 0.89, q_uv.y);
-                    float dist_w = 1.0 - smoothstep(450.0, 1400.0, t);
+                    float dist_w = 1.0 - smoothstep(700.0, 2200.0, t);
                     float back_w = smoothstep(0.25, -0.15, R.z);
                     confidence = clamp(edge_x * edge_y * dist_w * back_w, 0.0, 1.0);
                     break;

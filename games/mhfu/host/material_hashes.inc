@@ -26,9 +26,8 @@ inline std::vector<mhf::psp::MaterialRegistryEntry> material_registry_entries() 
         out.push_back(mhf::psp::MaterialRegistryEntry{data_hash, 0u, -1, mat});
     };
 
-    // --- Swamp (Areas 4, 5, 6): Marsh water, puddles, haze cards, and foliage ---
-    for (std::uint32_t h : {0x0df1f49du, 0xd6abf5dfu, 0xfbe666ebu, 0x7f492b54u, 0xcd40fbf4u,
-                            0x6253df69u, 0x4c8bfc2bu, 0x73d6a710u, 0x775674cbu, 0xa59cf8cdu}) {
+    // --- Swamp (Areas 4, 5, 6): Actual water/poison pools only (mud floor & cliff strips excluded!) ---
+    for (std::uint32_t h : {0x0df1f49du, 0xd6abf5dfu, 0xfbe666ebu}) {
         add_data(h, MC::ShallowWater);
     }
     for (std::uint32_t h : {0x2671fcabu, 0x43816346u, 0x466a0f3bu, 0x4c4070a9u, 0x5c7a440bu, 0xfdf4e43eu}) {
