@@ -176,6 +176,7 @@ struct DrawSetup {
     std::uint32_t target = 0;
     bool self_sampled = false;
     bool is_killcam = false;
+    std::uint8_t material_id = 0;
     bool is_skinned = false;
     bool is_additive_vfx = false;
 };
@@ -306,9 +307,11 @@ private:
         bool has_blend_const = false;
         float blend_const[4]{};
         bool has_eds3 = false;
+        bool eds3_mrt = false;
         VkBool32 blend_en = VK_FALSE;
         VkColorBlendEquationEXT blend_eq{};
         VkColorComponentFlags write_mask = 0;
+        VkColorComponentFlags mat_write_mask = 0;
         void reset() noexcept { *this = PassStateCache{}; }
     };
     PassStateCache main_pass_state_{};
@@ -459,6 +462,7 @@ private:
         bool texture_mips = false;
         bool linear_override = false;
         bool is_killcam = false;
+        std::uint8_t material_id = 0;
         float uv_xform[4]{1.0f, 1.0f, 0.0f, 0.0f};
     };
     struct PackCacheEntry {
@@ -482,6 +486,9 @@ private:
     VkImageResource msaa_depth_;
     VkImageResource hdr_color_;
     VkImageResource msaa_hdr_color_;
+    VkImageResource mat_id_;
+    VkImageResource msaa_mat_id_;
+    bool main_has_water_ = false;
     VkImageResource overlay_tex_;
     bool main_depth_snapped_ = false;
     bool active_pass_msaa_ = false;
@@ -744,6 +751,8 @@ void VkBackend::shutdown() {
     msaa_depth_.destroy_immediate(ctx_, nullptr);
     hdr_color_.destroy_immediate(ctx_, &descriptors_);
     msaa_hdr_color_.destroy_immediate(ctx_, nullptr);
+    mat_id_.destroy_immediate(ctx_, nullptr);
+    msaa_mat_id_.destroy_immediate(ctx_, nullptr);
     overlay_tex_.destroy_immediate(ctx_, &descriptors_);
     blur_a_.destroy_immediate(ctx_, &descriptors_);
     blur_b_.destroy_immediate(ctx_, &descriptors_);
@@ -889,6 +898,14 @@ bool VkBackend::ensure_hdr_targets(std::uint32_t pw, std::uint32_t ph, bool need
             return false;
         }
     }
+    if (mat_id_.image == VK_NULL_HANDLE || mat_id_.width != pw || mat_id_.height != ph) {
+        retire_image(mat_id_);
+        if (!mat_id_.create(ctx_, nullptr, pw, ph, VK_FORMAT_R8_UINT,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            return false;
+        }
+    }
     if (need_msaa) {
         if (!ensure_msaa_targets(pw, ph)) return false;
         if (msaa_hdr_color_.image == VK_NULL_HANDLE || msaa_hdr_color_.width != pw || msaa_hdr_color_.height != ph) {
@@ -899,8 +916,16 @@ bool VkBackend::ensure_hdr_targets(std::uint32_t pw, std::uint32_t ph, bool need
                 return false;
             }
         }
+        if (msaa_mat_id_.image == VK_NULL_HANDLE || msaa_mat_id_.width != pw || msaa_mat_id_.height != ph) {
+            retire_image(msaa_mat_id_);
+            if (!msaa_mat_id_.create(ctx_, nullptr, pw, ph, VK_FORMAT_R8_UINT,
+                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                                     VK_SAMPLE_COUNT_4_BIT)) {
+                return false;
+            }
+        }
     }
-    return hdr_color_.bindless_slot != 0;
+    return hdr_color_.bindless_slot != 0 && mat_id_.view != VK_NULL_HANDLE;
 }
 
 void VkBackend::transition_resource(VkImageResource &res, VkImageLayout new_layout,
@@ -998,6 +1023,12 @@ void VkBackend::begin_target_pass(RenderTarget &rt, bool use_msaa, bool use_hdr)
     color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color_att.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 
+    VkRenderingAttachmentInfo mat_att{};
+    mat_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    mat_att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    mat_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    mat_att.clearValue.color.uint32[0] = 0u;
+
     VkRenderingAttachmentInfo depth_att{};
     depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -1008,9 +1039,15 @@ void VkBackend::begin_target_pass(RenderTarget &rt, bool use_msaa, bool use_hdr)
         transition_resource(hdr_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        transition_resource(mat_id_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         const VkAttachmentLoadOp hdr_load = main_hdr_started_ ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         if (use_msaa) {
             transition_resource(msaa_hdr_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            transition_resource(msaa_mat_id_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
             transition_resource(msaa_depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
@@ -1022,6 +1059,12 @@ void VkBackend::begin_target_pass(RenderTarget &rt, bool use_msaa, bool use_hdr)
             color_att.resolveImageView = hdr_color_.view;
             color_att.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+            mat_att.imageView = msaa_mat_id_.view;
+            mat_att.loadOp = hdr_load;
+            mat_att.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+            mat_att.resolveImageView = mat_id_.view;
+            mat_att.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
             depth_att.imageView = msaa_depth_.view;
             depth_att.loadOp = main_msaa_started_ ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
             depth_att.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
@@ -1031,6 +1074,8 @@ void VkBackend::begin_target_pass(RenderTarget &rt, bool use_msaa, bool use_hdr)
         } else {
             color_att.imageView = hdr_color_.view;
             color_att.loadOp = hdr_load;
+            mat_att.imageView = mat_id_.view;
+            mat_att.loadOp = hdr_load;
             depth_att.imageView = rt.depth.view;
             depth_att.loadOp = first_use_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         }
@@ -1060,12 +1105,13 @@ void VkBackend::begin_target_pass(RenderTarget &rt, bool use_msaa, bool use_hdr)
         depth_att.loadOp = first_use_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     }
 
+    const std::array<VkRenderingAttachmentInfo, 2> color_atts = {color_att, mat_att};
     VkRenderingInfo ri{};
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     ri.renderArea = {{0, 0}, {rt.color.width, rt.color.height}};
     ri.layerCount = 1;
-    ri.colorAttachmentCount = 1u;
-    ri.pColorAttachments = &color_att;
+    ri.colorAttachmentCount = use_hdr ? 2u : 1u;
+    ri.pColorAttachments = color_atts.data();
     ri.pDepthAttachment = &depth_att;
 
     vkCmdBeginRendering(frames_[frame_slot_].cmd, &ri);
@@ -1288,6 +1334,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 setup_.texture_mips = fit->second.texture_mips;
                 setup_.linear_override = fit->second.linear_override;
                 setup_.is_killcam = fit->second.is_killcam;
+                setup_.material_id = fit->second.material_id;
                 std::copy_n(fit->second.uv_xform, 4, setup_.uv_xform);
             } else {
                 if (prof_.enabled) ++prof_.tex_misses;
@@ -1308,8 +1355,11 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                     return facts;
                 };
                 if (!setup_.through && live_->enhanced_lighting.load(std::memory_order_relaxed)) {
-                    lighting_.note_texture(h, build_facts(),
-                                           [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); });
+                    const bool blended = (ge.reg(kAlphaBlendEnable) & 1u) != 0;
+                    setup_.material_id = static_cast<std::uint8_t>(lighting_.note_texture(
+                        h, build_facts(),
+                        [&ge](std::uint32_t addr, std::uint32_t sz) { return ge.guest_bytes(addr, sz); },
+                        blended));
                 }
 
                 // Phase 3: check texture pack (cached by content hash so XXHash never runs on repeated draws).
@@ -1417,6 +1467,7 @@ void VkBackend::apply_state(const gpu::Ge &ge) {
                 bind.texture_mips = setup_.texture_mips;
                 bind.linear_override = setup_.linear_override;
                 bind.is_killcam = setup_.is_killcam;
+                bind.material_id = setup_.material_id;
                 std::copy_n(setup_.uv_xform, 4, bind.uv_xform);
                 frame_tex_cache_.emplace(param_key, bind);
             }
@@ -1490,13 +1541,13 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
                             want_vk_effect(LiveSettings::kVkEffectVolumetricFog))
                                ? 1.0f
                                : 0.0f;
+    dp.pbr_slots[3] = (!clear && !setup.through) ? static_cast<std::uint32_t>(setup.material_id) : 0u;
     if (textured && !clear && !setup.through && want_vk_effect(LiveSettings::kVkEffectPbrMaterials) &&
         (setup.pbr_slots.normal_slot != 0u || setup.pbr_slots.rough_metal_slot != 0u ||
          setup.pbr_slots.emissive_slot != 0u)) {
         dp.pbr_slots[0] = setup.pbr_slots.normal_slot;
         dp.pbr_slots[1] = setup.pbr_slots.rough_metal_slot;
         dp.pbr_slots[2] = setup.pbr_slots.emissive_slot;
-        dp.pbr_slots[3] = 0u;
         float sw[3]{0.34f, 0.78f, 0.52f};
         const vk::LightingFrameInput &lin = has_cur_view_mat_ ? cur_light_in_ : last_light_in_;
         lighting_.resolve_sun_dir_world(lin, sw);
@@ -1561,6 +1612,17 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
                      (!keep_alpha ? VK_COLOR_COMPONENT_A_BIT : 0u);
     }
 
+    const auto mat_cls = static_cast<MaterialClass>(setup.material_id);
+    const bool is_non_surface_mat = (mat_cls == MaterialClass::Fire || mat_cls == MaterialClass::WeatherSheet ||
+                                     mat_cls == MaterialClass::HazeIgnore);
+    const bool write_mat = hdr_3d && !clear && !setup.through && !is_soft_particle && !is_non_surface_mat &&
+                           (!blend_en || mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater);
+    const VkColorComponentFlags mat_write_mask = write_mat ? VK_COLOR_COMPONENT_R_BIT : 0u;
+    if (write_mat && (mat_cls == MaterialClass::Water || mat_cls == MaterialClass::ShallowWater)) {
+        main_has_water_ = true;
+    }
+
+    pkey.mat_write = write_mat ? 1u : 0u;
     pkey.blend_enable = blend_en ? 1u : 0u;
     pkey.color_op = static_cast<std::uint8_t>(blend_eq.colorBlendOp);
     pkey.src_factor = static_cast<std::uint8_t>(blend_eq.srcColorBlendFactor);
@@ -1625,18 +1687,27 @@ bool VkBackend::bind_ge_draw_state(VkCommandBuffer cmd, const DrawSetup &setup, 
         cache.has_blend_const = true;
     }
     if (ctx_.caps.extended_dynamic_state3) {
-        if (!cache.has_eds3 || blend_en != cache.blend_en) {
-            vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blend_en);
+        const std::uint32_t att_n = hdr_3d ? 2u : 1u;
+        const bool mrt_changed = !cache.has_eds3 || (hdr_3d != cache.eds3_mrt);
+        if (mrt_changed || blend_en != cache.blend_en) {
+            const VkBool32 bens[2] = {blend_en, VK_FALSE};
+            vkCmdSetColorBlendEnableEXT(cmd, 0, att_n, bens);
             cache.blend_en = blend_en;
         }
-        if (!cache.has_eds3 || std::memcmp(&blend_eq, &cache.blend_eq, sizeof(blend_eq)) != 0) {
-            vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &blend_eq);
+        if (mrt_changed || std::memcmp(&blend_eq, &cache.blend_eq, sizeof(blend_eq)) != 0) {
+            const VkColorBlendEquationEXT id_eq{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+                                                VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD};
+            const VkColorBlendEquationEXT eqs[2] = {blend_eq, id_eq};
+            vkCmdSetColorBlendEquationEXT(cmd, 0, att_n, eqs);
             cache.blend_eq = blend_eq;
         }
-        if (!cache.has_eds3 || write_mask != cache.write_mask) {
-            vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &write_mask);
+        if (mrt_changed || write_mask != cache.write_mask || (hdr_3d && mat_write_mask != cache.mat_write_mask)) {
+            const VkColorComponentFlags masks[2] = {write_mask, mat_write_mask};
+            vkCmdSetColorWriteMaskEXT(cmd, 0, att_n, masks);
             cache.write_mask = write_mask;
+            cache.mat_write_mask = mat_write_mask;
         }
+        cache.eds3_mrt = hdr_3d;
         cache.has_eds3 = true;
     }
     return true;
@@ -3241,10 +3312,16 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
         if (!pslice.ptr) return;
 
         std::uint32_t hdr_slot = 0u;
+        VkImageView mat_view = VK_NULL_HANDLE;
         if (use_hdr && hdr_color_.image != VK_NULL_HANDLE && hdr_color_.bindless_slot != 0) {
             transition_resource(hdr_color_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
             hdr_slot = hdr_color_.bindless_slot;
+            if (mat_id_.image != VK_NULL_HANDLE && mat_id_.view != VK_NULL_HANDLE) {
+                transition_resource(mat_id_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+                mat_view = mat_id_.view;
+            }
         } else {
             transition_resource(rt.color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -3290,11 +3367,17 @@ void VkBackend::apply_post_3d(RenderTarget &rt, const vk::LightingFrameInput &in
             }
         }
         const float elapsed_sec = static_cast<float>(frame_number_) * (1.0f / 30.0f);
+        const bool had_water = main_has_water_;
+        main_has_water_ = false;
+        const std::uint32_t soft_dslot = (soft_depth_copy_.image != VK_NULL_HANDLE && soft_depth_copy_.bindless_slot != 0)
+                                             ? soft_depth_copy_.bindless_slot
+                                             : 0u;
         if (lighting_.dispatch(f.cmd, ctx_, descriptors_, rt.color.image, rt.color.view, rt.color.bindless_slot,
                                rt.depth.bindless_slot, w, h, fin, pslice.ptr, pslice.address, want_fxaa,
                                hdr_slot, 0u, lights_bda, light_cnt, shadow_slot,
                                shadow_slot != 0u ? shadow_from_view : nullptr, rt_slot,
-                               view_mat != nullptr ? view_mat->data() : nullptr, elapsed_sec)) {
+                               view_mat != nullptr ? view_mat->data() : nullptr, elapsed_sec,
+                               mat_view, soft_dslot, had_water)) {
             rt.color.layout = VK_IMAGE_LAYOUT_GENERAL;
         }
     } else if (want_fxaa) {
@@ -3800,12 +3883,18 @@ void VkBackend::render_interpolated_subframe(float phase) {
                         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
-    VkRenderingAttachmentInfo color_att{};
-    color_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color_att.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    std::array<VkRenderingAttachmentInfo, 2> color_atts{};
+    color_atts[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color_atts[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_atts[0].clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+
+    color_atts[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color_atts[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_atts[1].clearValue.color.uint32[0] = 0u;
 
     VkRenderingAttachmentInfo depth_att{};
     depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -3818,24 +3907,36 @@ void VkBackend::render_interpolated_subframe(float phase) {
         transition_resource(hdr_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        transition_resource(mat_id_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         if (pass_msaa) {
             transition_resource(msaa_hdr_color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            transition_resource(msaa_mat_id_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
             transition_resource(msaa_depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-            color_att.imageView = msaa_hdr_color_.view;
-            color_att.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-            color_att.resolveImageView = hdr_color_.view;
-            color_att.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            color_atts[0].imageView = msaa_hdr_color_.view;
+            color_atts[0].resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+            color_atts[0].resolveImageView = hdr_color_.view;
+            color_atts[0].resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            color_atts[1].imageView = msaa_mat_id_.view;
+            color_atts[1].resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+            color_atts[1].resolveImageView = mat_id_.view;
+            color_atts[1].resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
             depth_att.imageView = msaa_depth_.view;
             depth_att.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
             depth_att.resolveImageView = interp_rt_.depth.view;
             depth_att.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         } else {
-            color_att.imageView = hdr_color_.view;
+            color_atts[0].imageView = hdr_color_.view;
+            color_atts[1].imageView = mat_id_.view;
             depth_att.imageView = interp_rt_.depth.view;
         }
     } else if (pass_msaa) {
@@ -3845,21 +3946,21 @@ void VkBackend::render_interpolated_subframe(float phase) {
         transition_resource(msaa_depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-        color_att.imageView = msaa_color_.view;
-        color_att.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-        color_att.resolveImageView = interp_rt_.color.view;
-        color_att.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_atts[0].imageView = msaa_color_.view;
+        color_atts[0].resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        color_atts[0].resolveImageView = interp_rt_.color.view;
+        color_atts[0].resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         depth_att.imageView = msaa_depth_.view;
         depth_att.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
         depth_att.resolveImageView = interp_rt_.depth.view;
         depth_att.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     } else {
-        color_att.imageView = interp_rt_.color.view;
+        color_atts[0].imageView = interp_rt_.color.view;
         depth_att.imageView = interp_rt_.depth.view;
     }
 
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO, nullptr, 0, {{0, 0}, {pw, ph}}, 1, 0,
-                       1u, &color_att, &depth_att, nullptr};
+                       pass_hdr ? 2u : 1u, color_atts.data(), &depth_att, nullptr};
     vkCmdBeginRendering(f.cmd, &ri);
 
     // Upload 2D/flat vertices once for this subframe.
@@ -3906,7 +4007,8 @@ void VkBackend::render_interpolated_subframe(float phase) {
             vkCmdEndRendering(f.cmd);
             snapshot_soft_depth(interp_rt_);
             interp_depth_snapped = true;
-            color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            color_atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            color_atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             vkCmdBeginRendering(f.cmd, &ri);
             vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);
@@ -3936,9 +4038,10 @@ void VkBackend::render_interpolated_subframe(float phase) {
                     // Switch to 1x single-sample RGBA8 attachments for crisp 2D HUD draws!
                     pass_msaa = false;
                     pass_hdr = false;
-                    color_att.imageView = interp_rt_.color.view;
-                    color_att.resolveMode = VK_RESOLVE_MODE_NONE;
-                    color_att.resolveImageView = VK_NULL_HANDLE;
+                    ri.colorAttachmentCount = 1u;
+                    color_atts[0].imageView = interp_rt_.color.view;
+                    color_atts[0].resolveMode = VK_RESOLVE_MODE_NONE;
+                    color_atts[0].resolveImageView = VK_NULL_HANDLE;
                     depth_att.imageView = interp_rt_.depth.view;
                     depth_att.resolveMode = VK_RESOLVE_MODE_NONE;
                     depth_att.resolveImageView = VK_NULL_HANDLE;
@@ -3948,7 +4051,7 @@ void VkBackend::render_interpolated_subframe(float phase) {
                     transition_resource(interp_rt_.depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-                    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                    color_atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
                     depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
                     vkCmdBeginRendering(f.cmd, &ri);
                     vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.ge_layout, 0, 1, &set0, 0, nullptr);

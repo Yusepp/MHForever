@@ -1,0 +1,44 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// 2x2 Min-Z Hierarchical Depth (Hi-Z) pyramid generator for fast screen-space reflection traversal.
+// Pure Vulkan 1.2/1.3 compute shader (no wave intrinsics required; runs on all 2016+ GPUs).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D u_dst_mip;
+
+struct HiZParams {
+    uvec4 info; // x = src_slot, y = dst_w, z = dst_h, w = 0
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer HiZParamsBuf {
+    HiZParams p;
+};
+
+layout(push_constant) uniform HiZPush {
+    HiZParamsBuf buf;
+} pc;
+
+void main() {
+    HiZParams p = pc.buf.p;
+    ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
+    if (ip.x >= int(p.info.y) || ip.y >= int(p.info.z)) return;
+
+    ivec2 src_sz = textureSize(u_textures[p.info.x], 0);
+    ivec2 smax = max(src_sz - ivec2(1), ivec2(0));
+    ivec2 base = ip * 2;
+
+    float d00 = texelFetch(u_textures[p.info.x], clamp(base + ivec2(0, 0), ivec2(0), smax), 0).r;
+    float d10 = texelFetch(u_textures[p.info.x], clamp(base + ivec2(1, 0), ivec2(0), smax), 0).r;
+    float d01 = texelFetch(u_textures[p.info.x], clamp(base + ivec2(0, 1), ivec2(0), smax), 0).r;
+    float d11 = texelFetch(u_textures[p.info.x], clamp(base + ivec2(1, 1), ivec2(0), smax), 0).r;
+
+    // Conservative Min-Z (closest surface in the 2x2 block) so Hi-Z skipping never steps past geometry.
+    float dmin = min(min(d00, d10), min(d01, d11));
+    imageStore(u_dst_mip, ip, vec4(dmin, 0.0, 0.0, 0.0));
+}

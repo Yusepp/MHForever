@@ -75,6 +75,7 @@ public:
     void set_shadow_zones(std::vector<std::string> names, std::vector<std::pair<std::uint32_t, int>> textures);
     void set_shadow_zone_biomes(std::vector<std::pair<std::uint8_t, bool>> biomes); // (biome_id, is_cave) aligned with shadow_zone_names
     void set_shadow_zone_mist_profiles(std::vector<GroundMistProfile> profiles);  // aligned with shadow_zone_names
+    void set_material_registry(std::vector<MaterialRegistryEntry> entries);       // deterministic texture -> MaterialClass registry
     // The quest HUD's size in percent, 50..100 (gl_backend.hpp, LiveSettings). The Video tab of the in-game menu
     // changes it while playing.
     void set_hud(int size);

@@ -507,6 +507,10 @@ void Frontend::set_shadow_zone_mist_profiles(std::vector<GroundMistProfile> prof
     impl_->live.shadow_zone_mist_profiles = std::move(profiles);
 }
 
+void Frontend::set_material_registry(std::vector<MaterialRegistryEntry> entries) {
+    impl_->live.material_registry = std::move(entries);
+}
+
 void Frontend::set_hud(int size) { impl_->live.hud_size = std::clamp(size, 50, 100); }
 
 void Frontend::set_widescreen(bool on) {
@@ -915,7 +919,7 @@ enum MenuId {
     kResume = 1, kQuit, kQuitYes, kQuitNo, kMusic, kSfx, kScale, kFps, kFullscreen, kSmooth, kTexturePack, kHudSize, kSongPlace, kSongMove, kPadStick, kRestoreKeys, kRestorePad,
     kHalls, kRoomCode, kJoinRoom, kServer, kFriendsMore, kSongsOn, kPackMipmaps, kAnisotropy, kShadow, kShadowStrength, kShadowWholeMap, kShadowQuality, kWidescreen,
     kVkEnhancedLighting, kVkAaMode, kVkAo, kVkContactShadows, kVkVolumetricFog, kVkBloom, kVkSsgi, kVkSpecular, kVkSoftParticles, kVkFxaa, kVkVignette, kVkKillcamDof,
-    kVkSunShadows, kVkDynamicLights, kVkPbrMaterials, kVkFroxelFog, kVkRayTracing
+    kVkSunShadows, kVkDynamicLights, kVkPbrMaterials, kVkFroxelFog, kVkRayTracing, kVkWaterReflections
 };
 constexpr int kGameOptionBase = 3000; // the QoL tab's options of the game: kGameOptionBase + an index into Impl::game_options
 constexpr int kFriendBase = 4000; // the Online tab's friend rows: kFriendBase + an index into Impl::friends
@@ -1372,6 +1376,7 @@ overlay::MenuView menu_main(const Frontend::Impl &impl) {
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Atmosphere & effects"));
             add_toggle(kVkVolumetricFog, "Volumetric fog & shafts", "Biome height fog, outdoor sun shafts, and cave doorway rays.", (mask & LiveSettings::kVkEffectVolumetricFog) != 0u);
             add_toggle(kVkFroxelFog, "3D froxel volumetrics", "3D frustum fog grid with shadow-occluded shafts and firelight mist glow.", (mask & LiveSettings::kVkEffectFroxelFog) != 0u);
+            add_toggle(kVkWaterReflections, "Water waves & reflections", "World-locked ripples, Beer-Lambert depth tint, and Hi-Z water reflections.", (mask & LiveSettings::kVkEffectWaterReflections) != 0u);
             add_toggle(kVkBloom, "Emissive bloom & shimmer", "Selective glow on fire, lava, and lightning with rising heat haze.", (mask & LiveSettings::kVkEffectBloom) != 0u);
             add_toggle(kVkSoftParticles, "Soft 3D particles", "Depth-softened smoke, snow, fire, and monster breath.", (mask & LiveSettings::kVkEffectSoftParticles) != 0u);
             vk_tab.items.push_back(menu_item(Kind::Heading, 0, "Post-processing"));
@@ -1838,7 +1843,8 @@ bool menu_handle(Frontend::Impl &impl, Runtime &rt, const overlay::Menu::Event &
         case kVkDynamicLights:
         case kVkPbrMaterials:
         case kVkFroxelFog:
-        case kVkRayTracing: {
+        case kVkRayTracing:
+        case kVkWaterReflections: {
             const std::uint32_t bit = 1u << static_cast<unsigned>(e.id - kVkAo);
             std::uint32_t m = impl.live.vulkan_effects_mask.load(std::memory_order_relaxed);
             if (e.value != 0) m |= bit;

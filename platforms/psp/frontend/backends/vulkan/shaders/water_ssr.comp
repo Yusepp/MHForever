@@ -1,0 +1,251 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Half-Resolution Hierarchical-Z (Hi-Z) Water Screen-Space Reflections + Semantic Zone Fallback.
+// - Strictly gated on categorical R8_UINT MaterialClass (1 = Water, 2 = ShallowWater); early-outs on 85-95% of screen!
+// - Reads immutable scene color (hdr_color_ or scene_color) and immutable 4-mip Min-Z pyramid (zero read-write hazards).
+// - Uses area-space world-locked 2-layer wave normals + analytic actor ripple rings (continuous at 120/180 Hz).
+// - Pure Vulkan 1.2/1.3 GLSL (no SM6 wave intrinsics; 2016+ GPU compatible).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_textures[];
+layout(set = 0, binding = 1) uniform sampler u_samplers[];
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D u_ssr_out;
+layout(set = 3, binding = 0) uniform utexture2D u_mat_id;
+
+struct WaterSsrParams {
+    vec4 proj_info;      // x = 1/p00, y = 1/p11, z = p10, w = p14
+    vec4 vz_and_size;    // x = vz_scale, y = vz_center, z = out_w, w = out_h
+    mat4 inv_view;       // column-major: PSP view (+Y up) -> area world space (cm)
+    vec4 sun_dir_view;   // xyz = view-space sun dir (+Y down), w = is_cave
+    vec4 world_up_view;  // xyz = world up in view space (+Y down), w = elapsed_sec
+    vec4 fog_color;      // rgb = linear biome fog/sky tint, w = biome_id
+    uvec4 slots0;        // x = color_slot, y = depth_slot, z = noise3d_slot, w = linear_sampler
+    uvec4 hiz_slots;     // x = mip0 (half), y = mip1 (quarter), z = mip2 (eighth), w = mip3 (sixteenth)
+    uvec4 extra_slots;   // x = rt_shadow_slot, y = gtao_slot, z = ripple_count, w = flags (bit0 = hdr_src)
+    vec4 ripples[24];    // x = world_x, y = world_z, z = age_sec, w = amp_radius (packed: radius_cm)
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer WaterSsrParamsBuf {
+    WaterSsrParams p;
+};
+
+layout(push_constant) uniform WaterSsrPush {
+    WaterSsrParamsBuf buf;
+} pc;
+
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+vec3 srgb_to_linear_hdr(vec3 c) {
+    vec3 a = max(c, vec3(0.0));
+    return a * (a * (a * 0.305306011 + 0.682171111) + 0.012522878);
+}
+
+float linear_eye_z(WaterSsrParams p, float d) {
+    float zn = (d * 65535.0 - p.vz_and_size.y) / max(abs(p.vz_and_size.x), 1e-3);
+    float denom = zn + p.proj_info.z;
+    if (abs(denom) < 1e-5) denom = (denom >= 0.0 ? 1e-5 : -1e-5);
+    return clamp(abs(p.proj_info.w / denom), 0.1, 20000.0);
+}
+
+float sample_noise_2d(uint nslot, uint lsamp, vec2 xz, float slice) {
+    vec2 f = fract(xz);
+    vec2 tile = vec2(mod(slice, 8.0), floor(slice / 8.0));
+    vec2 local_uv = (f * 30.0 + 1.0) / 32.0;
+    vec2 uv = (tile + local_uv) / vec2(8.0, 4.0);
+    return texture(sampler2D(u_textures[nslot], u_samplers[lsamp]), uv).r;
+}
+
+// Compute world-space XZ wave normal slope (dH/dx, dH/dz) from 2 drifting world-space noise layers + analytic ripples.
+vec2 compute_water_slope_world(WaterSsrParams p, vec2 wxz, bool shallow) {
+    float t = p.world_up_view.w;
+    vec2 slope = vec2(0.0);
+    if (p.slots0.z != 0u) {
+        float scale1 = shallow ? 0.0065 : 0.0042;
+        float scale2 = shallow ? 0.0130 : 0.0092;
+        vec2 uv1 = wxz * scale1 + vec2(t * 0.055, -t * 0.032);
+        vec2 uv2 = wxz * scale2 + vec2(-t * 0.042, t * 0.068);
+        float eps = 0.018;
+        float h1c = sample_noise_2d(p.slots0.z, p.slots0.w, uv1, 3.0);
+        float h1x = sample_noise_2d(p.slots0.z, p.slots0.w, uv1 + vec2(eps, 0.0), 3.0);
+        float h1z = sample_noise_2d(p.slots0.z, p.slots0.w, uv1 + vec2(0.0, eps), 3.0);
+        float h2c = sample_noise_2d(p.slots0.z, p.slots0.w, uv2, 11.0);
+        float h2x = sample_noise_2d(p.slots0.z, p.slots0.w, uv2 + vec2(eps, 0.0), 11.0);
+        float h2z = sample_noise_2d(p.slots0.z, p.slots0.w, uv2 + vec2(0.0, eps), 11.0);
+        float amp = shallow ? 0.055 : 0.095;
+        slope += (vec2(h1x - h1c, h1z - h1c) * 0.60 + vec2(h2x - h2c, h2z - h2c) * 0.40) * (amp / eps);
+    }
+
+    // Analytic interactive actor ripple rings (continuous at 120/180 Hz!).
+    uint n_rip = min(p.extra_slots.z, 24u);
+    for (uint i = 0u; i < n_rip; ++i) {
+        vec4 r = p.ripples[i];
+        float age = r.z;
+        if (age <= 0.0 || age > 2.4) continue;
+        vec2 d = wxz - r.xy;
+        float dist2 = dot(d, d);
+        if (dist2 > 550.0 * 550.0 || dist2 < 4.0) continue;
+        float dist = sqrt(dist2);
+        float wave_r = 25.0 + age * 145.0; // expanding ring speed ~1.45 m/s
+        float band = dist - wave_r;
+        float width = 32.0 + age * 18.0;
+        float env = exp(-(band * band) / (width * width)) * exp(-age * 1.45);
+        if (env < 0.008) continue;
+        float amp = clamp(r.w / 100.0, 0.4, 2.0) * (shallow ? 0.14 : 0.22);
+        float phase = band * 0.18;
+        float dh_dr = cos(phase) * amp * env;
+        slope += (d / dist) * dh_dr;
+    }
+    return clamp(slope, vec2(-0.32), vec2(0.32));
+}
+
+// Zone-semantic reflection environment fallback (never dead grey/black when SSR misses!).
+vec3 zone_env_fallback(WaterSsrParams p, vec3 R_world, float rt_sun) {
+    uint bid = uint(p.fog_color.w + 0.5);
+    bool is_cave = p.sun_dir_view.w > 0.5;
+    float up = clamp(R_world.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 horizon = p.fog_color.rgb;
+    vec3 zenith = horizon * 1.35 + vec3(0.06, 0.10, 0.18);
+
+    if (is_cave || bid == 5u || bid == 3u) {
+        zenith = horizon * 0.55;
+        horizon *= 0.45;
+    } else if (bid == 11u) { // Swamp: muted overcast + dark marsh canopy
+        zenith = horizon * 1.15 + vec3(0.05, 0.07, 0.08);
+        horizon = mix(horizon, vec3(0.08, 0.11, 0.09), 0.35);
+    } else if (bid == 10u || bid == 9u) { // Jungle / Great Forest: lush green canopy + sky gaps
+        zenith = mix(vec3(0.08, 0.16, 0.10), horizon * 1.45 + vec3(0.08, 0.14, 0.22), smoothstep(0.60, 0.95, up));
+    } else if (bid == 6u || bid == 7u) { // Desert: bright warm sky
+        zenith = vec3(0.28, 0.46, 0.72);
+    } else if (bid == 2u || bid == 1u) { // Snowy Peak / Pokke: crisp cold sky
+        zenith = vec3(0.32, 0.50, 0.78);
+    } else if (bid == 12u) { // Volcano: dark warm ash sky
+        zenith = vec3(0.18, 0.08, 0.06);
+    }
+
+    vec3 env = mix(horizon * 0.85, zenith, pow(up, 0.65));
+    return env * mix(0.45, 1.0, rt_sun);
+}
+
+float sample_hiz(WaterSsrParams p, int mip, vec2 uv) {
+    uint slot = p.hiz_slots.x;
+    if (mip == 1) slot = p.hiz_slots.y;
+    else if (mip == 2) slot = p.hiz_slots.z;
+    else if (mip >= 3) slot = p.hiz_slots.w;
+    ivec2 sz = textureSize(u_textures[slot], 0);
+    ivec2 ip = clamp(ivec2(uv * vec2(sz)), ivec2(0), max(sz - ivec2(1), ivec2(0)));
+    return texelFetch(u_textures[slot], ip, 0).r;
+}
+
+void main() {
+    WaterSsrParams p = pc.buf.p;
+    ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
+    int out_w = int(p.vz_and_size.z);
+    int out_h = int(p.vz_and_size.w);
+    if (ip.x >= out_w || ip.y >= out_h) return;
+
+    ivec2 full_ip = ip * 2;
+    ivec2 mat_max = max(textureSize(u_mat_id, 0) - ivec2(1), ivec2(0));
+    uint mat_id = texelFetch(u_mat_id, clamp(full_ip, ivec2(0), mat_max), 0).r;
+    if (mat_id != 1u && mat_id != 2u) {
+        imageStore(u_ssr_out, ip, vec4(0.0));
+        return;
+    }
+
+    vec2 uv = (vec2(ip) + 0.5) / vec2(float(out_w), float(out_h));
+    ivec2 dsz = textureSize(u_textures[p.slots0.y], 0);
+    ivec2 full_max = max(dsz - ivec2(1), ivec2(0));
+    float d_here = texelFetch(u_textures[p.slots0.y], clamp(full_ip, ivec2(0), full_max), 0).r;
+    if (d_here >= 0.99992 || d_here <= 0.00001) {
+        imageStore(u_ssr_out, ip, vec4(0.0));
+        return;
+    }
+
+    float z_eye = linear_eye_z(p, d_here);
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec3 P = vec3(ndc.x * p.proj_info.x * z_eye, ndc.y * p.proj_info.y * z_eye, -z_eye);
+    vec3 V = normalize(-P);
+    vec3 U = normalize(p.world_up_view.xyz);
+
+    // Reconstruct area-space world position for 100% camera-independent wave normals.
+    vec3 P_psp = vec3(P.x, -P.y, P.z);
+    vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
+    vec2 slope = compute_water_slope_world(p, P_world.xz, mat_id == 2u);
+
+    // Build world-space wave normal -> transform to view space (+Y down).
+    vec3 N_world = normalize(vec3(-slope.x, 1.0, -slope.y));
+    vec3 N_psp = normalize(transpose(mat3(p.inv_view)) * N_world);
+    vec3 N = normalize(vec3(N_psp.x, -N_psp.y, N_psp.z));
+    if (dot(N, U) < 0.0) N = U;
+
+    vec3 R = reflect(-V, N);
+    vec3 R_psp = vec3(R.x, -R.y, R.z);
+    vec3 R_world = normalize(mat3(p.inv_view) * R_psp);
+
+    float rt_sun = 1.0;
+    if (p.extra_slots.x != 0u && p.sun_dir_view.w < 0.5) {
+        rt_sun = texture(sampler2D(u_textures[p.extra_slots.x], u_samplers[p.slots0.w]), uv).r;
+    }
+    vec3 fallback = zone_env_fallback(p, R_world, rt_sun);
+
+    // Hi-Z accelerated Screen-Space Ray March (McGuire/Mara + SSSR-style mip skipping & confidence).
+    vec3 hit_col = fallback;
+    float confidence = 0.0;
+    if (R.z < 0.25 && dot(R, U) > -0.08) {
+        float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5);
+        float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5);
+        float jitter = ign(vec2(ip));
+        float t = 10.0 + jitter * 12.0;
+        float step_sz = 14.0;
+        int mip = 2;
+
+        for (int s = 0; s < 26; ++s) {
+            vec3 Q = P + R * t;
+            float qz = -Q.z;
+            if (qz <= 2.5) break;
+            vec2 q_ndc = vec2(Q.x * p00, Q.y * p11) / qz;
+            vec2 q_uv = q_ndc * 0.5 + 0.5;
+            if (q_uv.x < 0.005 || q_uv.x > 0.995 || q_uv.y < 0.005 || q_uv.y > 0.995) break;
+
+            float hz_d = sample_hiz(p, mip, q_uv);
+            float hz_z = linear_eye_z(p, hz_d);
+            float dz = qz - hz_z;
+
+            if (dz > 1.5 && hz_d < 0.99992) {
+                if (mip > 0) {
+                    // Potential hit at coarse mip: step back half-step and refine at finer mip!
+                    t -= step_sz * 0.55;
+                    step_sz *= 0.55;
+                    mip -= 1;
+                    continue;
+                }
+                float thick = 18.0 + step_sz * 1.45;
+                if (dz < thick && hz_z < z_eye + 120.0) {
+                    ivec2 qip = clamp(ivec2(q_uv * vec2(dsz)), ivec2(0), full_max);
+                    vec3 raw = texelFetch(u_textures[p.slots0.x], qip, 0).rgb;
+                    hit_col = ((p.extra_slots.w & 1u) != 0u) ? raw : srgb_to_linear_hdr(raw);
+                    float edge_x = smoothstep(0.005, 0.09, q_uv.x) * smoothstep(0.995, 0.91, q_uv.x);
+                    float edge_y = smoothstep(0.005, 0.11, q_uv.y) * smoothstep(0.995, 0.89, q_uv.y);
+                    float dist_w = 1.0 - smoothstep(450.0, 1400.0, t);
+                    float back_w = smoothstep(0.25, -0.15, R.z);
+                    confidence = clamp(edge_x * edge_y * dist_w * back_w, 0.0, 1.0);
+                    break;
+                }
+            } else {
+                // Empty space: accelerate & climb up Hi-Z pyramid!
+                if (mip < 3 && (s & 1) == 1) mip += 1;
+                step_sz = min(step_sz * 1.18, 95.0);
+            }
+            t += step_sz;
+        }
+    }
+
+    vec3 out_refl = mix(fallback, hit_col, confidence);
+    imageStore(u_ssr_out, ip, vec4(out_refl, confidence));
+}

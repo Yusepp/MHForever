@@ -63,6 +63,7 @@
 #include "overlay/painter.hpp"
 #include "psp_frontend.hpp"
 #include "shadow_textures.hpp"
+#include "material_hashes.inc"
 #include "sharpness.hpp"
 #endif
 #include <cstdlib>
@@ -1879,6 +1880,7 @@ int main(int argc, char **argv) {
             frontend.set_shadow_zones({std::begin(kShadowZoneNames), std::end(kShadowZoneNames)}, shadow_zone_textures());
             frontend.set_shadow_zone_biomes(shadow_zone_biomes());
             frontend.set_shadow_zone_mist_profiles(shadow_zone_mist_profiles());
+            frontend.set_material_registry(mhf::mhfu::material_registry_entries());
             frontend.set_hud(hud_size);
             frontend.set_widescreen(widescreen);
             const char *shadow_env = std::getenv("MHF_SHADOW"); // MHF_SHADOW=1 turns them on as --projected-shadows does

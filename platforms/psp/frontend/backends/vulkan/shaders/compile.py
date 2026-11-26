@@ -45,6 +45,8 @@ SHADERS = [
     ("kExposureCompSpv", "exposure.comp"),
     ("kFxaaPrehudCompSpv", "fxaa_prehud.comp"),
     ("kTaaResolveCompSpv", "taa_resolve.comp"),
+    ("kHiZGenCompSpv", "hiz_gen.comp"),
+    ("kWaterSsrCompSpv", "water_ssr.comp"),
 ]
 
 

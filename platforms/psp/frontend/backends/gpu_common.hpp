@@ -72,6 +72,8 @@ struct LiveSettings {
     std::vector<std::pair<std::uint8_t, bool>> shadow_zone_biomes;
     // Optional per-zone ground-mist profile aligned with `shadow_zone_names`.
     std::vector<GroundMistProfile> shadow_zone_mist_profiles;
+    // Clean-room deterministic texture-identity -> MaterialClass registry (supplied by the game host).
+    std::vector<MaterialRegistryEntry> material_registry;
     std::atomic<float> shadow_strength{0.5f};
     // What casts, set by the backend as it goes in and out of caves: objects up to shadow_max_object long (world units), and
     // inside the scenery slender pieces up to shadow_max_piece (0: none).
@@ -106,12 +108,14 @@ struct LiveSettings {
         kVkEffectPbrMaterials   = 1u << 12,
         kVkEffectFroxelFog      = 1u << 13,
         kVkEffectRayTracing     = 1u << 14,
+        kVkEffectWaterReflections = 1u << 15,
         kVkEffectComputeMask    = kVkEffectAo | kVkEffectContactShadows | kVkEffectVolumetricFog |
                                   kVkEffectBloom | kVkEffectSsgi | kVkEffectSpecular |
                                   kVkEffectFxaa | kVkEffectVignette | kVkEffectSunShadows |
-                                  kVkEffectDynamicLights | kVkEffectFroxelFog | kVkEffectRayTracing,
-        kVkEffectDefault        = 0x3FFFu, // all ON except opt-in Ultra Ray Tracing
-        kVkEffectAll            = 0x7FFFu,
+                                  kVkEffectDynamicLights | kVkEffectFroxelFog | kVkEffectRayTracing |
+                                  kVkEffectWaterReflections,
+        kVkEffectDefault        = 0xBFFFu, // all ON except opt-in Ultra Ray Tracing
+        kVkEffectAll            = 0xFFFFu,
     };
     std::atomic<bool> enhanced_lighting{false};
     std::atomic<std::uint32_t> vulkan_effects_mask{kVkEffectDefault};

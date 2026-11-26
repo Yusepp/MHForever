@@ -21,6 +21,7 @@ layout(set = 1, binding = 0, rgba8) uniform image2D u_lit_out;
 layout(set = 2, binding = 0) uniform sampler3D u_froxel_vol;
 layout(set = 2, binding = 1) uniform sampler2D u_ground_fluid;
 layout(set = 2, binding = 2) uniform sampler2D u_ground_height;
+layout(set = 3, binding = 0) uniform utexture2D u_mat_id;
 
 layout(constant_id = 0) const uint kSpecInPlace = 0u;
 
@@ -308,11 +309,31 @@ void main() {
                 sun_shadow = mix(1.0, lit * 0.25, border_fade);
             }
         }
+        // Fetch categorical MaterialClass from dedicated R8_UINT MRT (0 = Unknown).
+        ivec2 mat_max = max(textureSize(u_mat_id, 0) - ivec2(1), ivec2(0));
+        uint mat_id = texelFetch(u_mat_id, clamp(ip, ivec2(0), mat_max), 0).r;
+
+        // Filament-style Material-Aware AO: decouple indirect diffuse AO from direct sunlight/contact shadows
+        // and prevent SSAO from muddying water, snow, foliage, or emissives.
+        float ao_mat = ao;
+        float contact_mat = contact;
+        if (mat_id == 8u || mat_id == 9u || mat_id == 10u || mat_id == 11u) {
+            ao_mat = 1.0;
+            contact_mat = 1.0;
+        } else if (mat_id == 1u || mat_id == 2u) {
+            ao_mat = mix(1.0, ao, 0.25);
+            contact_mat = mix(1.0, contact, 0.45);
+        } else if (mat_id == 3u) {
+            ao_mat = mix(1.0, ao, 0.55);
+        } else if (mat_id == 7u) {
+            ao_mat = mix(1.0, ao, 0.65);
+        }
+
         vec3 shadow_tint_lin = srgb_to_linear_hdr(p.shadow_tint.rgb);
-        float ao_shaped = is_cave ? pow(ao, 1.25) : ao;
+        float ao_shaped = is_cave ? pow(ao_mat, 1.25) : ao_mat;
         vec3 mb_ao = multi_bounce_ao(ao_shaped, albedo_est);
         vec3 tinted_ao = mix(shadow_tint_lin * (is_cave ? 0.60 : 0.90), vec3(1.0), mb_ao);
-        vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact);
+        vec3 tinted_cs = mix(shadow_tint_lin * 0.62, vec3(1.0), contact_mat);
         vec3 tinted_sun_sh = mix(shadow_tint_lin * 0.54, vec3(1.0), sun_shadow);
         col_lin *= tinted_ao * tinted_cs * tinted_sun_sh;
 
@@ -323,12 +344,12 @@ void main() {
             float gnd_w = max(-up_dot, 0.0);
             vec3 ground_lin = srgb_to_linear_hdr(p.ground_bounce.rgb);
             vec3 hemi = shadow_tint_lin * (sky_w * (is_cave ? 0.22 : 0.38)) + ground_lin * (gnd_w * 0.80);
-            col_lin += col_lin * hemi * (p.ground_bounce.a * (0.40 + 0.60 * ao));
+            col_lin += col_lin * hemi * (p.ground_bounce.a * (0.40 + 0.60 * ao_mat));
         }
 
-        // 3. Gentle outdoor sun key (no global fake specular/fresnel sheen on grass, dirt, rock, or wood!).
+        // 3. Gentle outdoor sun key (decoupled from indirect SSAO, gated by direct contact & sun visibility).
         float ndotl = clamp(dot(N, L), 0.0, 1.0);
-        float sun_vis = ao * min(contact, sun_shadow);
+        float sun_vis = min(contact_mat, sun_shadow);
         float key_boost = 1.0 + (ndotl - 0.35) * p.bloom_rim.w * sun_vis * (is_cave ? 0.45 : 1.0);
         col_lin *= clamp(key_boost, 0.88, 1.14);
 
@@ -371,78 +392,92 @@ void main() {
         }
 
         // 4b. Fast Water & Wet-Surface Screen-Space Reflections (reflects hunter, monsters, fireballs & trees!).
-        // Restricted to truly flat horizontal water/puddle pixels in water-bearing biomes (early-outs on 85%+ of screen!).
-        if (!is_cave && z_eye < 1100.0 && (bid == 11u || bid == 10u || bid == 8u || bid == 9u || bid == 6u)) {
-            float flat_up = smoothstep(0.955, 0.992, dot(N, U));
-            if (flat_up > 0.05) {
-                vec3 cs = clamp(scene.rgb, vec3(0.0), vec3(1.0));
-                float sluma = dot(cs, vec3(0.2126, 0.7152, 0.0722));
-                float smax = max(cs.r, max(cs.g, cs.b));
-                float smin = min(cs.r, min(cs.g, cs.b));
-                float ssat = smax > 1e-4 ? (smax - smin) / smax : 0.0;
-                float blue_ratio = cs.b / max(cs.r, 0.02);
-                float wet_mask = 0.0;
-                if (bid == 11u) {
-                    // Swamp shallow water puddles: cool/neutral gray-blue sheen, excludes dry brown mud & foliage.
-                    wet_mask = flat_up * smoothstep(0.11, 0.23, sluma) *
-                               (1.0 - smoothstep(0.15, 0.30, ssat)) *
-                               smoothstep(0.94, 1.04, blue_ratio);
-                } else {
-                    // Jungle, Forest & Hills, Great Forest, Desert oasis rivers/streams: cool blue/teal water.
-                    wet_mask = flat_up * smoothstep(0.08, 0.20, sluma) *
-                               smoothstep(1.04, 1.18, blue_ratio);
-                }
-                if (wet_mask > 0.08) {
-                    // Subtle living water ripple normal perturbation.
-                    float t_rip = p.sun_screen.w * 0.14;
-                    vec3 N_rip = normalize(N + vec3(sin(uv.x * 160.0 + t_rip) * 0.014,
-                                                    cos(uv.y * 120.0 - t_rip * 0.8) * 0.014, 0.0));
-                    vec3 R = reflect(-V, N_rip);
-                    // Only trace reflections heading upward/away from the water plane.
-                    if (dot(R, U) > -0.05) {
-                        float p00 = 1.0 / max(abs(p.proj_info.x), 1e-5);
-                        float p11 = 1.0 / max(abs(p.proj_info.y), 1e-5);
-                        float j = ign(vec2(ip));
-                        float dist_t = 12.0 + j * 14.0;
-                        float step_sz = 18.0;
-                        vec3 hit_col = vec3(0.0);
-                        float hit_w = 0.0;
-                        for (int s = 0; s < 14; ++s) {
-                            vec3 Q = P + R * dist_t;
-                            float qz = -Q.z;
-                            if (qz <= 2.0) break;
-                            vec2 q_ndc = vec2(Q.x * p00, Q.y * p11) / qz;
-                            vec2 q_uv = q_ndc * 0.5 + 0.5;
-                            if (q_uv.x < 0.01 || q_uv.x > 0.99 || q_uv.y < 0.01 || q_uv.y > 0.99) break;
-                            ivec2 qip = clamp(ivec2(q_uv * p.vz_and_size.zw), ivec2(0), full_max);
-                            float qd = texelFetch(u_textures[dslot], qip, 0).r;
-                            if (qd < 0.99992 && qd > 0.00001) {
-                                float scene_z = linear_eye_z(p, qd);
-                                float dz = qz - scene_z;
-                                float thick = 16.0 + step_sz * 1.35;
-                                if (dz > 2.0 && dz < thick && scene_z < z_eye + 40.0) {
-                                    vec3 rcol = (kSpecInPlace != 0u)
-                                                    ? imageLoad(u_lit_out, qip).rgb
-                                                    : texelFetch(u_textures[p.tex_slots.x], qip, 0).rgb;
-                                    hit_col = srgb_to_linear_hdr(rcol);
-                                    float edge_fade = smoothstep(0.01, 0.10, q_uv.x) * smoothstep(0.99, 0.90, q_uv.x) *
-                                                      smoothstep(0.01, 0.12, q_uv.y) * smoothstep(0.99, 0.88, q_uv.y);
-                                    float dist_fade = 1.0 - smoothstep(260.0, 750.0, dist_t);
-                                    hit_w = edge_fade * dist_fade;
-                                    break;
-                                }
-                            }
-                            dist_t += step_sz;
-                            step_sz *= 1.18;
-                        }
-                        if (hit_w > 0.01) {
-                            float ndotv = clamp(dot(N, V), 0.0, 1.0);
-                            float fresnel = 0.10 + 0.42 * pow(1.0 - ndotv, 3.5);
-                            float refl_str = clamp(wet_mask * hit_w * fresnel, 0.0, 0.48);
-                            col_lin = mix(col_lin, hit_col, refl_str);
-                        }
+        // 4b. Step 3 Deterministic World-Locked Water Shading, Beer-Lambert Depth Absorption,
+        //     Foreground-Safe Refraction & Half-Res Hi-Z SSR + Semantic Sky/Canopy Fallback!
+        //     Strictly gated on categorical R8_UINT MaterialClass (1 = Water, 2 = ShallowWater):
+        //     zero color heuristics, zero read-while-write hazards, 0ms on dry surfaces!
+        if ((p.ext_slots.w & 128u) != 0u && (mat_id == 1u || mat_id == 2u)) {
+            bool shallow = (mat_id == 2u);
+            float t_w = p.env_time.x;
+
+            // Compute area-space world position & 2-layer animated wave normal (100% camera-independent).
+            vec3 N_water = N;
+            vec2 wave_slope = vec2(0.0);
+            if (p.env_time.w > 0.5 && p.shadow_info.w != 0u) {
+                vec3 P_psp = vec3(P.x, -P.y, P.z);
+                vec3 P_world = (p.inv_view * vec4(P_psp, 1.0)).xyz;
+                float sc1 = shallow ? 0.0065 : 0.0042;
+                float sc2 = shallow ? 0.0130 : 0.0092;
+                vec2 u1 = P_world.xz * sc1 + vec2(t_w * 0.055, -t_w * 0.032);
+                vec2 u2 = P_world.xz * sc2 + vec2(-t_w * 0.042, t_w * 0.068);
+                float eps = 0.018;
+                float h1c = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u1, 0.10));
+                float h1x = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u1 + vec2(eps, 0.0), 0.10));
+                float h1z = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u1 + vec2(0.0, eps), 0.10));
+                float h2c = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u2, 0.35));
+                float h2x = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u2 + vec2(eps, 0.0), 0.35));
+                float h2z = sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(u2 + vec2(0.0, eps), 0.35));
+                float amp = shallow ? 0.055 : 0.095;
+                wave_slope = clamp((vec2(h1x - h1c, h1z - h1c) * 0.60 + vec2(h2x - h2c, h2z - h2c) * 0.40) * (amp / eps),
+                                   vec2(-0.28), vec2(0.28));
+                vec3 Nw = normalize(vec3(-wave_slope.x, 1.0, -wave_slope.y));
+                vec3 Np = normalize(transpose(mat3(p.inv_view)) * Nw);
+                N_water = normalize(vec3(Np.x, -Np.y, Np.z));
+                if (dot(N_water, U) < 0.0) N_water = U;
+            }
+
+            // Beer-Lambert exponential transmission + depth-safe refraction + shoreline foam for translucent Water.
+            if (!shallow && p.phase1_slots.x != 0u && kSpecInPlace == 0u) {
+                float bg_d = texelFetch(u_textures[p.phase1_slots.x], ip, 0).r;
+                if (bg_d < 0.99992 && bg_d > d_here) {
+                    float z_bg = linear_eye_z(p, bg_d);
+                    float thickness = clamp(z_bg - z_eye, 0.0, 600.0);
+
+                    // Foreground-safe screen-space refraction (rejects foreground objects in front of water).
+                    vec2 ref_uv = clamp(uv + wave_slope * 0.018 * clamp(thickness / 80.0, 0.2, 1.0),
+                                        vec2(0.002), vec2(0.998));
+                    ivec2 ref_ip = clamp(ivec2(ref_uv * p.vz_and_size.zw), ivec2(0), full_max);
+                    float ref_d = texelFetch(u_textures[p.phase1_slots.x], ref_ip, 0).r;
+                    if (ref_d > d_here) {
+                        vec3 bg_raw = texelFetch(u_textures[p.tex_slots.x], ref_ip, 0).rgb;
+                        vec3 bg_lin = ((p.phase1_slots.z & 1u) != 0u) ? bg_raw : srgb_to_linear_hdr(bg_raw);
+                        // Biome-calibrated Beer-Lambert absorption coefficients (1/cm).
+                        vec3 sigma = (bid == 11u) ? vec3(0.014, 0.011, 0.016)
+                                   : (bid == 10u) ? vec3(0.012, 0.005, 0.004)
+                                                  : vec3(0.010, 0.006, 0.004);
+                        vec3 T_water = exp(-sigma * thickness);
+                        vec3 scatter_col = (bid == 11u) ? vec3(0.04, 0.06, 0.05)
+                                         : (bid == 10u) ? vec3(0.02, 0.11, 0.14)
+                                                        : vec3(0.03, 0.10, 0.14);
+                        col_lin = mix(col_lin, bg_lin * T_water + scatter_col * (1.0 - T_water), 0.55);
+                    }
+                    // Subtle animated shoreline foam where water meets solid banks/legs.
+                    float foam_edge = (1.0 - smoothstep(2.0, 26.0, thickness)) * smoothstep(0.5, 4.0, thickness);
+                    if (foam_edge > 0.02) {
+                        float fn = (p.shadow_info.w != 0u)
+                            ? sample_vapor_noise(p.shadow_info.w, p.aux_slots.y, vec3(uv * 14.0 + vec2(t_w * 0.06), 0.22))
+                            : 0.5;
+                        float foam = foam_edge * smoothstep(0.32, 0.72, fn) * 0.42;
+                        col_lin = mix(col_lin, vec3(0.75, 0.82, 0.85) * mix(0.45, 1.0, sun_shadow), foam);
                     }
                 }
+            }
+
+            // Physical Schlick Fresnel (F0 = 0.02) blend with half-res Hi-Z SSR + semantic sky/canopy fallback.
+            if (p.ext_slots.y != 0u) {
+                vec4 ssr = texture(sampler2D(u_textures[p.ext_slots.y], u_samplers[p.aux_slots.y]), uv);
+                float ndotv = clamp(dot(N_water, V), 0.0, 1.0);
+                float fresnel = 0.02 + 0.98 * pow(1.0 - ndotv, 5.0);
+                float refl_str = clamp(fresnel * (shallow ? 0.65 : 0.88), 0.04, shallow ? 0.52 : 0.78);
+                col_lin = mix(col_lin, ssr.rgb, refl_str);
+            }
+
+            // Crisp animated sun specular glint on wave crests (gated by sun visibility).
+            if (!is_cave) {
+                vec3 H_w = normalize(L + V);
+                float ndoth = clamp(dot(N_water, H_w), 0.0, 1.0);
+                float glint = pow(ndoth, shallow ? 96.0 : 160.0) * sun_shadow * (shallow ? 0.55 : 0.95);
+                col_lin += vec3(1.0, 0.96, 0.88) * glint;
             }
         }
     }
@@ -661,7 +696,26 @@ void main() {
         }
     }
 
-    // 11. Triangular IGN debanding before RGBA8 store.
+    // 11. Optional MHF_VK_DEBUG_MAT=1 categorical MaterialClass audit overlay.
+    if ((p.ext_slots.w & 64u) != 0u) {
+        ivec2 dm_max = max(textureSize(u_mat_id, 0) - ivec2(1), ivec2(0));
+        uint dm = texelFetch(u_mat_id, clamp(ip, ivec2(0), dm_max), 0).r;
+        vec3 dbg = vec3(0.35);
+        if (dm == 1u)       dbg = vec3(0.10, 0.45, 1.00); // Water (blue)
+        else if (dm == 2u)  dbg = vec3(0.10, 0.90, 0.95); // ShallowWater (cyan)
+        else if (dm == 3u)  dbg = vec3(0.95, 0.98, 1.00); // Snow (white)
+        else if (dm == 4u)  dbg = vec3(0.55, 0.85, 1.00); // Ice (light blue)
+        else if (dm == 5u)  dbg = vec3(0.85, 0.82, 0.35); // Metal (gold)
+        else if (dm == 6u)  dbg = vec3(0.65, 0.40, 0.20); // Wood (brown)
+        else if (dm == 7u)  dbg = vec3(0.20, 0.85, 0.25); // Foliage (green)
+        else if (dm == 8u)  dbg = vec3(1.00, 0.45, 0.05); // Fire (orange)
+        else if (dm == 9u)  dbg = vec3(1.00, 0.10, 0.10); // Lava (red)
+        else if (dm == 10u) dbg = vec3(0.85, 0.20, 0.90); // WeatherSheet (magenta)
+        else if (dm == 11u) dbg = vec3(0.60, 0.60, 0.80); // HazeIgnore (slate)
+        col = mix(col, dbg, dm != 0u ? 0.65 : 0.15);
+    }
+
+    // 12. Triangular IGN debanding before RGBA8 store.
     float dither = (ign(vec2(ip)) + ign(vec2(ip) + vec2(17.0, 31.0)) - 1.0) / 255.0;
     col = clamp(col + vec3(dither), vec3(0.0), vec3(1.0));
     imageStore(u_lit_out, ip, vec4(col, scene.a));

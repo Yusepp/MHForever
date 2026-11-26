@@ -136,6 +136,9 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
         key.src_factor = 1;
         key.dst_factor = 0;
         key.color_mask = 0xFu;
+        key.mat_write = 1;
+    } else if (!key.hdr_3d) {
+        key.mat_write = 1;
     }
     const std::uint64_t h = key.hash();
     if (const auto it = ge_pipes.find(h); it != ge_pipes.end()) return it->second;
@@ -186,20 +189,30 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
     VkPipelineDepthStencilStateCreateInfo dss{};
     dss.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 
-    VkPipelineColorBlendAttachmentState att{};
-    att.blendEnable = key.blend_enable ? VK_TRUE : VK_FALSE;
-    att.srcColorBlendFactor = static_cast<VkBlendFactor>(key.src_factor);
-    att.dstColorBlendFactor = static_cast<VkBlendFactor>(key.dst_factor);
-    att.colorBlendOp = static_cast<VkBlendOp>(key.color_op);
-    att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-    att.alphaBlendOp = VK_BLEND_OP_ADD;
-    att.colorWriteMask = key.color_mask;
+    std::array<VkPipelineColorBlendAttachmentState, 2> atts{};
+    atts[0].blendEnable = key.blend_enable ? VK_TRUE : VK_FALSE;
+    atts[0].srcColorBlendFactor = static_cast<VkBlendFactor>(key.src_factor);
+    atts[0].dstColorBlendFactor = static_cast<VkBlendFactor>(key.dst_factor);
+    atts[0].colorBlendOp = static_cast<VkBlendOp>(key.color_op);
+    atts[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    atts[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    atts[0].alphaBlendOp = VK_BLEND_OP_ADD;
+    atts[0].colorWriteMask = key.color_mask;
+    // Attachment 1 (when hdr_3d == 1): R8_UINT categorical MaterialClass MRT (blending always disabled).
+    atts[1].blendEnable = VK_FALSE;
+    atts[1].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    atts[1].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+    atts[1].colorBlendOp = VK_BLEND_OP_ADD;
+    atts[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    atts[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    atts[1].alphaBlendOp = VK_BLEND_OP_ADD;
+    atts[1].colorWriteMask = key.mat_write ? VK_COLOR_COMPONENT_R_BIT : 0u;
 
+    const std::uint32_t att_count = key.hdr_3d ? 2u : 1u;
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb.attachmentCount = 1u;
-    cb.pAttachments = &att;
+    cb.attachmentCount = att_count;
+    cb.pAttachments = atts.data();
 
     std::vector<VkDynamicState> dyn = {
         VK_DYNAMIC_STATE_VIEWPORT,
@@ -217,11 +230,11 @@ VkPipeline Pipelines::get_ge_pipeline(const Context &ctx, GePipelineKey key) {
     VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, nullptr, 0,
                                         static_cast<std::uint32_t>(dyn.size()), dyn.data()};
 
-    const VkFormat active_color_fmt = key.hdr_3d ? hdr_color_format : color_format;
+    const std::array<VkFormat, 2> color_fmts = {key.hdr_3d ? hdr_color_format : color_format, mat_id_format};
     VkPipelineRenderingCreateInfo rci{};
     rci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rci.colorAttachmentCount = 1u;
-    rci.pColorAttachmentFormats = &active_color_fmt;
+    rci.colorAttachmentCount = att_count;
+    rci.pColorAttachmentFormats = color_fmts.data();
     rci.depthAttachmentFormat = depth_format;
 
     VkGraphicsPipelineCreateInfo pci{};

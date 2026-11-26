@@ -119,7 +119,7 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &storage_layout_) != VK_SUCCESS) return false;
 
-    constexpr std::uint32_t kTotalSets = 12u + static_cast<std::uint32_t>(kSceneSetCount);
+    constexpr std::uint32_t kTotalSets = 17u + static_cast<std::uint32_t>(kSceneSetCount);
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kTotalSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, kTotalSets, 1, &ps};
     if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &storage_pool_) != VK_SUCCESS) return false;
@@ -141,8 +141,13 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     exposure_set_ = sets[9];
     taa_hist_sets_[0] = sets[10];
     taa_hist_sets_[1] = sets[11];
+    hiz_sets_[0] = sets[12];
+    hiz_sets_[1] = sets[13];
+    hiz_sets_[2] = sets[14];
+    hiz_sets_[3] = sets[15];
+    water_ssr_set_ = sets[16];
     for (std::size_t i = 0; i < kSceneSetCount; ++i) {
-        scene_sets_[i] = sets[12 + i];
+        scene_sets_[i] = sets[17 + i];
     }
     scene_set_cursor_ = 0;
 
@@ -151,10 +156,61 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 2, pipe_sets.data(), 1, &pcr};
     if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &pipe_layout_) != VK_SUCCESS) return false;
 
-    // Initialize True 3D Froxel Volumetric Fog (160x90x64 RGBA16F) and build 3-set composite layout (Set 2 = sampler3D).
+    // Initialize True 3D Froxel Volumetric Fog (160x90x64 RGBA16F) and Set 3 (R8_UINT MaterialClass).
     if (!froxel_.init(ctx, bindless_layout)) return false;
-    std::array<VkDescriptorSetLayout, 3> comp_sets = {bindless_layout, storage_layout_, froxel_.sample_set_layout()};
-    VkPipelineLayoutCreateInfo cplci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 3, comp_sets.data(), 1, &pcr};
+
+    {
+        VkDescriptorSetLayoutBinding mb{};
+        mb.binding = 0;
+        mb.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        mb.descriptorCount = 1;
+        mb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        VkDescriptorSetLayoutCreateInfo mdsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &mb};
+        if (vkCreateDescriptorSetLayout(ctx.device, &mdsl, nullptr, &mat_set_layout_) != VK_SUCCESS) return false;
+
+        VkDescriptorPoolSize mps{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, static_cast<std::uint32_t>(kMatSetCount)};
+        VkDescriptorPoolCreateInfo mdpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0,
+                                         static_cast<std::uint32_t>(kMatSetCount), 1, &mps};
+        if (vkCreateDescriptorPool(ctx.device, &mdpci, nullptr, &mat_pool_) != VK_SUCCESS) return false;
+
+        std::array<VkDescriptorSetLayout, kMatSetCount> mdsls{};
+        mdsls.fill(mat_set_layout_);
+        VkDescriptorSetAllocateInfo mdsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, mat_pool_,
+                                          static_cast<std::uint32_t>(kMatSetCount), mdsls.data()};
+        if (vkAllocateDescriptorSets(ctx.device, &mdsai, mat_sets_.data()) != VK_SUCCESS) return false;
+        mat_set_views_.fill(VK_NULL_HANDLE);
+        mat_set_cursor_ = 0;
+
+        // 1x1 R8_UINT fallback texture (cleared to MaterialClass::Unknown = 0) when HDR/MRT is inactive.
+        VkImageCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        fci.imageType = VK_IMAGE_TYPE_2D;
+        fci.format = VK_FORMAT_R8_UINT;
+        fci.extent = {1u, 1u, 1u};
+        fci.mipLevels = 1u;
+        fci.arrayLayers = 1u;
+        fci.samples = VK_SAMPLE_COUNT_1_BIT;
+        fci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        fci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        VmaAllocationCreateInfo fvaci{};
+        fvaci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(ctx.allocator, &fci, &fvaci, &fallback_mat_tex_.image, &fallback_mat_tex_.alloc, nullptr) != VK_SUCCESS) {
+            return false;
+        }
+        VkImageViewCreateInfo fvci{};
+        fvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        fvci.image = fallback_mat_tex_.image;
+        fvci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        fvci.format = VK_FORMAT_R8_UINT;
+        fvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(ctx.device, &fvci, nullptr, &fallback_mat_tex_.view) != VK_SUCCESS) return false;
+        fallback_mat_tex_.w = 1u;
+        fallback_mat_tex_.h = 1u;
+        fallback_mat_cleared_ = false;
+    }
+
+    std::array<VkDescriptorSetLayout, 4> comp_sets = {bindless_layout, storage_layout_, froxel_.sample_set_layout(), mat_set_layout_};
+    VkPipelineLayoutCreateInfo cplci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 4, comp_sets.data(), 1, &pcr};
     if (vkCreatePipelineLayout(ctx.device, &cplci, nullptr, &comp_pipe_layout_) != VK_SUCCESS) return false;
 
     auto make_pipe_layout = [&](const auto &spv, VkPipelineLayout layout, const VkSpecializationInfo *spec) -> VkPipeline {
@@ -186,6 +242,8 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
     exposure_pipe_ = make_pipe(shaders::kExposureCompSpv);
     fxaa_pipe_ = make_pipe(shaders::kFxaaPrehudCompSpv);
     taa_pipe_ = make_pipe(shaders::kTaaResolveCompSpv);
+    hiz_pipe_ = make_pipe(shaders::kHiZGenCompSpv);
+    water_ssr_pipe_ = make_pipe_layout(shaders::kWaterSsrCompSpv, comp_pipe_layout_, nullptr);
 
     // Build fast zone & biome lookup tables from LiveSettings (supports MHFU zones + graceful MHF1 fallback).
     if (live && !live->shadow_zone_names.empty()) {
@@ -224,7 +282,14 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
                 tex_to_zone_[h32] = zidx;
             }
         }
-        if (!tex_to_zone_.empty()) {
+        tex_to_mat_.reserve(live->material_registry.size());
+        for (const auto &e : live->material_registry) {
+            if (e.mat == MaterialClass::Unknown) continue;
+            tex_to_mat_[MatKey{e.data_hash, e.clut_hash}].push_back(MatEntry{e.zone_hint, e.mat});
+        }
+        const char *dump_env = std::getenv("MHF_VK_DUMP_MAT_KEYS");
+        const bool want_dump = (dump_env != nullptr && dump_env[0] == '1');
+        if (!tex_to_zone_.empty() || !tex_to_mat_.empty() || want_dump) {
             zone_keys_ = textures::Pack::keys_only();
         }
     }
@@ -236,6 +301,8 @@ bool LightingPipeline::init(const Context &ctx, VkDescriptorSetLayout bindless_l
 void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     gtao_tex_.destroy(ctx, desc);
     gtao_blur_tex_.destroy(ctx, desc);
+    for (auto &ht : hiz_tex_) ht.destroy(ctx, desc);
+    water_ssr_tex_.destroy(ctx, desc);
     vol_tex_.destroy(ctx, desc);
     bloom_tex_.destroy(ctx, desc);
     bloom_blur_tex_.destroy(ctx, desc);
@@ -273,6 +340,8 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
     kill_pipe(exposure_pipe_);
     kill_pipe(fxaa_pipe_);
     kill_pipe(taa_pipe_);
+    kill_pipe(hiz_pipe_);
+    kill_pipe(water_ssr_pipe_);
     scene_set_views_.fill(VK_NULL_HANDLE);
     if (comp_pipe_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(ctx.device, comp_pipe_layout_, nullptr);
@@ -287,32 +356,119 @@ void LightingPipeline::shutdown(const Context &ctx, BindlessDescriptors &desc) {
         vkDestroyDescriptorPool(ctx.device, storage_pool_, nullptr);
         storage_pool_ = VK_NULL_HANDLE;
     }
+    fallback_mat_tex_.destroy(ctx, desc);
+    fallback_mat_cleared_ = false;
+    mat_set_views_.fill(VK_NULL_HANDLE);
+    if (mat_pool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(ctx.device, mat_pool_, nullptr);
+        mat_pool_ = VK_NULL_HANDLE;
+    }
+    if (mat_set_layout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(ctx.device, mat_set_layout_, nullptr);
+        mat_set_layout_ = VK_NULL_HANDLE;
+    }
     if (storage_layout_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(ctx.device, storage_layout_, nullptr);
         storage_layout_ = VK_NULL_HANDLE;
     }
 }
 
-void LightingPipeline::note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
-                                    const textures::MemoryReader &reader) {
-    if (tex_to_zone_.empty() || !zone_keys_) return;
-    int zone = -1;
-    if (const auto cit = content_hash_to_zone_.find(content_hash); cit != content_hash_to_zone_.end()) {
-        zone = cit->second;
+void LightingPipeline::ensure_fallback_mat(VkCommandBuffer cmd) {
+    if (fallback_mat_cleared_ || fallback_mat_tex_.image == VK_NULL_HANDLE) return;
+    VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    Context::cmd_transition_image(cmd, fallback_mat_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkClearColorValue ccv{};
+    ccv.uint32[0] = 0u;
+    vkCmdClearColorImage(cmd, fallback_mat_tex_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &ccv, 1, &rng);
+    Context::cmd_transition_image(cmd, fallback_mat_tex_.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    fallback_mat_cleared_ = true;
+}
+
+VkDescriptorSet LightingPipeline::get_or_bind_mat_set(const Context &ctx, VkImageView mat_id_view) {
+    VkImageView v = (mat_id_view != VK_NULL_HANDLE) ? mat_id_view : fallback_mat_tex_.view;
+    for (std::size_t i = 0; i < kMatSetCount; ++i) {
+        if (mat_set_views_[i] == v) return mat_sets_[i];
+    }
+    const std::size_t idx = mat_set_cursor_;
+    mat_set_cursor_ = (mat_set_cursor_ + 1u) % kMatSetCount;
+    mat_set_views_[idx] = v;
+    VkDescriptorImageInfo ii{VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, mat_sets_[idx], 0, 0, 1,
+                           VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii, nullptr, nullptr};
+    vkUpdateDescriptorSets(ctx.device, 1, &w, 0, nullptr);
+    return mat_sets_[idx];
+}
+
+MaterialClass LightingPipeline::note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
+                                             const textures::MemoryReader &reader, bool is_blended) {
+    if (!zone_keys_) return MaterialClass::Unknown;
+    CachedTexSem sem{};
+    if (const auto cit = content_hash_sem_.find(content_hash); cit != content_hash_sem_.end()) {
+        sem = cit->second;
     } else {
         textures::Key key{};
         std::uint32_t cw = facts.width, ch = facts.height;
         if (zone_keys_->key_of(facts, reader, key, cw, ch)) {
+            sem.has_key = true;
+            sem.data_hash = key.data;
+            sem.clut_hash = static_cast<std::uint32_t>(key.cache >> 32u);
             if (const auto zit = tex_to_zone_.find(key.data); zit != tex_to_zone_.end()) {
-                zone = zit->second;
+                sem.zone = zit->second;
             }
         }
-        if (content_hash_to_zone_.size() > 16384u) content_hash_to_zone_.clear();
-        content_hash_to_zone_.emplace(content_hash, zone);
+        if (content_hash_sem_.size() > 16384u) content_hash_sem_.clear();
+        content_hash_sem_.emplace(content_hash, sem);
     }
-    if (zone >= 0 && static_cast<std::size_t>(zone) < zone_votes_.size()) {
-        ++zone_votes_[static_cast<std::size_t>(zone)];
+    if (sem.zone >= 0 && static_cast<std::size_t>(sem.zone) < zone_votes_.size()) {
+        ++zone_votes_[static_cast<std::size_t>(sem.zone)];
     }
+
+    MaterialClass mat = MaterialClass::Unknown;
+    if (sem.has_key && !tex_to_mat_.empty()) {
+        auto resolve_bucket = [&](const std::vector<MatEntry> &entries) -> MaterialClass {
+            MaterialClass fallback = MaterialClass::Unknown;
+            for (const auto &e : entries) {
+                if (e.zone_hint >= 0 && e.zone_hint == active_zone_) return e.mat;
+                if (e.zone_hint < 0) fallback = e.mat;
+            }
+            return fallback;
+        };
+        if (sem.clut_hash != 0u) {
+            if (const auto it = tex_to_mat_.find(MatKey{sem.data_hash, sem.clut_hash}); it != tex_to_mat_.end()) {
+                mat = resolve_bucket(it->second);
+            }
+        }
+        if (mat == MaterialClass::Unknown) {
+            if (const auto it = tex_to_mat_.find(MatKey{sem.data_hash, 0u}); it != tex_to_mat_.end()) {
+                mat = resolve_bucket(it->second);
+            }
+        }
+    }
+
+    static const bool s_dump_mat = [] {
+        const char *v = std::getenv("MHF_VK_DUMP_MAT_KEYS");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (s_dump_mat && sem.has_key) {
+        const std::uint64_t log_k = (static_cast<std::uint64_t>(sem.clut_hash) << 32u) | sem.data_hash;
+        if (logged_mat_keys_.emplace(log_k, 1u).second) {
+            const char *zname = (live_ && active_zone_ >= 0 && static_cast<std::size_t>(active_zone_) < live_->shadow_zone_names.size())
+                                    ? live_->shadow_zone_names[active_zone_].c_str()
+                                    : "unknown";
+            std::fprintf(stderr,
+                         "[vk][mat-key] zone=%d(%s) data=0x%08x clut=0x%08x %ux%u blended=%u mat=%u\n",
+                         active_zone_, zname, sem.data_hash, sem.clut_hash,
+                         static_cast<unsigned>(facts.width), static_cast<unsigned>(facts.height),
+                         is_blended ? 1u : 0u, static_cast<unsigned>(mat));
+        }
+    }
+    return mat;
 }
 
 void LightingPipeline::end_frame_zone_vote() noexcept {
@@ -409,8 +565,18 @@ bool LightingPipeline::ensure_targets(const Context &ctx, BindlessDescriptors &d
         return t.slot != 0;
     };
 
+    const std::uint32_t ew = std::max(qw / 2u, 1u);
+    const std::uint32_t eh = std::max(qh / 2u, 1u);
+    const std::uint32_t sw = std::max(ew / 2u, 1u);
+    const std::uint32_t sh = std::max(eh / 2u, 1u);
+
     return make_target(gtao_tex_, hw, hh, VK_FORMAT_R8G8B8A8_UNORM, gtao_set_) &&
            make_target(gtao_blur_tex_, hw, hh, VK_FORMAT_R8G8B8A8_UNORM, gtao_blur_set_) &&
+           make_target(hiz_tex_[0], hw, hh, VK_FORMAT_R32_SFLOAT, hiz_sets_[0]) &&
+           make_target(hiz_tex_[1], qw, qh, VK_FORMAT_R32_SFLOAT, hiz_sets_[1]) &&
+           make_target(hiz_tex_[2], ew, eh, VK_FORMAT_R32_SFLOAT, hiz_sets_[2]) &&
+           make_target(hiz_tex_[3], sw, sh, VK_FORMAT_R32_SFLOAT, hiz_sets_[3]) &&
+           make_target(water_ssr_tex_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, water_ssr_set_) &&
            make_target(vol_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, vol_set_) &&
            make_target(bloom_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, bloom_set_) &&
            make_target(bloom_blur_tex_, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, bloom_blur_set_) &&
@@ -764,14 +930,17 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                 bool run_fxaa, std::uint32_t hdr_input_slot, std::uint32_t gbuf_normal_slot,
                                 VkDeviceAddress lights_bda, std::uint32_t light_count,
                                 std::uint32_t shadow_map_slot, const float *shadow_from_view,
-                                std::uint32_t rt_shadow_slot, const float *view_mat, float elapsed_sec) {
+                                std::uint32_t rt_shadow_slot, const float *view_mat, float elapsed_sec,
+                                VkImageView mat_id_view, std::uint32_t soft_depth_slot, bool has_water_draws) {
     if (!ready() || !params_cpu_ptr || params_bda == 0 || scene_depth_slot == 0 || scene_color_slot == 0) return false;
     if (!ensure_targets(ctx, desc, scene_w, scene_h)) return false;
     ensure_noise3d(cmd, ctx, desc);
+    ensure_fallback_mat(cmd);
     froxel_.ensure_fallback(cmd);
     if (exposure_reset_) froxel_.reset_history();
 
     VkDescriptorSet scene_set = get_or_bind_scene_set(ctx, scene_color_view);
+    VkDescriptorSet mat_set = get_or_bind_mat_set(ctx, mat_id_view);
 
     const std::uint32_t mask = live_ ? live_->vulkan_effects_mask.load(std::memory_order_relaxed) : LiveSettings::kVkEffectAll;
     const bool want_ao      = (mask & LiveSettings::kVkEffectAo) != 0u;
@@ -783,6 +952,7 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
     const bool want_fxaa    = run_fxaa;
     const bool want_vig     = (mask & LiveSettings::kVkEffectVignette) != 0u;
     const bool want_froxel  = (mask & LiveSettings::kVkEffectFroxelFog) != 0u;
+    const bool want_water   = (mask & LiveSettings::kVkEffectWaterReflections) != 0u;
 
     const bool need_gtao_pass  = want_ao || want_contact || want_spec || want_ssgi ||
                                  (mask & LiveSettings::kVkEffectSunShadows) != 0u ||
@@ -790,7 +960,35 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
                                  (mask & LiveSettings::kVkEffectRayTracing) != 0u;
     const bool need_bloom_src  = want_bloom;
     const bool use_hdr_src     = (hdr_input_slot != 0u);
+    const bool run_water_ssr   = want_water && has_water_draws && use_hdr_src &&
+                                 hiz_pipe_ != VK_NULL_HANDLE && water_ssr_pipe_ != VK_NULL_HANDLE;
     const std::uint32_t src_color_slot = use_hdr_src ? hdr_input_slot : scene_color_slot;
+
+    // Update analytic interactive water ripple ring buffer from area-space wake actors (0 VRAM, continuous at 120/180 Hz).
+    if (in.fog_camera.ground_area != ripple_area_) {
+        ripple_area_ = in.fog_camera.ground_area;
+        for (auto &r : ripples_) r.birth_sec = -100.0f;
+        for (auto &pa : prev_ripple_actors_) pa.valid = false;
+    }
+    if (in.fog_camera.wake_actor_count > 0u) {
+        const std::uint32_t n_act = std::min<std::uint32_t>(in.fog_camera.wake_actor_count,
+                                                            static_cast<std::uint32_t>(SceneCamera::kMaxWakeActors));
+        for (std::uint32_t i = 0u; i < n_act; ++i) {
+            const auto &wa = in.fog_camera.wake_actors[i];
+            auto &pa = prev_ripple_actors_[i];
+            if (!pa.valid) {
+                pa = {wa.x, wa.z, true};
+            } else {
+                const float dx = wa.x - pa.x;
+                const float dz = wa.z - pa.z;
+                if (dx * dx + dz * dz >= 38.0f * 38.0f) {
+                    ripples_[ripple_cursor_] = RippleRing{wa.x, wa.z, elapsed_sec, wa.radius};
+                    ripple_cursor_ = (ripple_cursor_ + 1u) % kMaxRipples;
+                    pa = {wa.x, wa.z, true};
+                }
+            }
+        }
+    }
 
     LightingComputeParams base{};
     fill_biome_params(base, in);
@@ -805,8 +1003,13 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         base.spec_contact[0] = 0.0f;
         base.spec_contact[3] = 0.0f;
     }
+    static const bool s_debug_mat = [] {
+        const char *v = std::getenv("MHF_VK_DEBUG_MAT");
+        return v != nullptr && v[0] == '1';
+    }();
     base.ext_slots[3] = (active_is_cave_ ? 1u : 0u) | (want_vig ? 2u : 0u) | (want_fxaa ? 4u : 0u) |
-                        (want_froxel ? 8u : 0u) | (in.has_psp_fog ? 16u : 0u);
+                        (want_froxel ? 8u : 0u) | (in.has_psp_fog ? 16u : 0u) |
+                        (s_debug_mat ? 64u : 0u) | (want_water ? 128u : 0u);
     base.vz_and_size[2] = static_cast<float>(scene_w);
     base.vz_and_size[3] = static_cast<float>(scene_h);
     base.tex_slots[0] = src_color_slot;
@@ -1105,11 +1308,89 @@ bool LightingPipeline::dispatch(VkCommandBuffer cmd, const Context &ctx, Bindles
         queue_to_read(ssgi_blur_tex_.image);
     }
 
+    // Step 3: 4-mip Min-Z Hi-Z Pyramid + Half-Res Water SSR + Semantic Sky/Canopy Fallback
+    //         (runs ONLY when water draws were rendered this frame; 0.00ms in dry areas!).
+    if (run_water_ssr) {
+        auto *hiz_cpu = reinterpret_cast<HiZComputeParams *>(&slots[16]);
+        const VkDeviceAddress hiz_bda = params_bda + 16u * sizeof(LightingComputeParams);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiz_pipe_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &bindless_set, 0, nullptr);
+        std::uint32_t prev_slot = scene_depth_slot;
+        for (int m = 0; m < 4; ++m) {
+            queue_to_general(hiz_tex_[static_cast<std::size_t>(m)].image);
+            flush_barriers();
+            hiz_cpu[m].info[0] = prev_slot;
+            hiz_cpu[m].info[1] = hiz_tex_[static_cast<std::size_t>(m)].w;
+            hiz_cpu[m].info[2] = hiz_tex_[static_cast<std::size_t>(m)].h;
+            hiz_cpu[m].info[3] = 0u;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 1, 1,
+                                    &hiz_sets_[static_cast<std::size_t>(m)], 0, nullptr);
+            const VkDeviceAddress addr = hiz_bda + static_cast<std::size_t>(m) * sizeof(HiZComputeParams);
+            vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(addr), &addr);
+            vkCmdDispatch(cmd, (hiz_tex_[static_cast<std::size_t>(m)].w + 7u) / 8u,
+                          (hiz_tex_[static_cast<std::size_t>(m)].h + 7u) / 8u, 1u);
+            queue_to_read(hiz_tex_[static_cast<std::size_t>(m)].image);
+            prev_slot = hiz_tex_[static_cast<std::size_t>(m)].slot;
+        }
+        queue_to_general(water_ssr_tex_.image);
+        flush_barriers();
+
+        WaterSsrParams wp{};
+        std::memcpy(wp.proj_info, base.proj_info, sizeof(wp.proj_info));
+        wp.vz_and_size[0] = base.vz_and_size[0];
+        wp.vz_and_size[1] = base.vz_and_size[1];
+        wp.vz_and_size[2] = static_cast<float>(water_ssr_tex_.w);
+        wp.vz_and_size[3] = static_cast<float>(water_ssr_tex_.h);
+        std::memcpy(wp.inv_view, base.inv_view, sizeof(wp.inv_view));
+        std::memcpy(wp.sun_dir_view, base.sun_dir_view, sizeof(wp.sun_dir_view));
+        wp.world_up_view[0] = base.world_up_view[0];
+        wp.world_up_view[1] = base.world_up_view[1];
+        wp.world_up_view[2] = base.world_up_view[2];
+        wp.world_up_view[3] = elapsed_sec;
+        auto srgb_to_lin = [](float v) { return std::pow(std::clamp(v, 0.0f, 1.0f), 2.2f); };
+        wp.fog_color[0] = srgb_to_lin(base.fog_color[0]);
+        wp.fog_color[1] = srgb_to_lin(base.fog_color[1]);
+        wp.fog_color[2] = srgb_to_lin(base.fog_color[2]);
+        wp.fog_color[3] = static_cast<float>(base.ext_slots[2]);
+        wp.slots0[0] = src_color_slot;
+        wp.slots0[1] = scene_depth_slot;
+        wp.slots0[2] = noise3d_tex_.slot;
+        wp.slots0[3] = base.aux_slots[1];
+        wp.hiz_slots[0] = hiz_tex_[0].slot;
+        wp.hiz_slots[1] = hiz_tex_[1].slot;
+        wp.hiz_slots[2] = hiz_tex_[2].slot;
+        wp.hiz_slots[3] = hiz_tex_[3].slot;
+        wp.extra_slots[0] = rt_shadow_slot;
+        wp.extra_slots[1] = need_gtao_pass ? gtao_blur_tex_.slot : 0u;
+        wp.extra_slots[2] = static_cast<std::uint32_t>(kMaxRipples);
+        wp.extra_slots[3] = use_hdr_src ? 1u : 0u;
+        for (std::size_t i = 0; i < kMaxRipples; ++i) {
+            wp.ripples[i][0] = ripples_[i].x;
+            wp.ripples[i][1] = ripples_[i].z;
+            wp.ripples[i][2] = elapsed_sec - ripples_[i].birth_sec;
+            wp.ripples[i][3] = ripples_[i].radius;
+        }
+        std::memcpy(&slots[14], &wp, sizeof(wp));
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, water_ssr_pipe_);
+        const std::array<VkDescriptorSet, 4> wsets = {
+            bindless_set, water_ssr_set_, froxel_.fallback_sample_set(), mat_set
+        };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, comp_pipe_layout_, 0, 4, wsets.data(), 0, nullptr);
+        const VkDeviceAddress waddr = params_bda + 14u * sizeof(LightingComputeParams);
+        vkCmdPushConstants(cmd, comp_pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(waddr), &waddr);
+        vkCmdDispatch(cmd, (water_ssr_tex_.w + 7u) / 8u, (water_ssr_tex_.h + 7u) / 8u, 1u);
+        queue_to_read(water_ssr_tex_.image);
+
+        slots[kPassComposite].ext_slots[1] = water_ssr_tex_.slot;
+        slots[kPassComposite].phase1_slots[0] = soft_depth_slot;
+    }
+
     auto run_comp = [&](VkPipeline pipe, VkDescriptorSet out_set) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
         const VkDescriptorSet froxel_set = froxel_dispatched ? froxel_.sample_set() : froxel_.fallback_sample_set();
-        const std::array<VkDescriptorSet, 3> sets = {bindless_set, out_set, froxel_set};
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, comp_pipe_layout_, 0, 3, sets.data(), 0, nullptr);
+        const std::array<VkDescriptorSet, 4> sets = {bindless_set, out_set, froxel_set, mat_set};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, comp_pipe_layout_, 0, 4, sets.data(), 0, nullptr);
         const VkDeviceAddress addr = params_bda + kPassComposite * sizeof(LightingComputeParams);
         vkCmdPushConstants(cmd, comp_pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(addr), &addr);
         vkCmdDispatch(cmd, (scene_w + 7u) / 8u, (scene_h + 7u) / 8u, 1u);

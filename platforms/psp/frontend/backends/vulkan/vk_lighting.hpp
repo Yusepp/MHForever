@@ -91,6 +91,25 @@ struct alignas(16) TaaComputeParams {
 };
 static_assert(sizeof(TaaComputeParams) == 128);
 
+struct alignas(16) HiZComputeParams {
+    std::uint32_t info[4]{}; // x = src_slot, y = dst_w, z = dst_h, w = 0
+};
+static_assert(sizeof(HiZComputeParams) == 16);
+
+struct alignas(16) WaterSsrParams {
+    float proj_info[4]{};
+    float vz_and_size[4]{};
+    float inv_view[16]{};
+    float sun_dir_view[4]{};
+    float world_up_view[4]{};
+    float fog_color[4]{};
+    std::uint32_t slots0[4]{};      // x = color_slot, y = depth_slot, z = noise3d_slot, w = linear_sampler
+    std::uint32_t hiz_slots[4]{};   // x..w = mip0..mip3
+    std::uint32_t extra_slots[4]{}; // x = rt_shadow_slot, y = gtao_slot, z = ripple_count, w = flags (bit0 = hdr)
+    float ripples[24][4]{};         // x = world_x, y = world_z, z = age_sec, w = radius_cm
+};
+static_assert(sizeof(WaterSsrParams) == 576);
+
 struct LightingFrameInput {
     SceneCamera fog_camera{};
     static constexpr std::size_t kMaxViewLights = 64;
@@ -126,15 +145,15 @@ public:
                fxaa_pipe_ != VK_NULL_HANDLE && taa_pipe_ != VK_NULL_HANDLE;
     }
 
-    // Zone detection: resolves PPSSPP data hash once per unique content hash `content_hash` (cached O(1)).
-    void note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
-                      const textures::MemoryReader &reader);
+    // Zone & material detection: resolves PPSSPP (data, clut) key once per unique `content_hash` (cached O(1)).
+    MaterialClass note_texture(std::uint64_t content_hash, const textures::TextureFacts &facts,
+                               const textures::MemoryReader &reader, bool is_blended = false);
     void end_frame_zone_vote() noexcept;
 
     // Runs enabled lighting/atmosphere compute passes on `scene_color` using `kParamSlotsPerDispatch`
     // contiguous `LightingComputeParams` slots starting at `params_cpu_ptr` / `params_bda`.
-    // When `hdr_input_slot != 0`, reads 3D linear HDR color from `hdr_input_slot` and optional smooth
-    // G-buffer normals from `gbuf_normal_slot`, tonemapping into `scene_color` (left in VK_IMAGE_LAYOUT_GENERAL).
+    // When `hdr_input_slot != 0`, reads 3D linear HDR color from `hdr_input_slot` and optional R8_UINT
+    // MaterialClass IDs from `mat_id_view`, tonemapping into `scene_color` (left in VK_IMAGE_LAYOUT_GENERAL).
     bool dispatch(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc,
                   VkImage scene_color, VkImageView scene_color_view, std::uint32_t scene_color_slot,
                   std::uint32_t scene_depth_slot, std::uint32_t scene_w, std::uint32_t scene_h,
@@ -144,7 +163,8 @@ public:
                   VkDeviceAddress lights_bda = 0, std::uint32_t light_count = 0,
                   std::uint32_t shadow_map_slot = 0, const float *shadow_from_view = nullptr,
                   std::uint32_t rt_shadow_slot = 0, const float *view_mat = nullptr,
-                  float elapsed_sec = 0.0f);
+                  float elapsed_sec = 0.0f, VkImageView mat_id_view = VK_NULL_HANDLE,
+                  std::uint32_t soft_depth_slot = 0, bool has_water_draws = false);
 
     // Standalone pre-HUD FXAA 3.11 pass (used when Enhanced Lighting is OFF and AA Mode == FXAA).
     // Expects `scene_color` in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; leaves it in VK_IMAGE_LAYOUT_GENERAL.
@@ -175,18 +195,22 @@ public:
         for (auto &v : scene_set_views_) {
             if (v == view) v = VK_NULL_HANDLE;
         }
+        for (auto &v : mat_set_views_) {
+            if (v == view) v = VK_NULL_HANDLE;
+        }
     }
 
     // Number of LightingComputeParams structs needed per dispatch
-    // (gtao, vol, bloom, ssgi, gtao_denoise, bloom_blur, ssgi_blur, flash, composite, fxaa, exposure,
-    //  froxel_inject, froxel_integ, froxel_fluid).
-    static constexpr std::size_t kParamSlotsPerDispatch = 14;
+    // (11 lighting passes + 3 froxel passes + 2 slots for WaterSsrParams + 1 slot for 4x HiZComputeParams).
+    static constexpr std::size_t kParamSlotsPerDispatch = 18;
 
 private:
     bool ensure_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
     bool ensure_noise3d(VkCommandBuffer cmd, const Context &ctx, BindlessDescriptors &desc);
     bool ensure_taa_targets(const Context &ctx, BindlessDescriptors &desc, std::uint32_t full_w, std::uint32_t full_h);
     VkDescriptorSet get_or_bind_scene_set(const Context &ctx, VkImageView scene_color_view);
+    VkDescriptorSet get_or_bind_mat_set(const Context &ctx, VkImageView mat_id_view);
+    void ensure_fallback_mat(VkCommandBuffer cmd);
     void fill_biome_params(LightingComputeParams &p, const LightingFrameInput &in) noexcept;
 
     struct Target2D {
@@ -213,6 +237,8 @@ private:
     VkDescriptorSet lit_tmp_set_ = VK_NULL_HANDLE;
     VkDescriptorSet exposure_set_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, 2> taa_hist_sets_{};
+    std::array<VkDescriptorSet, 4> hiz_sets_{};
+    VkDescriptorSet water_ssr_set_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kSceneSetCount> scene_sets_{};
     std::array<VkImageView, kSceneSetCount> scene_set_views_{};
     std::size_t scene_set_cursor_ = 0;
@@ -232,9 +258,13 @@ private:
     VkPipeline exposure_pipe_ = VK_NULL_HANDLE;
     VkPipeline fxaa_pipe_ = VK_NULL_HANDLE;
     VkPipeline taa_pipe_ = VK_NULL_HANDLE;
+    VkPipeline hiz_pipe_ = VK_NULL_HANDLE;
+    VkPipeline water_ssr_pipe_ = VK_NULL_HANDLE;
 
     Target2D gtao_tex_;       // half-res RGBA8 (ao, nx, ny, contact_shadow)
     Target2D gtao_blur_tex_;  // half-res RGBA8 (denoised ao, crisp nx, ny, denoised contact_shadow)
+    std::array<Target2D, 4> hiz_tex_{}; // 4-mip Min-Z pyramid (half, quarter, eighth, sixteenth R32F)
+    Target2D water_ssr_tex_;  // half-res RGBA16F (water reflection rgb + hit confidence a)
     Target2D vol_tex_;        // quarter-res RGBA16F (in_scatter.rgb, transmittance)
     Target2D bloom_tex_;      // quarter-res RGBA16F (Karis-extracted emissive bloom.rgb)
     Target2D bloom_blur_tex_; // quarter-res RGBA16F (Kawase-smoothed bloom.rgb)
@@ -265,6 +295,56 @@ private:
     std::vector<ZoneInfo> zones_;
     std::unordered_map<std::uint32_t, int> tex_to_zone_;
     std::unordered_map<std::uint64_t, int> content_hash_to_zone_;
+    // Clean-room MaterialClass lookup keyed by (data_hash, clut_hash) + optional zone_hint.
+    struct MatKey {
+        std::uint32_t data = 0u;
+        std::uint32_t clut = 0u;
+        bool operator==(const MatKey &) const = default;
+    };
+    struct MatKeyHash {
+        std::size_t operator()(const MatKey &k) const noexcept {
+            return (static_cast<std::size_t>(k.data) << 1u) ^ (static_cast<std::size_t>(k.clut) * 0x9E3779B9u);
+        }
+    };
+    struct MatEntry {
+        int zone_hint = -1;
+        MaterialClass mat = MaterialClass::Unknown;
+    };
+    std::unordered_map<MatKey, std::vector<MatEntry>, MatKeyHash> tex_to_mat_;
+    struct CachedTexSem {
+        int zone = -1;
+        std::uint32_t data_hash = 0u;
+        std::uint32_t clut_hash = 0u;
+        bool has_key = false;
+    };
+    std::unordered_map<std::uint64_t, CachedTexSem> content_hash_sem_;
+    std::unordered_map<std::uint64_t, std::uint8_t> logged_mat_keys_;
+    // Dedicated Set 3 for R8_UINT MaterialClass surface attachment (utexture2D u_mat_id).
+    static constexpr std::size_t kMatSetCount = 4;
+    VkDescriptorSetLayout mat_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool mat_pool_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kMatSetCount> mat_sets_{};
+    std::array<VkImageView, kMatSetCount> mat_set_views_{};
+    std::size_t mat_set_cursor_ = 0;
+    Target2D fallback_mat_tex_;
+    bool fallback_mat_cleared_ = false;
+    // Analytic interactive water ripple ring buffer (continuous at 120/180 Hz, 0 VRAM).
+    struct RippleRing {
+        float x = 0.0f;
+        float z = 0.0f;
+        float birth_sec = -100.0f;
+        float radius = 80.0f;
+    };
+    struct PrevRippleActor {
+        float x = 0.0f;
+        float z = 0.0f;
+        bool valid = false;
+    };
+    static constexpr std::size_t kMaxRipples = 24u;
+    std::array<RippleRing, kMaxRipples> ripples_{};
+    std::size_t ripple_cursor_ = 0u;
+    std::array<PrevRippleActor, SceneCamera::kMaxWakeActors> prev_ripple_actors_{};
+    std::uint16_t ripple_area_ = 0u;
     std::unique_ptr<textures::Pack> zone_keys_;
     std::vector<std::uint32_t> zone_votes_;
     int active_zone_ = -1;

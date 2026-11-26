@@ -46,6 +46,7 @@ layout(location = 4) in vec3 v_normal;
 layout(location = 5) in float v_has_normal;
 
 layout(location = 0) out vec4 o_color;
+layout(location = 1) out uint o_mat_id;
 
 bool alpha_compare(uint f, uint a, uint b) {
     if (f == 0u) return false;
@@ -60,8 +61,10 @@ bool alpha_compare(uint f, uint a, uint b) {
 
 void main() {
     vec4 c = v_color;
+    uint mat_id = 0u;
     if (kSpecClear == 0u) {
         DrawParams p = pc.params.items[pc.draw_idx];
+        mat_id = p.pbr_slots.w & 0xFFu;
         uint bits = p.tex_func_bits;
         if (kSpecTextured != 0u && ((bits & 0x400u) != 0u)) {
             // Quest-clear 4x killcam subtle peripheral cinematic bokeh (center subject stays razor-sharp, 0ms in combat!).
@@ -214,4 +217,5 @@ void main() {
     } else {
         o_color = clamp(c, 0.0, 1.0);
     }
+    o_mat_id = mat_id;
 }

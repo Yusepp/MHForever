@@ -18,6 +18,32 @@ struct SemanticPointLight {
     float intensity{1.0f};
 };
 
+// Deterministic visible-surface semantic classes written to the dedicated R8_UINT MRT attachment.
+// 0 = Unknown (cleared state / conservative fallback; never color-guessed at runtime).
+enum class MaterialClass : std::uint8_t {
+    Unknown      = 0,
+    Water        = 1,  // Deep/flowing rivers, lakes, ocean beaches (translucent surface)
+    ShallowWater = 2,  // Swamp puddles, wet shore mud (opaque/thin water film)
+    Snow         = 3,  // Snowpack (restrained AO, sunlit micro-sparkle in Step 4)
+    Ice          = 4,  // Ice caves, glaciers
+    Metal        = 5,  // Metallic armor, weapons, ironwork
+    Wood         = 6,  // Timber, roofs, fences, bridges
+    Foliage      = 7,  // Leaves, grass, bushes (attenuated AO, backlit SSS in Step 4)
+    Fire         = 8,  // Campfires, torches, fireballs (no diffuse AO)
+    Lava         = 9,  // Molten magma (no diffuse AO)
+    WeatherSheet = 10, // 2D camera rain/snow/sandstorm sheets (non-surface)
+    HazeIgnore   = 11, // Sky/mist/haze cards (non-surface, no diffuse AO)
+};
+
+// Clean-room texture-identity -> MaterialClass registry entry supplied by the game host.
+// Uses composite (data_hash, clut_hash) + optional zone_hint (-1 = any zone) to prevent CLUT/context collisions.
+struct MaterialRegistryEntry {
+    std::uint32_t data_hash = 0u;
+    std::uint32_t clut_hash = 0u; // 0 = match any CLUT (non-indexed or palette-invariant)
+    int zone_hint = -1;           // -1 = any zone; >= 0 = specific index into shadow_zone_names
+    MaterialClass mat = MaterialClass::Unknown;
+};
+
 struct SceneWakeActor {
     float x = 0.0f;
     float foot_y = 0.0f;
