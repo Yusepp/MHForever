@@ -417,7 +417,7 @@ MaterialClass LightingPipeline::note_texture(std::uint64_t content_hash, const t
         if (zone_keys_->key_of(facts, reader, key, cw, ch)) {
             sem.has_key = true;
             sem.data_hash = key.data;
-            sem.clut_hash = static_cast<std::uint32_t>(key.cache >> 32u);
+            sem.clut_hash = static_cast<std::uint32_t>(key.cache & 0xFFFFFFFFull);
             if (const auto zit = tex_to_zone_.find(key.data); zit != tex_to_zone_.end()) {
                 sem.zone = zit->second;
             }
